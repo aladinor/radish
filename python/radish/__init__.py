@@ -15,7 +15,9 @@ from radish._radish import (
     scan_cfradial1,
     read_nexrad,
     scan_nexrad,
+    read_nexrad_chunks,
 )
+from radish.backends.xarray_backend import open_nexrad_chunks_datatree
 
 __version__ = "0.1.0"
 
@@ -30,4 +32,6 @@ __all__ = [
     "scan_cfradial1",
     "read_nexrad",
     "scan_nexrad",
+    "read_nexrad_chunks",
+    "open_nexrad_chunks_datatree",
 ]

@@ -181,7 +181,15 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         path = os.fspath(filename_or_obj)
         fmt = _detect_format(filename_or_obj) or "cfradial1"
         volume = _read_volume(path, fmt)
+        return self._volume_to_datatree(volume, fmt)
 
+    def _volume_to_datatree(self, volume, fmt: str) -> "DataTree":
+        """Build a DataTree from an already-decoded `VolumeData`.
+
+        Factored out so chunk-based readers (`open_nexrad_chunks_datatree`)
+        can hit the same dim/coord/attr emission path used by
+        `open_datatree`.
+        """
         datasets = {"/": self._create_root_dataset(volume.metadata, fmt)}
         for i in range(volume.num_sweeps):
             sweep = volume.get_sweep(i)
@@ -387,3 +395,46 @@ class RadishBackendEntrypoint(BackendEntrypoint):
 
 # For backwards compatibility
 RadishBackend = RadishBackendEntrypoint
+
+
+def open_nexrad_chunks_datatree(chunks: Iterable[Any]) -> "DataTree":
+    """Open a NEXRAD Level 2 volume as a DataTree from a sequence of chunks.
+
+    Mirrors xradar's ``open_nexradlevel2_datatree(list_of_bytes)`` for the
+    live ``unidata-nexrad-level2-chunks`` S3 stream. Each entry in
+    ``chunks`` may be:
+
+    * ``bytes`` — already-read chunk contents, or
+    * a path-like (``str`` / ``os.PathLike``) — read from disk eagerly.
+
+    Chunks must be in scan order (``S`` first, then ``I00..In``, then
+    ``E``). Concatenating them reconstitutes a complete Archive II buffer.
+    A truncated volume (no ``E`` or only the first few ``I`` chunks)
+    decodes whatever rays survive — incomplete trailing sweeps come
+    through with fewer rays than the VCP would normally produce.
+
+    Example
+    -------
+    >>> import fsspec, radish
+    >>> fs = fsspec.filesystem("s3", anon=True)
+    >>> paths = sorted(fs.ls("unidata-nexrad-level2-chunks/KABR/903/"))
+    >>> chunks = [fs.open(p, "rb").read() for p in paths]
+    >>> dt = radish.open_nexrad_chunks_datatree(chunks)
+    """
+    if not DATATREE_AVAILABLE:
+        raise ImportError(
+            "DataTree support requires xarray>=2024.10 or the legacy "
+            "datatree package. Install with: pip install -U xarray"
+        )
+    from radish import read_nexrad_chunks
+
+    materialized: list[bytes] = []
+    for c in chunks:
+        if isinstance(c, (bytes, bytearray, memoryview)):
+            materialized.append(bytes(c))
+        else:
+            with open(os.fspath(c), "rb") as f:
+                materialized.append(f.read())
+
+    volume = read_nexrad_chunks(materialized)
+    return RadishBackendEntrypoint()._volume_to_datatree(volume, "nexrad")
