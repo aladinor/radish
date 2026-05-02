@@ -599,6 +599,21 @@ fn read_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeData> {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD chunks: {e}")))
 }
 
+/// Read a NEXRAD Level 2 volume from a single in-memory byte buffer.
+///
+/// Convenience entry point for the common "fetch from S3 / HTTP / fsspec
+/// then decode" workflow — equivalent to xradar's
+/// `xradar.io.open_nexradlevel2_datatree(data)` when called with one
+/// `bytes` object. The upstream decoder transparently inflates gzip-
+/// compressed older `*.gz` archive volumes.
+#[pyfunction]
+fn read_nexrad_bytes(data: Vec<u8>) -> PyResult<PyVolumeData> {
+    NexradBackend::new()
+        .read_bytes_volume(data)
+        .map(PyVolumeData::from_inner)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD bytes: {e}")))
+}
+
 #[pymodule]
 fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVolumeData>()?;
@@ -612,5 +627,6 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_nexrad, m)?)?;
     m.add_function(wrap_pyfunction!(scan_nexrad, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad_chunks, m)?)?;
+    m.add_function(wrap_pyfunction!(read_nexrad_bytes, m)?)?;
     Ok(())
 }

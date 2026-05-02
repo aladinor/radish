@@ -438,3 +438,31 @@ def open_nexrad_chunks_datatree(chunks: Iterable[Any]) -> "DataTree":
 
     volume = read_nexrad_chunks(materialized)
     return RadishBackendEntrypoint()._volume_to_datatree(volume, "nexrad")
+
+
+def open_nexrad_bytes_datatree(data: bytes) -> "DataTree":
+    """Open a NEXRAD Level 2 volume as a DataTree from a single in-memory
+    byte buffer.
+
+    Convenience wrapper for the common "fetch the whole file from S3 /
+    HTTP / fsspec, then decode" workflow — equivalent to xradar's
+    ``xradar.io.open_nexradlevel2_datatree(data)``. Older `*.gz` archive
+    volumes (gzip-compressed) are inflated transparently by the upstream
+    decoder.
+
+    Example
+    -------
+    >>> import fsspec, radish
+    >>> filepath = 's3://unidata-nexrad-level2/2011/05/20/KVNX/KVNX20110520_000023_V06.gz'
+    >>> stream = fsspec.open(filepath, mode='rb', compression='gzip', anon=True).open()
+    >>> dt = radish.open_nexrad_bytes_datatree(stream.read())
+    """
+    if not DATATREE_AVAILABLE:
+        raise ImportError(
+            "DataTree support requires xarray>=2024.10 or the legacy "
+            "datatree package. Install with: pip install -U xarray"
+        )
+    from radish import read_nexrad_bytes
+
+    volume = read_nexrad_bytes(bytes(data))
+    return RadishBackendEntrypoint()._volume_to_datatree(volume, "nexrad")

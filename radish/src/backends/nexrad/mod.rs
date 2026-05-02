@@ -107,6 +107,18 @@ impl NexradBackend {
         let (scan, msg2) = decode_bytes(combined)?;
         adapter::convert_scan(scan, msg2, Path::new("<chunks>"))
     }
+
+    /// Decode a NEXRAD Level 2 volume from a single in-memory byte buffer.
+    ///
+    /// Convenience entry point for the common case of "fetch the whole file
+    /// from S3 / HTTP / fsspec, then decode" — equivalent to xradar's
+    /// `xradar.io.open_nexradlevel2_datatree(data)` when given one bytes
+    /// object. If the buffer is gzip-compressed (older `*.gz` archive
+    /// volumes), the upstream `File::decompress()` handles it transparently.
+    pub fn read_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeData> {
+        let (scan, msg2) = decode_bytes(data)?;
+        adapter::convert_scan(scan, msg2, Path::new("<bytes>"))
+    }
 }
 
 /// Concatenate chunk buffers into a single owned `Vec<u8>` with one
