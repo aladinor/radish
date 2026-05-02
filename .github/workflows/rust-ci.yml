@@ -116,7 +116,15 @@ jobs:
       run: cargo install cargo-tarpaulin
 
     - name: Run tests with coverage
-      run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+      # `radish-python` is a `cdylib` built with PyO3's `extension-module`
+      # feature, which deliberately leaves Python C-API symbols unresolved
+      # at link time (Python supplies them at runtime when the .so is
+      # imported). Tarpaulin builds a regular test binary and links with
+      # the system linker, so every `pyo3_ffi` symbol resolves to
+      # `undefined symbol: PyBool_Type` etc. The Python bindings are
+      # exercised by `python-ci.yml`'s pytest suite — exclude the crate
+      # from Rust coverage instead of trying to special-case its link.
+      run: cargo tarpaulin --verbose --all-features --workspace --exclude radish-python --timeout 120 --out xml
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
