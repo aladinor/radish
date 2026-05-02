@@ -20,14 +20,37 @@ const NEXRAD_NAME_WITH_VOLUME_LEN: usize = 23;
 /// File extensions for NEXRAD Level 2 archive files.
 pub(crate) const EXTENSIONS: &[&str] = &["ar2", "ar2v"];
 
+/// Volume-header magic at byte 0 of every Archive II file.
+pub(crate) const AR2V_MAGIC: &[u8; 4] = b"AR2V";
+
+/// Gzip header magic — older Archive II volumes (e.g. pre-2016 `*.gz` files
+/// from NOAA's archive bucket) wrap the AR2V buffer with gzip compression.
+/// Either prefix is enough to identify the buffer as a NEXRAD volume because
+/// the upstream `File::decompress()` transparently inflates gzip-wrapped data.
+pub(crate) const GZIP_MAGIC: &[u8; 2] = &[0x1f, 0x8b];
+
 /// Returns `true` if the first four bytes of the file are the NEXRAD volume
 /// header magic `AR2V`. Returns `false` on any I/O error.
 pub(crate) fn is_ar2v(path: &Path) -> bool {
     let mut buf = [0u8; 4];
     match File::open(path).and_then(|mut f| f.read_exact(&mut buf)) {
-        Ok(()) => &buf == b"AR2V",
+        Ok(()) => &buf == AR2V_MAGIC,
         Err(_) => false,
     }
+}
+
+/// Returns `true` if `head` starts with the AR2V magic or the gzip-wrap magic
+/// (older `*.gz` archive volumes). Cheap byte-prefix check; safe on any
+/// length of buffer (returns `false` on `head.len() < 4` for AR2V and `< 2`
+/// for gzip).
+pub(crate) fn looks_like_ar2v_bytes(head: &[u8]) -> bool {
+    if head.len() >= 4 && &head[..4] == AR2V_MAGIC {
+        return true;
+    }
+    if head.len() >= 2 && &head[..2] == GZIP_MAGIC {
+        return true;
+    }
+    false
 }
 
 /// Returns `true` if the path's file name matches the canonical NEXRAD naming
@@ -129,5 +152,20 @@ mod tests {
     #[test]
     fn magic_check_returns_false_for_missing_file() {
         assert!(!is_ar2v(&PathBuf::from("/no/such/file/here.ar2v")));
+    }
+
+    #[test]
+    fn looks_like_ar2v_bytes_accepts_raw_and_gzipped() {
+        // Raw Archive II header
+        assert!(looks_like_ar2v_bytes(b"AR2V0006.001"));
+        // Gzip-wrapped volume (e.g. pre-2016 `*.gz` archive files)
+        assert!(looks_like_ar2v_bytes(&[0x1f, 0x8b, 0x08, 0x00]));
+        // Garbage / netCDF / arbitrary
+        assert!(!looks_like_ar2v_bytes(b"\x89HDF\r\n\x1a\n"));
+        assert!(!looks_like_ar2v_bytes(b"CDF\x01"));
+        assert!(!looks_like_ar2v_bytes(b"hello"));
+        // Short buffers don't panic
+        assert!(!looks_like_ar2v_bytes(b""));
+        assert!(!looks_like_ar2v_bytes(b"AR"));
     }
 }

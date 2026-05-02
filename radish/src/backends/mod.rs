@@ -50,6 +50,29 @@ pub trait RadarBackend: Send + Sync {
         }
         false
     }
+
+    /// Check whether a byte-prefix (head) plausibly belongs to this format.
+    ///
+    /// Used by the central [`auto_backend_for_bytes`] dispatcher when the
+    /// caller has the file in memory (S3 fetch, HTTP body, etc.) instead of
+    /// on disk. Default returns `false`; override per-backend with cheap
+    /// magic-byte checks (no I/O).
+    fn can_read_bytes(&self, _head: &[u8]) -> bool {
+        false
+    }
+
+    /// Decode a volume from a single in-memory byte buffer.
+    ///
+    /// Default returns [`RadishError::Unsupported`] — only formats whose
+    /// upstream parsers accept owned byte buffers (currently NEXRAD via
+    /// `nexrad-data`) override this. CfRadial1 stays at the default because
+    /// `libnetcdf` needs a filename and doesn't expose an in-memory open.
+    fn read_bytes_volume(&self, _data: Vec<u8>) -> Result<VolumeData> {
+        Err(crate::RadishError::Unsupported(format!(
+            "{}: in-memory bytes input not supported",
+            self.name()
+        )))
+    }
 }
 
 /// Get all available backends
@@ -72,4 +95,79 @@ pub fn auto_backend(path: &Path) -> Result<Box<dyn RadarBackend>> {
         "No backend found for file: {}",
         path.display()
     )))
+}
+
+/// Automatically select the appropriate backend for an in-memory byte buffer.
+///
+/// Iterates [`available_backends`] in declaration order and returns the first
+/// whose [`RadarBackend::can_read_bytes`] accepts the prefix. Fails with
+/// [`RadishError::InvalidFormat`] if no backend recognises the buffer.
+///
+/// Mirrors [`auto_backend`] for the file-path path. The two are kept in sync
+/// so the Python `_open.py` dispatch table can pick the right shape→reader
+/// combination from one shared backend list.
+pub fn auto_backend_for_bytes(head: &[u8]) -> Result<Box<dyn RadarBackend>> {
+    for backend in available_backends() {
+        if backend.can_read_bytes(head) {
+            return Ok(backend);
+        }
+    }
+
+    Err(crate::RadishError::InvalidFormat(format!(
+        "No backend found for in-memory buffer (first {} bytes)",
+        head.len().min(8)
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_backend_for_bytes_routes_ar2v_to_nexrad() {
+        let head = b"AR2V0006.001....";
+        let backend = auto_backend_for_bytes(head).expect("AR2V → some backend");
+        assert_eq!(backend.name(), "nexrad_level2");
+    }
+
+    #[test]
+    fn auto_backend_for_bytes_routes_gzip_to_nexrad() {
+        // Gzip-wrapped Archive II (older `*.gz` archive volumes) — leading
+        // gzip magic is enough; the upstream nexrad-data decompresses.
+        let head = &[0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let backend = auto_backend_for_bytes(head).expect("gzip → some backend");
+        assert_eq!(backend.name(), "nexrad_level2");
+    }
+
+    #[test]
+    fn auto_backend_for_bytes_routes_hdf5_to_cfradial1() {
+        let head = b"\x89HDF\r\n\x1a\nrest";
+        let backend = auto_backend_for_bytes(head).expect("HDF5 → some backend");
+        assert_eq!(backend.name(), "cfradial1");
+    }
+
+    #[test]
+    fn auto_backend_for_bytes_errors_on_unknown_magic() {
+        // `Box<dyn RadarBackend>` doesn't implement `Debug`, so we can't use
+        // the convenience `.unwrap_err()` here — match the result manually.
+        match auto_backend_for_bytes(b"GARBAGE!") {
+            Ok(_) => panic!("expected InvalidFormat, got Ok"),
+            Err(crate::RadishError::InvalidFormat(_)) => (),
+            Err(other) => panic!("expected InvalidFormat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cfradial1_default_read_bytes_returns_unsupported() {
+        // Documents the contract: cfradial1 accepts the bytes-sniff but
+        // decoding from a buffer is not supported (libnetcdf needs a file).
+        let backend = CfRadial1Backend::new();
+        let err = backend
+            .read_bytes_volume(b"\x89HDF\r\n\x1a\n".to_vec())
+            .unwrap_err();
+        match err {
+            crate::RadishError::Unsupported(msg) => assert!(msg.contains("cfradial1")),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
 }
