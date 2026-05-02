@@ -1,10 +1,10 @@
-/// Sweep-level data structures
+//! Sweep-level data structures.
 
+use radish_types::{FollowMode, PrtMode, SweepMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use radish_types::{SweepMode, FollowMode, PrtMode};
 
-use super::{MomentData, Coordinates};
+use super::{Coordinates, MomentData};
 
 /// Sweep data containing moments and coordinates
 #[derive(Debug, Clone)]
@@ -48,7 +48,8 @@ impl SweepData {
 
     /// Filter moments to keep only specified names
     pub fn filter_moments(&mut self, moment_names: &[&str]) {
-        self.moments.retain(|k, _| moment_names.contains(&k.as_str()));
+        self.moments
+            .retain(|k, _| moment_names.contains(&k.as_str()));
     }
 
     /// Number of rays in this sweep

@@ -1,11 +1,13 @@
-/// Backend system for reading different radar formats
+//! Backend system for reading different radar formats.
 
+use crate::{Result, SweepData, VolumeData, VolumeMetadata};
 use std::path::Path;
-use crate::{Result, VolumeData, VolumeMetadata, SweepData};
 
 pub mod cfradial1;
+pub mod nexrad;
 
 pub use cfradial1::CfRadial1Backend;
+pub use nexrad::NexradBackend;
 
 /// Trait for radar file format backends
 ///
@@ -54,7 +56,7 @@ pub trait RadarBackend: Send + Sync {
 pub fn available_backends() -> Vec<Box<dyn RadarBackend>> {
     vec![
         Box::new(CfRadial1Backend::new()),
-        // Add more backends here as they're implemented
+        Box::new(NexradBackend::new()),
     ]
 }
 

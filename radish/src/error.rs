@@ -1,4 +1,4 @@
-/// Error types for the radish library
+//! Error types for the radish library.
 
 use thiserror::Error;
 
@@ -40,6 +40,19 @@ pub enum RadishError {
     #[error("Data conversion error: {0}")]
     Conversion(String),
 
+    /// Malformed record at a specific byte offset
+    #[error("Malformed record at offset {offset}: {msg}")]
+    MalformedRecord {
+        /// Byte offset within the source where the error was detected
+        offset: u64,
+        /// Diagnostic message
+        msg: String,
+    },
+
+    /// Decode error from a downstream parser (e.g., the `nexrad` crate).
+    #[error("Decode error: {0}")]
+    Decode(String),
+
     /// Unsupported feature
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
@@ -58,5 +71,13 @@ impl From<String> for RadishError {
 impl From<&str> for RadishError {
     fn from(s: &str) -> Self {
         RadishError::General(s.to_string())
+    }
+}
+
+impl From<nexrad::Error> for RadishError {
+    fn from(e: nexrad::Error) -> Self {
+        // The upstream `nexrad::Error` enum is not part of our public API;
+        // collapse to a string so consumers can match on `RadishError::Decode`.
+        RadishError::Decode(e.to_string())
     }
 }

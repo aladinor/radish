@@ -1,4 +1,4 @@
-/// Coordinate data structures
+//! Coordinate data structures.
 
 /// Coordinate data for a sweep
 #[derive(Debug, Clone)]
@@ -18,12 +18,7 @@ pub struct Coordinates {
 
 impl Coordinates {
     /// Create new Coordinates
-    pub fn new(
-        time: Vec<f64>,
-        range: Vec<f32>,
-        azimuth: Vec<f32>,
-        elevation: Vec<f32>,
-    ) -> Self {
+    pub fn new(time: Vec<f64>, range: Vec<f32>, azimuth: Vec<f32>, elevation: Vec<f32>) -> Self {
         Self {
             time,
             range,

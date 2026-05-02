@@ -1,7 +1,6 @@
-/// Moment (radar variable) data structures
+//! Moment (radar variable) data structures.
 
 use ndarray::Array2;
-use serde::{Deserialize, Serialize};
 
 /// Radar moment data (e.g., reflectivity, velocity)
 #[derive(Debug, Clone)]
@@ -45,11 +44,7 @@ pub struct MomentData {
 
 impl MomentData {
     /// Create a new MomentData
-    pub fn new(
-        name: String,
-        units: String,
-        data: Array2<f32>,
-    ) -> Self {
+    pub fn new(name: String, units: String, data: Array2<f32>) -> Self {
         Self {
             name,
             standard_name: None,
@@ -91,99 +86,19 @@ impl MomentData {
     /// Mask invalid values
     pub fn mask_invalid(&mut self, mask_value: f32) {
         if let Some(fill) = self.fill_value {
-            self.data.mapv_inplace(|v| {
-                if v == fill {
-                    mask_value
-                } else {
-                    v
-                }
-            });
+            self.data
+                .mapv_inplace(|v| if v == fill { mask_value } else { v });
         }
 
         if let (Some(min), Some(max)) = (self.valid_min, self.valid_max) {
-            self.data.mapv_inplace(|v| {
-                if v < min || v > max {
-                    mask_value
-                } else {
-                    v
-                }
-            });
+            self.data
+                .mapv_inplace(|v| if v < min || v > max { mask_value } else { v });
         }
     }
 }
 
-/// Standard moment metadata based on CfRadial2 conventions
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MomentMetadata {
-    /// Short name
-    pub name: &'static str,
-    /// CF standard name
-    pub standard_name: &'static str,
-    /// Long descriptive name
-    pub long_name: &'static str,
-    /// Units
-    pub units: &'static str,
-}
-
-impl MomentMetadata {
-    /// Get metadata for a standard moment name
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "DBZH" | "DBZ" | "reflectivity" => Some(Self {
-                name: "DBZH",
-                standard_name: "equivalent_reflectivity_factor",
-                long_name: "Equivalent reflectivity factor (horizontal channel)",
-                units: "dBZ",
-            }),
-            "VRADH" | "VEL" | "velocity" => Some(Self {
-                name: "VRADH",
-                standard_name: "radial_velocity_of_scatterers_away_from_instrument",
-                long_name: "Radial velocity (horizontal channel)",
-                units: "m/s",
-            }),
-            "WRADH" | "WIDTH" | "spectrum_width" => Some(Self {
-                name: "WRADH",
-                standard_name: "doppler_spectrum_width",
-                long_name: "Doppler spectrum width (horizontal channel)",
-                units: "m/s",
-            }),
-            "ZDR" => Some(Self {
-                name: "ZDR",
-                standard_name: "differential_reflectivity_hv",
-                long_name: "Differential reflectivity",
-                units: "dB",
-            }),
-            "PHIDP" => Some(Self {
-                name: "PHIDP",
-                standard_name: "differential_phase_hv",
-                long_name: "Differential propagation phase",
-                units: "degrees",
-            }),
-            "KDP" => Some(Self {
-                name: "KDP",
-                standard_name: "specific_differential_phase_hv",
-                long_name: "Specific differential phase",
-                units: "degrees/km",
-            }),
-            "RHOHV" => Some(Self {
-                name: "RHOHV",
-                standard_name: "cross_correlation_ratio_hv",
-                long_name: "Cross-correlation coefficient",
-                units: "",
-            }),
-            "NCP" => Some(Self {
-                name: "NCP",
-                standard_name: "normalized_coherent_power",
-                long_name: "Normalized coherent power",
-                units: "",
-            }),
-            "SNRH" | "SNR" => Some(Self {
-                name: "SNRH",
-                standard_name: "signal_to_noise_ratio",
-                long_name: "Signal-to-noise ratio (horizontal channel)",
-                units: "dB",
-            }),
-            _ => None,
-        }
-    }
-}
+// `MomentMetadata` and its `from_name` table used to live here. They were
+// never wired into any backend and are now superseded by the per-backend
+// metadata sources of truth (e.g. `radish::backends::nexrad::mapping`, which
+// uses the `radish_types::moments` constants directly). Re-introduce only
+// when a generalised name→metadata lookup actually has callers.
