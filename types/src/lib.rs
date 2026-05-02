@@ -1,4 +1,4 @@
-/// Common types and constants shared across the radish ecosystem
+//! Common types and constants shared across the radish ecosystem.
 
 use serde::{Deserialize, Serialize};
 

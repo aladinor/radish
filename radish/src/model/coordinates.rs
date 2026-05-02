@@ -1,4 +1,4 @@
-/// Coordinate data structures
+//! Coordinate data structures.
 
 /// Coordinate data for a sweep
 #[derive(Debug, Clone)]
