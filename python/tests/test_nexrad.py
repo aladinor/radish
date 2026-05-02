@@ -246,6 +246,56 @@ def test_open_datatree_bytes_list(nexrad_fixture):
     assert dt_chunks.attrs.get("scan_name") == dt_file.attrs.get("scan_name")
 
 
+def test_xarray_engine_accepts_backend_kwarg(nexrad_fixture):
+    """`xr.open_datatree(path, engine="radish", backend="nexrad")` should
+    pass `backend=` through to radish.open_datatree. Pins the engine-plugin
+    contract so adding new backends remains useful through xarray, not
+    only through `radish.open_datatree(...)` directly."""
+    import xarray as xr
+
+    # Auto-detect path: equivalent to engine="radish" only.
+    dt_auto = xr.open_datatree(nexrad_fixture, engine="radish")
+    # Explicit backend selection through the plugin.
+    dt_explicit = xr.open_datatree(nexrad_fixture, engine="radish", backend="nexrad")
+
+    assert sorted(dt_auto.children) == sorted(dt_explicit.children)
+    assert sorted(dt_auto.attrs.keys()) == sorted(dt_explicit.attrs.keys())
+
+    # Aliasing — `backend="nexrad_level2"` is the canonical name; `nexrad` is the alias.
+    dt_canonical = xr.open_datatree(
+        nexrad_fixture, engine="radish", backend="nexrad_level2"
+    )
+    assert sorted(dt_canonical.children) == sorted(dt_auto.children)
+
+
+def test_open_datatree_rejects_generator_chunks(nexrad_fixture):
+    """Regression for the silent-first-chunk-drop bug: classification needs
+    to peek at the chunk list's first element, and generators don't
+    survive that peek (``next(iter(gen))`` advances the generator). The
+    contract is "pass a list/tuple, not a generator" and the dispatcher
+    raises a clear ``TypeError`` for anything else."""
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+    n = len(data)
+
+    # Generator yielding chunk bytes — the previous implementation would
+    # have classified this as a chunk-list input and then iterated the
+    # generator a second time, dropping the first chunk silently.
+    def gen():
+        yield data[: n // 2]
+        yield data[n // 2 :]
+
+    with pytest.raises(TypeError) as exc_info:
+        radish.open_datatree(gen())
+    msg = str(exc_info.value).lower()
+    assert "generator" in msg or "list/tuple" in msg
+
+    # The escape hatch — wrap the generator with `list(...)`.
+    dt = radish.open_datatree(list(gen()))
+    n_sweeps = sum(1 for k in dt.children if k.startswith("sweep_"))
+    assert n_sweeps > 0
+
+
 def test_open_datatree_explicit_backend_skips_sniff(tmp_path, nexrad_fixture):
     """`backend="nexrad"` must skip format sniffing — verified by feeding a
     file whose name and extension do NOT look like NEXRAD and confirming

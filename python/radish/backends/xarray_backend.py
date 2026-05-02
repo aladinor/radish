@@ -82,10 +82,14 @@ class RadishBackendEntrypoint(BackendEntrypoint):
     # xarray's plugin discovery introspects the signature and rejects *args/**kwargs.
     # `BackendEntrypoint.open_dataset_parameters` is a class variable; mark ours
     # `ClassVar` too so mypy doesn't read this as an instance-attribute override.
+    # `backend` is listed here so xarray's plugin loader passes it through
+    # `xr.open_datatree(path, engine="radish", backend="nexrad")` instead of
+    # rejecting it as an unknown kwarg.
     open_dataset_parameters: ClassVar[Optional[Tuple[str, ...]]] = (
         "filename_or_obj",
         "drop_variables",
         "group",
+        "backend",
     )
 
     def open_dataset(
@@ -94,24 +98,33 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         *,
         drop_variables: Optional[Iterable[str]] = None,
         group: Optional[str] = None,
+        backend: Optional[str] = None,
     ):
         """Delegate to :func:`radish.open_dataset`. Existing
         ``xr.open_dataset(path, engine="radish")`` callers go through this
-        path; the format/shape detection now happens in one place.
+        path; ``backend="nexrad"`` / ``backend="cfradial1"`` skips the
+        format-sniff and forces the chosen radish backend.
         """
         from radish import open_dataset as _open_dataset
 
-        return _open_dataset(filename_or_obj, group=group, drop_variables=drop_variables)
+        return _open_dataset(
+            filename_or_obj,
+            backend=backend,
+            group=group,
+            drop_variables=drop_variables,
+        )
 
     def open_datatree(
         self,
         filename_or_obj,
         *,
         drop_variables: Optional[Iterable[str]] = None,
+        backend: Optional[str] = None,
     ):
         """Delegate to :func:`radish.open_datatree`. Existing
         ``xr.open_datatree(path, engine="radish")`` callers go through this
-        path; the format/shape detection now happens in one place.
+        path; ``backend="nexrad"`` / ``backend="cfradial1"`` skips the
+        format-sniff and forces the chosen radish backend.
         """
         if not DATATREE_AVAILABLE:
             raise ImportError(
@@ -120,7 +133,11 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             )
         from radish import open_datatree as _open_datatree
 
-        return _open_datatree(filename_or_obj, drop_variables=drop_variables)
+        return _open_datatree(
+            filename_or_obj,
+            backend=backend,
+            drop_variables=drop_variables,
+        )
 
     def _volume_to_datatree(self, volume, fmt: str) -> "DataTree":
         """Build a DataTree from an already-decoded `VolumeData`.
