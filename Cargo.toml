@@ -30,9 +30,24 @@ chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# File I/O
-hdf5 = "0.8"
-netcdf = "0.9"
+# File I/O. We use the maintained `hdf5-metno` fork because the original `hdf5`
+# crate is stuck at 0.8 and does not recognise HDF5 ≥ 1.14 (Ubuntu 25.04 ships
+# 1.14.5). `netcdf` 0.12 internally pulls a compatible `hdf5-sys`.
+hdf5 = { package = "hdf5-metno", version = "0.12" }
+netcdf = "0.12"
+
+# NEXRAD Level 2 backend
+# `parallel` enables rayon-based LDM decompression inside nexrad-data — the
+# single feature that gives a ~7× decode-time win on multi-LDM-chunk files.
+# We deliberately stay off the `default = ["full"]` set so we don't pull in
+# `image` (render), `reqwest`+`tokio` (aws), and friends.
+nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["model", "decode", "data", "chrono", "parallel"] }
+nexrad-model = { version = "1.0.0-rc.2", features = ["chrono"] }
+
+# Parallel sweep adaptation in radish::backends::nexrad::adapter. Already in
+# the dep tree transitively via nexrad-data/parallel; declared explicitly so
+# the import is grep-able and the version is pinned.
+rayon = "1.10"
 
 # Python bindings
 pyo3 = { version = "0.22", features = ["extension-module"] }

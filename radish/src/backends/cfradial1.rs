@@ -1,7 +1,7 @@
-/// CfRadial1 backend for reading CF/Radial NetCDF files
+//! CfRadial1 backend for reading CF/Radial NetCDF files.
 
 use std::path::Path;
-use chrono::{DateTime, Utc, TimeZone};
+use chrono::{DateTime, Utc};
 use ndarray::Array2;
 use std::collections::HashMap;
 
@@ -93,7 +93,6 @@ impl CfRadial1Backend {
 
         let start_idx = sweep_start_ray_index[sweep_idx] as usize;
         let end_idx = sweep_end_ray_index[sweep_idx] as usize;
-        let num_rays = end_idx - start_idx + 1;
 
         // Read sweep metadata
         let sweep_number = read_var_1d::<i32>(file, "sweep_number")?;
@@ -133,7 +132,7 @@ impl CfRadial1Backend {
                 continue;
             }
 
-            if let Ok(var) = file.variable(&var_name) {
+            if let Some(var) = file.variable(&var_name) {
                 // Check if it's a 2D moment variable [time, range]
                 if var.dimensions().len() == 2 {
                     if let Ok(moment) = self.read_moment(file, &var_name, start_idx, end_idx, range.len()) {
@@ -160,9 +159,11 @@ impl CfRadial1Backend {
 
         let num_rays = end_ray - start_ray + 1;
 
-        // Read data for this sweep
-        let data_raw: Vec<f32> = var.get((start_ray, 0), (num_rays, num_gates))
-            .map_err(|e| RadishError::NetCdf(e))?;
+        // Read data for this sweep. netcdf 0.12 takes ranges instead of
+        // (start, count) tuples and returns a Result.
+        let data_raw: Vec<f32> = var
+            .get_values((start_ray..start_ray + num_rays, 0..num_gates))
+            .map_err(RadishError::NetCdf)?;
 
         let data = Array2::from_shape_vec((num_rays, num_gates), data_raw)
             .map_err(|e| RadishError::Conversion(e.to_string()))?;
@@ -171,8 +172,9 @@ impl CfRadial1Backend {
         let units = var.attribute("units")
             .and_then(|a| a.value().ok())
             .and_then(|v| match v {
-                netcdf::AttrValue::Str(s) => Some(s),
-                netcdf::AttrValue::Uchar(u) => Some(String::from_utf8_lossy(&u).to_string()),
+                netcdf::AttributeValue::Str(s) => Some(s),
+                netcdf::AttributeValue::Uchar(u) => Some(u.to_string()),
+                netcdf::AttributeValue::Uchars(u) => Some(String::from_utf8_lossy(&u).to_string()),
                 _ => None,
             })
             .unwrap_or_else(|| "unknown".to_string());
@@ -180,35 +182,35 @@ impl CfRadial1Backend {
         let fill_value = var.attribute("_FillValue")
             .and_then(|a| a.value().ok())
             .and_then(|v| match v {
-                netcdf::AttrValue::Float(f) => Some(f),
+                netcdf::AttributeValue::Float(f) => Some(f),
                 _ => None,
             });
 
         let scale_factor = var.attribute("scale_factor")
             .and_then(|a| a.value().ok())
             .and_then(|v| match v {
-                netcdf::AttrValue::Float(f) => Some(f),
+                netcdf::AttributeValue::Float(f) => Some(f),
                 _ => None,
             });
 
         let add_offset = var.attribute("add_offset")
             .and_then(|a| a.value().ok())
             .and_then(|v| match v {
-                netcdf::AttrValue::Float(f) => Some(f),
+                netcdf::AttributeValue::Float(f) => Some(f),
                 _ => None,
             });
 
         let standard_name = var.attribute("standard_name")
             .and_then(|a| a.value().ok())
             .and_then(|v| match v {
-                netcdf::AttrValue::Str(s) => Some(s),
+                netcdf::AttributeValue::Str(s) => Some(s),
                 _ => None,
             });
 
         let long_name = var.attribute("long_name")
             .and_then(|a| a.value().ok())
             .and_then(|v| match v {
-                netcdf::AttrValue::Str(s) => Some(s),
+                netcdf::AttributeValue::Str(s) => Some(s),
                 _ => None,
             });
 
@@ -276,38 +278,38 @@ fn read_string_attr(file: &netcdf::File, name: &str) -> Option<String> {
     file.attribute(name)
         .and_then(|a| a.value().ok())
         .and_then(|v| match v {
-            netcdf::AttrValue::Str(s) => Some(s),
-            netcdf::AttrValue::Uchar(u) => Some(String::from_utf8_lossy(&u).to_string()),
+            netcdf::AttributeValue::Str(s) => Some(s),
+            netcdf::AttributeValue::Uchar(u) => Some(u.to_string()),
+            netcdf::AttributeValue::Uchars(u) => Some(String::from_utf8_lossy(&u).to_string()),
             _ => None,
         })
 }
 
-fn read_scalar_var<T: netcdf::Numeric>(file: &netcdf::File, name: &str) -> Result<T> {
-    let var = file.variable(name)
+fn read_scalar_var<T: netcdf::NcTypeDescriptor + Copy>(
+    file: &netcdf::File,
+    name: &str,
+) -> Result<T> {
+    let var = file
+        .variable(name)
         .ok_or_else(|| RadishError::MissingVariable(name.to_string()))?;
-
-    let value: T = var.get((0,))
-        .map_err(|e| RadishError::NetCdf(e))?;
-
-    Ok(value)
+    var.get_value(0).map_err(RadishError::NetCdf)
 }
 
-fn read_var_1d<T: netcdf::Numeric>(file: &netcdf::File, name: &str) -> Result<Vec<T>> {
-    let var = file.variable(name)
+fn read_var_1d<T: netcdf::NcTypeDescriptor + Copy>(
+    file: &netcdf::File,
+    name: &str,
+) -> Result<Vec<T>> {
+    let var = file
+        .variable(name)
         .ok_or_else(|| RadishError::MissingVariable(name.to_string()))?;
-
-    let data: Vec<T> = var.get(..)
-        .map_err(|e| RadishError::NetCdf(e))?;
-
-    Ok(data)
+    var.get_values(..).map_err(RadishError::NetCdf)
 }
 
 fn read_var_1d_str(file: &netcdf::File, name: &str) -> Result<Vec<String>> {
-    let var = file.variable(name)
+    let var = file
+        .variable(name)
         .ok_or_else(|| RadishError::MissingVariable(name.to_string()))?;
 
-    // For string variables in NetCDF, we need to handle them carefully
-    // This is a simplified version - you may need to adjust based on how strings are stored
     let dims = var.dimensions();
     if dims.is_empty() {
         return Ok(vec![]);
@@ -315,16 +317,12 @@ fn read_var_1d_str(file: &netcdf::File, name: &str) -> Result<Vec<String>> {
 
     let len = dims[0].len();
     let mut result = Vec::with_capacity(len);
-
     for i in 0..len {
-        // Try to read as string - this may need adjustment based on actual file format
-        if let Ok(s) = var.get_string((i,)) {
-            result.push(s);
-        } else {
-            result.push("unknown".to_string());
+        match var.get_string(i) {
+            Ok(s) => result.push(s),
+            Err(_) => result.push("unknown".to_string()),
         }
     }
-
     Ok(result)
 }
 

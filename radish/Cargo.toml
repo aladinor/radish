@@ -16,6 +16,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hdf5 = { workspace = true }
 netcdf = { workspace = true }
+nexrad = { workspace = true }
+nexrad-model = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "nexrad"
+harness = false

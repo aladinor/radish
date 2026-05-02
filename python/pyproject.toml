@@ -52,7 +52,9 @@ radish = "radish.backends.xarray_backend:RadishBackendEntrypoint"
 
 [tool.maturin]
 module-name = "radish._radish"
-python-source = "python"
+# Python package lives next to this pyproject (`./radish/`); maturin needs
+# `python-source` pointing at the directory containing that package.
+python-source = "."
 features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
