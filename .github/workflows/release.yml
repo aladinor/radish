@@ -32,7 +32,10 @@ jobs:
     needs: create-release
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows is excluded until proper system-dep handling lands
+        # (currently the workflow has a stub for it that always fails).
+        # Re-add via vcpkg or pre-built `libnetcdf` / `libhdf5` binaries.
+        os: [ubuntu-latest, macos-latest]
 
     steps:
     - name: Checkout code
