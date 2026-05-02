@@ -75,8 +75,12 @@ jobs:
 
     - name: Install Python package
       # `maturin build` writes wheels to the workspace `target/wheels/` dir,
-      # not `python/target/wheels/`. Install from the workspace path.
-      run: pip install --find-links=target/wheels radish
+      # not `python/target/wheels/`. Install from the wheel directly so we
+      # never accidentally pick up the unrelated `radish` package on PyPI
+      # (the test framework with `selenium` deps); pip's `--find-links` adds
+      # a source rather than replacing PyPI, so the higher-version PyPI
+      # package wins by default.
+      run: pip install target/wheels/*.whl
 
     - name: Install test dependencies
       # `xarray` is a hard dep of the engine tests in test_nexrad.py.

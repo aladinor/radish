@@ -405,21 +405,12 @@ mod tests {
     /// semantics: 0 → BelowThreshold, 1 → RangeFolded, ≥2 → physical via
     /// `(raw - offset) / scale`. We use scale=2.0, offset=66.0 (the legacy
     /// MSG_1 reflectivity defaults) so the math is hand-checkable.
-    fn ref_only_radial(
-        azimuth_deg: f32,
-        elevation_number: u8,
-        raw_gates: Vec<u8>,
-    ) -> Radial {
+    fn ref_only_radial(azimuth_deg: f32, elevation_number: u8, raw_gates: Vec<u8>) -> Radial {
         use nexrad_model::data::{MomentData, RadialStatus};
         let gate_count = raw_gates.len() as u16;
         let reflectivity = MomentData::from_fixed_point(
-            gate_count,
-            /* first_gate_range */ 2_000,
-            /* gate_interval */ 250,
-            /* data_word_size */ 8,
-            /* scale */ 2.0,
-            /* offset */ 66.0,
-            raw_gates,
+            gate_count, /* first_gate_range */ 2_000, /* gate_interval */ 250,
+            /* data_word_size */ 8, /* scale */ 2.0, /* offset */ 66.0, raw_gates,
         );
         Radial::new(
             /* collection_timestamp */ 0,

@@ -4,15 +4,15 @@
 //! radar formats with a unified interface, normalizing to the CfRadial2/FM301
 //! standard.
 
+pub mod backends;
 pub mod error;
 pub mod model;
-pub mod backends;
 pub mod transforms;
 
 // Re-export commonly used types
-pub use error::{RadishError, Result};
-pub use model::{VolumeData, VolumeMetadata, SweepData, SweepMetadata, MomentData, Coordinates};
 pub use backends::RadarBackend;
+pub use error::{RadishError, Result};
+pub use model::{Coordinates, MomentData, SweepData, SweepMetadata, VolumeData, VolumeMetadata};
 
 #[cfg(test)]
 mod tests {

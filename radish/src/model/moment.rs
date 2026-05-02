@@ -44,11 +44,7 @@ pub struct MomentData {
 
 impl MomentData {
     /// Create a new MomentData
-    pub fn new(
-        name: String,
-        units: String,
-        data: Array2<f32>,
-    ) -> Self {
+    pub fn new(name: String, units: String, data: Array2<f32>) -> Self {
         Self {
             name,
             standard_name: None,
@@ -90,23 +86,13 @@ impl MomentData {
     /// Mask invalid values
     pub fn mask_invalid(&mut self, mask_value: f32) {
         if let Some(fill) = self.fill_value {
-            self.data.mapv_inplace(|v| {
-                if v == fill {
-                    mask_value
-                } else {
-                    v
-                }
-            });
+            self.data
+                .mapv_inplace(|v| if v == fill { mask_value } else { v });
         }
 
         if let (Some(min), Some(max)) = (self.valid_min, self.valid_max) {
-            self.data.mapv_inplace(|v| {
-                if v < min || v > max {
-                    mask_value
-                } else {
-                    v
-                }
-            });
+            self.data
+                .mapv_inplace(|v| if v < min || v > max { mask_value } else { v });
         }
     }
 }

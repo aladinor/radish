@@ -26,9 +26,7 @@ fn bench_nexrad(c: &mut Criterion) {
         );
         return;
     };
-    let bytes = std::fs::metadata(&path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
     let backend = NexradBackend::new();
 
@@ -52,9 +50,13 @@ fn bench_nexrad(c: &mut Criterion) {
 
     // Read just sweep 0 — proxy for "lazy single-elevation read" workloads,
     // even though Phase 1 still decodes the full volume internally.
-    group.bench_with_input(BenchmarkId::new("read_sweep[0]", &display), &path, |b, p| {
-        b.iter(|| backend.read_sweep(p, 0).expect("read_sweep failed"));
-    });
+    group.bench_with_input(
+        BenchmarkId::new("read_sweep[0]", &display),
+        &path,
+        |b, p| {
+            b.iter(|| backend.read_sweep(p, 0).expect("read_sweep failed"));
+        },
+    );
 
     group.finish();
 }

@@ -1,7 +1,7 @@
 //! Backend system for reading different radar formats.
 
+use crate::{Result, SweepData, VolumeData, VolumeMetadata};
 use std::path::Path;
-use crate::{Result, VolumeData, VolumeMetadata, SweepData};
 
 pub mod cfradial1;
 pub mod nexrad;

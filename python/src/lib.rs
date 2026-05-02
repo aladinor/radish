@@ -36,8 +36,8 @@ use pyo3::prelude::*;
 
 use radish::{
     backends::{CfRadial1Backend, NexradBackend, RadarBackend},
-    Coordinates, MomentData as RustMomentData, SweepData as RustSweepData,
-    SweepMetadata, VolumeData as RustVolumeData, VolumeMetadata as RustVolumeMetadata,
+    Coordinates, MomentData as RustMomentData, SweepData as RustSweepData, SweepMetadata,
+    VolumeData as RustVolumeData, VolumeMetadata as RustVolumeMetadata,
 };
 
 #[pyclass(name = "VolumeMetadata")]
@@ -208,7 +208,11 @@ impl PyMomentData {
 
     fn __repr__(&self) -> String {
         let (nrays, ngates) = self.shape;
-        let state = if self.data.is_some() { "owned" } else { "consumed" };
+        let state = if self.data.is_some() {
+            "owned"
+        } else {
+            "consumed"
+        };
         format!(
             "MomentData(name='{}', units='{}', shape=({nrays}, {ngates}), {state})",
             self.name, self.units,
@@ -235,11 +239,7 @@ impl PySweepData {
         // is deterministic regardless of the moments' HashMap state.
         let mut moment_order: Vec<String> = s.moments.keys().cloned().collect();
         moment_order.sort();
-        let moments = s
-            .moments
-            .into_iter()
-            .map(|(k, v)| (k, Some(v)))
-            .collect();
+        let moments = s.moments.into_iter().map(|(k, v)| (k, Some(v))).collect();
         Self {
             metadata: s.metadata,
             coordinates: s.coordinates,
@@ -380,9 +380,10 @@ impl PyVolumeData {
     /// twice raises `RuntimeError` so the caller learns about the bug
     /// instead of silently getting a re-decoded copy.
     fn get_sweep(&mut self, index: usize) -> PyResult<PySweepData> {
-        let slot = self.sweeps.get_mut(index).ok_or_else(|| {
-            PyRuntimeError::new_err(format!("Invalid sweep index: {index}"))
-        })?;
+        let slot = self
+            .sweeps
+            .get_mut(index)
+            .ok_or_else(|| PyRuntimeError::new_err(format!("Invalid sweep index: {index}")))?;
         let sweep = slot.take().ok_or_else(|| {
             PyRuntimeError::new_err(format!("Sweep {index} has already been consumed"))
         })?;

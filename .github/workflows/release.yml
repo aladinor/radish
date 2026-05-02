@@ -67,7 +67,8 @@ jobs:
 
     - name: Upload wheel
       # Wheels go to the workspace `target/wheels/` directory,
-      # not `python/target/wheels/`.
+      # not `python/target/wheels/`. Disambiguate from the unrelated
+      # `radish` package on PyPI by using the wheel directly during install.
       uses: actions/upload-artifact@v4
       with:
         name: wheels-${{ matrix.os }}

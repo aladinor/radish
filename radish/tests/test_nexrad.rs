@@ -23,11 +23,18 @@ fn read_volume_on_real_fixture() {
     let m = &volume.metadata;
 
     assert_eq!(m.instrument_name.len(), 4, "ICAO must be 4 chars");
-    assert!(volume.num_sweeps() >= 5, "expected at least 5 sweeps, got {}", volume.num_sweeps());
+    assert!(
+        volume.num_sweeps() >= 5,
+        "expected at least 5 sweeps, got {}",
+        volume.num_sweeps()
+    );
     assert_eq!(m.sweep_group_names.len(), volume.num_sweeps());
     assert_eq!(m.sweep_fixed_angles.len(), volume.num_sweeps());
     assert!((-90.0..=90.0).contains(&m.latitude), "latitude in range");
-    assert!((-180.0..=180.0).contains(&m.longitude), "longitude in range");
+    assert!(
+        (-180.0..=180.0).contains(&m.longitude),
+        "longitude in range"
+    );
 
     // Every sweep should have at least DBZH and consistent ray-shaped coords.
     for (i, sweep) in volume.sweeps.iter().enumerate() {

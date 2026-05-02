@@ -205,15 +205,18 @@ impl CfRadial1Backend {
                 _ => None,
             });
 
-        let standard_name = var.attribute("standard_name").and_then(|a| a.value().ok()).and_then(
-            |v| match v {
+        let standard_name = var
+            .attribute("standard_name")
+            .and_then(|a| a.value().ok())
+            .and_then(|v| match v {
                 netcdf::AttributeValue::Str(s) => Some(s),
                 _ => None,
-            },
-        );
+            });
 
-        let long_name =
-            var.attribute("long_name").and_then(|a| a.value().ok()).and_then(|v| match v {
+        let long_name = var
+            .attribute("long_name")
+            .and_then(|a| a.value().ok())
+            .and_then(|v| match v {
                 netcdf::AttributeValue::Str(s) => Some(s),
                 _ => None,
             });

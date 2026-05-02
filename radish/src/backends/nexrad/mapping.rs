@@ -104,13 +104,19 @@ mod tests {
         // xradar uses the unusual "meters per seconds" (with trailing s);
         // we mirror it verbatim so engine-swap parity holds.
         assert_eq!(moment_meta(Product::Velocity).units, "meters per seconds");
-        assert_eq!(moment_meta(Product::SpectrumWidth).units, "meters per seconds");
+        assert_eq!(
+            moment_meta(Product::SpectrumWidth).units,
+            "meters per seconds"
+        );
     }
 
     #[test]
     fn rho_uses_unitless_not_empty_string() {
         // xradar emits the literal "unitless" rather than "" for unit-free moments.
-        assert_eq!(moment_meta(Product::CorrelationCoefficient).units, "unitless");
+        assert_eq!(
+            moment_meta(Product::CorrelationCoefficient).units,
+            "unitless"
+        );
         assert_eq!(moment_meta(Product::ClutterFilterPower).units, "unitless");
     }
 
@@ -123,6 +129,9 @@ mod tests {
     fn names_match_radish_types_constants() {
         assert_eq!(moment_meta(Product::Reflectivity).odim_name, moments::DBZH);
         assert_eq!(moment_meta(Product::Velocity).odim_name, moments::VRADH);
-        assert_eq!(moment_meta(Product::CorrelationCoefficient).odim_name, moments::RHOHV);
+        assert_eq!(
+            moment_meta(Product::CorrelationCoefficient).odim_name,
+            moments::RHOHV
+        );
     }
 }

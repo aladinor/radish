@@ -1,8 +1,8 @@
 //! Volume-level data structures.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use radish_types::PlatformType;
+use serde::{Deserialize, Serialize};
 
 use super::SweepData;
 
@@ -125,9 +125,7 @@ impl VolumeMetadata {
 
     /// Generate sweep group names based on number of sweeps
     pub fn generate_sweep_names(&mut self, num_sweeps: usize) {
-        self.sweep_group_names = (0..num_sweeps)
-            .map(|i| format!("sweep_{}", i))
-            .collect();
+        self.sweep_group_names = (0..num_sweeps).map(|i| format!("sweep_{}", i)).collect();
     }
 }
 
@@ -206,4 +204,3 @@ pub struct RadarCalibration {
     /// System PHIDP (degrees)
     pub system_phidp: Option<f64>,
 }
-
