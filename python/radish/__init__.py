@@ -11,6 +11,8 @@ from radish._radish import (
     MomentData,
     read_cfradial1,
     scan_cfradial1,
+    read_nexrad,
+    scan_nexrad,
 )
 
 __version__ = "0.1.0"
@@ -22,4 +24,6 @@ __all__ = [
     "MomentData",
     "read_cfradial1",
     "scan_cfradial1",
+    "read_nexrad",
+    "scan_nexrad",
 ]
