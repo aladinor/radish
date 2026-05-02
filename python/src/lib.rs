@@ -91,6 +91,40 @@ impl PyVolumeMetadata {
         self.inner.attributes.clone()
     }
 
+    #[getter]
+    fn volume_number(&self) -> u32 {
+        self.inner.volume_number
+    }
+
+    /// ISO 8601 timestamp with `Z` suffix (e.g. `"2026-03-10T23:14:12Z"`),
+    /// matching xradar's `time_coverage_start` root variable format.
+    #[getter]
+    fn time_coverage_start(&self) -> String {
+        self.inner
+            .time_coverage_start
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
+    #[getter]
+    fn time_coverage_end(&self) -> String {
+        self.inner
+            .time_coverage_end
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
+    /// FM301 platform-type string (`"fixed"`, `"vehicle"`, ...). Returns
+    /// `"fixed"` when not specified — that's the WSR-88D / ground-radar
+    /// default and matches xradar.
+    #[getter]
+    fn platform_type(&self) -> String {
+        self.inner
+            .platform_type
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "fixed".to_string())
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "VolumeMetadata(instrument='{}', lat={:.4}, lon={:.4}, alt={:.1}, sweeps={})",

@@ -39,9 +39,9 @@ def test_xarray_engine_radish_dispatches_to_nexrad(nexrad_fixture):
     assert "azimuth" in s0.coords
     assert "elevation" in s0.coords
     assert "range" in s0.coords
-    # Root attrs should advertise xradar-style provenance for NEXRAD.
-    root_attrs = dt.attrs
-    assert root_attrs.get("source", "").startswith("NEXRAD")
+    # Root identifies the radar (4-char ICAO) and the scan strategy.
+    assert len(dt.attrs.get("instrument_name", "")) == 4
+    assert dt.attrs.get("scan_name", "").startswith("VCP-")
 
 
 def test_radish_matches_xradar_per_moment(nexrad_fixture):
@@ -180,7 +180,6 @@ def test_sweep_emits_fm301_scalar_variables(nexrad_fixture):
         for var in ("sweep_mode", "sweep_number", "sweep_fixed_angle", "prt_mode", "follow_mode"):
             assert var in s.data_vars, f"{sweep_key}: missing FM301 var {var!r}"
             assert s[var].ndim == 0, f"{sweep_key}: {var!r} must be 0-d"
-            # Spec-conformance for the categorical values.
             if var == "sweep_mode":
                 assert str(s[var].values) == "azimuth_surveillance"
             elif var == "prt_mode":
@@ -189,8 +188,59 @@ def test_sweep_emits_fm301_scalar_variables(nexrad_fixture):
                 assert str(s[var].values) in {
                     "none", "sun", "vehicle", "aircraft", "target", "manual", "not_set",
                 }
-        # `sweep_fixed_angle` carries the degrees unit per FM301.
-        assert s["sweep_fixed_angle"].attrs.get("units") == "degrees"
         # Old attribute-based form must NOT come back.
         assert "fixed_angle" not in s.attrs, f"{sweep_key}: fixed_angle attr leaked"
         assert "sweep_number" not in s.attrs, f"{sweep_key}: sweep_number attr leaked"
+
+
+def test_radish_matches_xradar_structure(nexrad_fixture):
+    """Pin the structural parity with `xradar.io.open_nexradlevel2_datatree`:
+    same dim names, same coord set + dtypes, same per-DataArray CF attrs
+    (units / standard_name / long_name), same root data_vars, same
+    variable set per sweep. Numeric values may differ within tolerance
+    (different missing-data sentinels, etc.) — that's covered by the
+    parity test above. Sweep-level attrs (waveform_type, etc.) and the
+    15 MSG_2/MSG_5 root attrs are out of scope here; they need the
+    lower-level `nexrad-decode` API and land in a follow-up commit.
+    """
+    xr = pytest.importorskip("xarray")
+    xradar = pytest.importorskip("xradar")
+
+    rd = xr.open_datatree(nexrad_fixture, engine="radish")
+    xd = xradar.io.open_nexradlevel2_datatree(nexrad_fixture)
+
+    # Root data_vars set + dtypes match.
+    assert set(rd.data_vars) == set(xd.data_vars)
+    for v in rd.data_vars:
+        assert rd[v].dtype == xd[v].dtype, f"root[{v}] dtype mismatch: {rd[v].dtype} vs {xd[v].dtype}"
+
+    rd_keys = sorted(k for k in rd.children if k.startswith("sweep_"))
+    xd_keys = sorted(k for k in xd.children if k.startswith("sweep_"))
+    assert rd_keys == xd_keys, "sweep group keys differ"
+
+    for k in rd_keys:
+        rs, xs = rd[k], xd[k]
+        # Dim names match exactly. Per-sweep dim *lengths* may differ by a
+        # few rays on AVSET-truncated sweeps (xradar drops to expected cut
+        # count; radish keeps everything decoded). Allow that.
+        assert set(rs.sizes) == set(xs.sizes), f"{k}: dim names differ"
+        for d in rs.sizes:
+            rd_n, xd_n = rs.sizes[d], xs.sizes[d]
+            assert abs(rd_n - xd_n) <= max(3, int(0.01 * max(rd_n, xd_n))), (
+                f"{k}.{d}: lengths differ too much: rd={rd_n} xd={xd_n}"
+            )
+        # Coord set + dim layout + dtype.
+        assert set(rs.coords) == set(xs.coords), f"{k}: coords differ"
+        for c in rs.coords:
+            assert rs[c].dims == xs[c].dims, f"{k}.{c}: coord dims differ"
+            assert rs[c].dtype == xs[c].dtype, f"{k}.{c}: coord dtype differ"
+        # Variable set + dtype + dims for every moment / scalar var.
+        assert set(rs.data_vars) == set(xs.data_vars), f"{k}: data_vars differ"
+        for v in rs.data_vars:
+            assert rs[v].dims == xs[v].dims, f"{k}.{v}: dims differ"
+            # Per-DataArray CF metadata: units / standard_name / long_name.
+            for key in ("units", "standard_name", "long_name"):
+                if key in xs[v].attrs:
+                    assert rs[v].attrs.get(key) == xs[v].attrs[key], (
+                        f"{k}.{v}.attrs[{key!r}]: {rs[v].attrs.get(key)!r} != {xs[v].attrs[key]!r}"
+                    )

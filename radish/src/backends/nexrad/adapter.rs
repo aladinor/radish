@@ -24,7 +24,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use ndarray::Array2;
-use nexrad_model::data::{DataMoment, MomentValue, Product, Radial, Scan, Sweep};
+use nexrad_model::data::{CFPMomentValue, DataMoment, MomentValue, Product, Radial, Scan, Sweep};
 use radish_types::{PlatformType, SweepMode};
 use rayon::prelude::*;
 
@@ -213,14 +213,30 @@ pub(super) fn convert_sweep(sweep: &Sweep, sweep_idx: usize) -> Result<SweepData
 
 /// Find the first radial that carries `product` and return its geometry.
 /// Returns `None` if the product is absent from every radial in the sweep.
+///
+/// Handles both the regular six moments (`Product::moment_data` →
+/// `&MomentData`) and the special-cased clutter filter power
+/// (`Product::cfp_moment_data` → `&CFPMomentData`). Both impl the
+/// `DataMoment` trait so the geometry call is uniform.
 fn probe_geometry(radials: &[Radial], product: Product) -> Option<MomentGeometry> {
     radials.iter().find_map(|r| {
-        product.moment_data(r).map(|m| MomentGeometry {
-            product,
-            first_gate_km: m.first_gate_range_km(),
-            gate_interval_km: m.gate_interval_km(),
-            gate_count: m.gate_count() as usize,
-        })
+        if let Some(m) = product.moment_data(r) {
+            return Some(MomentGeometry {
+                product,
+                first_gate_km: m.first_gate_range_km(),
+                gate_interval_km: m.gate_interval_km(),
+                gate_count: m.gate_count() as usize,
+            });
+        }
+        if let Some(c) = product.cfp_moment_data(r) {
+            return Some(MomentGeometry {
+                product,
+                first_gate_km: c.first_gate_range_km(),
+                gate_interval_km: c.gate_interval_km(),
+                gate_count: c.gate_count() as usize,
+            });
+        }
+        None
     })
 }
 
@@ -232,9 +248,23 @@ fn probe_geometry(radials: &[Radial], product: Product) -> Option<MomentGeometry
 /// * If a radial doesn't carry the product, its row becomes all-NaN.
 /// * If a radial's `gate_count` < the sweep's `max_gates`, the trailing cells
 ///   become NaN.
-/// * `MomentValue::BelowThreshold` and `RangeFolded` map to NaN, matching
-///   xradar's masked-array convention.
+/// * `MomentValue::BelowThreshold` / `RangeFolded` and any non-`Value` CFP
+///   status code map to NaN, matching xradar's masked-array convention.
 fn decode_product(
+    radials: &[Radial],
+    order: &[usize],
+    geometry: &MomentGeometry,
+    nrays: usize,
+    max_gates: usize,
+) -> Result<Array2<f32>> {
+    if geometry.product == Product::ClutterFilterPower {
+        decode_cfp(radials, order, geometry, nrays, max_gates)
+    } else {
+        decode_regular(radials, order, geometry, nrays, max_gates)
+    }
+}
+
+fn decode_regular(
     radials: &[Radial],
     order: &[usize],
     geometry: &MomentGeometry,
@@ -243,9 +273,6 @@ fn decode_product(
 ) -> Result<Array2<f32>> {
     let ngates = geometry.gate_count;
     let needs_padding = ngates < max_gates;
-
-    // Pre-fill with NaN only when there is a tail to pad; otherwise every
-    // cell is written exactly once via push.
     let mut buf: Vec<f32> = if needs_padding {
         vec![f32::NAN; nrays * max_gates]
     } else {
@@ -257,26 +284,71 @@ fn decode_product(
             Some(md) if needs_padding => {
                 let dst_off = row * max_gates;
                 for (i, mv) in md.iter().take(ngates).enumerate() {
-                    buf[dst_off + i] = scaled(mv);
+                    buf[dst_off + i] = scaled_moment(mv);
                 }
-                // dst_off + ngates .. dst_off + max_gates is already NaN.
             }
             Some(md) => {
                 let mut written = 0;
                 for mv in md.iter().take(ngates) {
-                    buf.push(scaled(mv));
+                    buf.push(scaled_moment(mv));
                     written += 1;
                 }
-                // Defensive: a radial may legitimately report fewer gates than
-                // the geometry probe suggested if the file is malformed.
                 while written < ngates {
                     buf.push(f32::NAN);
                     written += 1;
                 }
             }
-            None if needs_padding => {
-                // Row pre-filled with NaN; nothing to do.
+            None if needs_padding => {}
+            None => {
+                for _ in 0..ngates {
+                    buf.push(f32::NAN);
+                }
             }
+        }
+    }
+
+    Array2::from_shape_vec((nrays, max_gates), buf)
+        .map_err(|e| RadishError::Conversion(e.to_string()))
+}
+
+/// CFP decode path. `Product::moment_data` returns `None` for
+/// `ClutterFilterPower`; the data lives on a separate `CFPMomentData`
+/// accessor with its own `CFPMomentValue` variant set.
+fn decode_cfp(
+    radials: &[Radial],
+    order: &[usize],
+    geometry: &MomentGeometry,
+    nrays: usize,
+    max_gates: usize,
+) -> Result<Array2<f32>> {
+    let ngates = geometry.gate_count;
+    let needs_padding = ngates < max_gates;
+    let mut buf: Vec<f32> = if needs_padding {
+        vec![f32::NAN; nrays * max_gates]
+    } else {
+        Vec::with_capacity(nrays * max_gates)
+    };
+
+    for (row, &radial_idx) in order.iter().enumerate() {
+        match radials[radial_idx].clutter_filter_power() {
+            Some(cfp) if needs_padding => {
+                let dst_off = row * max_gates;
+                for (i, v) in cfp.iter().take(ngates).enumerate() {
+                    buf[dst_off + i] = scaled_cfp(v);
+                }
+            }
+            Some(cfp) => {
+                let mut written = 0;
+                for v in cfp.iter().take(ngates) {
+                    buf.push(scaled_cfp(v));
+                    written += 1;
+                }
+                while written < ngates {
+                    buf.push(f32::NAN);
+                    written += 1;
+                }
+            }
+            None if needs_padding => {}
             None => {
                 for _ in 0..ngates {
                     buf.push(f32::NAN);
@@ -290,10 +362,20 @@ fn decode_product(
 }
 
 #[inline]
-fn scaled(value: MomentValue) -> f32 {
+fn scaled_moment(value: MomentValue) -> f32 {
     match value {
         MomentValue::Value(v) => v,
         MomentValue::BelowThreshold | MomentValue::RangeFolded => f32::NAN,
+    }
+}
+
+#[inline]
+fn scaled_cfp(value: CFPMomentValue) -> f32 {
+    match value {
+        CFPMomentValue::Value(v) => v,
+        // CFPMomentValue::Status(_) variants represent metadata about the
+        // clutter filter, not a measurement; xradar emits NaN for these.
+        CFPMomentValue::Status(_) => f32::NAN,
     }
 }
 
@@ -330,10 +412,18 @@ mod tests {
     }
 
     #[test]
-    fn scaled_maps_non_valid_to_nan() {
-        assert_eq!(scaled(MomentValue::Value(42.0)), 42.0);
-        assert!(scaled(MomentValue::BelowThreshold).is_nan());
-        assert!(scaled(MomentValue::RangeFolded).is_nan());
+    fn scaled_moment_maps_non_valid_to_nan() {
+        assert_eq!(scaled_moment(MomentValue::Value(42.0)), 42.0);
+        assert!(scaled_moment(MomentValue::BelowThreshold).is_nan());
+        assert!(scaled_moment(MomentValue::RangeFolded).is_nan());
+    }
+
+    #[test]
+    fn scaled_cfp_maps_status_codes_to_nan() {
+        use nexrad_model::data::CFPStatus;
+        assert_eq!(scaled_cfp(CFPMomentValue::Value(0.5)), 0.5);
+        assert!(scaled_cfp(CFPMomentValue::Status(CFPStatus::FilterNotApplied)).is_nan());
+        assert!(scaled_cfp(CFPMomentValue::Status(CFPStatus::PointClutterFilterApplied)).is_nan());
     }
 
     #[test]
