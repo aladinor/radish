@@ -83,6 +83,45 @@ impl RadarBackend for NexradBackend {
     }
 }
 
+impl NexradBackend {
+    /// Decode a NEXRAD Level 2 volume from a sequence of chunk byte buffers.
+    ///
+    /// Each volume from NOAA's live `unidata-nexrad-level2-chunks` S3 bucket
+    /// is split into many small files that arrive seconds after each scan
+    /// (vs. minutes for the assembled `noaa-nexrad-level2` archive):
+    ///
+    /// * `S` — volume header + first metadata records (start)
+    /// * `I00..In` — LDM-compressed sweep data, numbered in scan order
+    /// * `E` — end-of-volume marker
+    ///
+    /// The chunks must arrive **in scan order** — the same contract as
+    /// `xradar.io.open_nexradlevel2_datatree(list_of_bytes)`. Concatenating
+    /// `[S, I00, I01, ..., E]` reconstitutes a complete Archive II file
+    /// byte-for-byte (volume header from `S`, then the LDM record stream
+    /// across all chunks), so we hand it to the same decoder. A truncated
+    /// volume (no `E`, or only the first few `I` chunks) decodes whatever
+    /// rays survive — incomplete trailing sweeps come through with fewer
+    /// rays than the VCP's expected count.
+    pub fn read_chunks_volume(&self, chunks: Vec<Vec<u8>>) -> Result<VolumeData> {
+        let combined = concat_chunks(chunks);
+        let (scan, msg2) = decode_bytes(combined)?;
+        adapter::convert_scan(scan, msg2, Path::new("<chunks>"))
+    }
+}
+
+/// Concatenate chunk buffers into a single owned `Vec<u8>` with one
+/// allocation. The implementation is straightforward but worth keeping in
+/// one place: chunk count can be in the dozens for a typical KXXX volume,
+/// so pre-sizing the destination matters.
+fn concat_chunks(chunks: Vec<Vec<u8>>) -> Vec<u8> {
+    let total: usize = chunks.iter().map(|c| c.len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for chunk in chunks {
+        out.extend_from_slice(&chunk);
+    }
+    out
+}
+
 /// Decode the file once and return both the high-level `Scan` (moments + VCP)
 /// and the optional first MSG_2 (RDA Status) message.
 ///
@@ -96,7 +135,16 @@ impl RadarBackend for NexradBackend {
 fn decode_scan_and_msg2(
     path: &Path,
 ) -> Result<(nexrad_model::data::Scan, Option<RdaStatusMessage<'static>>)> {
-    let data = std::fs::read(path)?;
+    decode_bytes(std::fs::read(path)?)
+}
+
+/// Take ownership of an in-memory Archive II buffer, decompress (if gzipped),
+/// run the upstream `Scan` decode, and grab the first MSG_2. Same contract
+/// as [`decode_scan_and_msg2`], factored out so both the file path and the
+/// chunks path share the pipeline.
+fn decode_bytes(
+    data: Vec<u8>,
+) -> Result<(nexrad_model::data::Scan, Option<RdaStatusMessage<'static>>)> {
     let file = nexrad::data::volume::File::new(data)
         .decompress()
         .map_err(|e| RadishError::Decode(e.to_string()))?;
@@ -163,5 +211,70 @@ mod tests {
     fn cannot_read_random_extension() {
         let b = NexradBackend::new();
         assert!(!b.can_read(Path::new("/data/foo.txt")));
+    }
+
+    #[test]
+    fn concat_chunks_preserves_bytes() {
+        // Pinning the assembly contract: concat must be a flat byte-for-byte
+        // join, no header rewriting. If a future "smart" implementation
+        // tries to strip per-chunk headers, this test catches it.
+        let a = vec![0x41, 0x52, 0x32, 0x56]; // "AR2V" magic
+        let b = vec![4, 5, 6, 7, 8, 9];
+        let c = vec![10, 11];
+        let out = concat_chunks(vec![a.clone(), b.clone(), c.clone()]);
+        let expected: Vec<u8> = a.into_iter().chain(b).chain(c).collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn concat_chunks_empty_returns_empty() {
+        let out = concat_chunks(Vec::<Vec<u8>>::new());
+        assert!(out.is_empty());
+    }
+
+    /// Real-fixture round-trip test: read the entire fixture as bytes, split
+    /// at arbitrary byte boundaries, hand the splits to `read_chunks_volume`,
+    /// and verify the resulting volume metadata matches the path-based read.
+    /// Gated on `RADISH_NEXRAD_FIXTURE` like the other integration tests.
+    #[test]
+    fn read_chunks_volume_round_trips_full_file() {
+        let path = match std::env::var("RADISH_NEXRAD_FIXTURE") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let bytes = std::fs::read(&path).expect("read fixture");
+        // Three-way split at thirds — any in-buffer split should round-trip
+        // because we just concat them back.
+        let n = bytes.len();
+        let chunks = vec![
+            bytes[..n / 3].to_vec(),
+            bytes[n / 3..2 * n / 3].to_vec(),
+            bytes[2 * n / 3..].to_vec(),
+        ];
+
+        let backend = NexradBackend::new();
+        let from_path = backend.read_volume(Path::new(&path)).expect("path decode");
+        let from_chunks = backend.read_chunks_volume(chunks).expect("chunks decode");
+
+        assert_eq!(
+            from_path.metadata.instrument_name,
+            from_chunks.metadata.instrument_name
+        );
+        assert_eq!(from_path.num_sweeps(), from_chunks.num_sweeps());
+        assert_eq!(
+            from_path.metadata.sweep_fixed_angles,
+            from_chunks.metadata.sweep_fixed_angles
+        );
+        // Pin the MSG_2 / MSG_5 attrs round-trip as well — this is the surface
+        // most likely to silently degrade if the chunked path drops a record.
+        let na = from_path
+            .metadata
+            .nexrad
+            .expect("path: nexrad attrs present");
+        let nb = from_chunks
+            .metadata
+            .nexrad
+            .expect("chunks: nexrad attrs present");
+        assert_eq!(na, nb);
     }
 }
