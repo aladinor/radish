@@ -30,9 +30,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The legacy `datatree` package on PyPI (v0.1.8.1) is Python-2-era and pulls
+# `from StringIO import StringIO` at install time. Modern xarray (≥ 2024.10)
+# ships `xarray.DataTree` natively, so the extra now just pins xarray.
 xarray = [
-    "xarray>=2023.1.0",
-    "datatree>=0.0.12",
+    "xarray>=2024.10",
 ]
 dev = [
     "pytest>=7.0",

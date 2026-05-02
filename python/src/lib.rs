@@ -579,6 +579,41 @@ fn scan_nexrad(path: &str) -> PyResult<PyVolumeMetadata> {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to scan NEXRAD file: {e}")))
 }
 
+/// Read a NEXRAD Level 2 volume from a sequence of chunk byte buffers.
+///
+/// Mirrors xradar's `open_nexradlevel2_datatree(list_of_bytes)` API for the
+/// `unidata-nexrad-level2-chunks` S3 stream. Chunks must be passed in scan
+/// order (`S` first, then `I00..In`, then `E`) — concatenating them
+/// reconstitutes a complete Archive II buffer that's handed to the same
+/// decoder used by `read_nexrad`. Truncated volumes (no `E`, or only the
+/// first few `I` chunks) decode whatever rays survive; incomplete trailing
+/// sweeps come through with fewer rays than the VCP would normally produce.
+///
+/// Users typically `fs.open(p, "rb").read()` each path or fetch directly
+/// from S3 via `fsspec`.
+#[pyfunction]
+fn read_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeData> {
+    NexradBackend::new()
+        .read_chunks_volume(chunks)
+        .map(PyVolumeData::from_inner)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD chunks: {e}")))
+}
+
+/// Read a NEXRAD Level 2 volume from a single in-memory byte buffer.
+///
+/// Convenience entry point for the common "fetch from S3 / HTTP / fsspec
+/// then decode" workflow — equivalent to xradar's
+/// `xradar.io.open_nexradlevel2_datatree(data)` when called with one
+/// `bytes` object. The upstream decoder transparently inflates gzip-
+/// compressed older `*.gz` archive volumes.
+#[pyfunction]
+fn read_nexrad_bytes(data: Vec<u8>) -> PyResult<PyVolumeData> {
+    NexradBackend::new()
+        .read_bytes_volume(data)
+        .map(PyVolumeData::from_inner)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD bytes: {e}")))
+}
+
 #[pymodule]
 fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVolumeData>()?;
@@ -591,5 +626,7 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_cfradial1, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad, m)?)?;
     m.add_function(wrap_pyfunction!(scan_nexrad, m)?)?;
+    m.add_function(wrap_pyfunction!(read_nexrad_chunks, m)?)?;
+    m.add_function(wrap_pyfunction!(read_nexrad_bytes, m)?)?;
     Ok(())
 }

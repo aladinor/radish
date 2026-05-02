@@ -157,6 +157,86 @@ def test_radish_matches_xradar_per_moment(nexrad_fixture):
     )
 
 
+def test_read_nexrad_bytes_matches_path_read(nexrad_fixture):
+    """`read_nexrad_bytes(open(path, 'rb').read())` must produce the same
+    `VolumeData` as `read_nexrad(path)`. Pinning the contract for the
+    common 'fetch from S3 / HTTP / fsspec then decode' workflow."""
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+    v_path = radish.read_nexrad(nexrad_fixture)
+    v_bytes = radish.read_nexrad_bytes(data)
+    assert v_path.metadata.instrument_name == v_bytes.metadata.instrument_name
+    assert v_path.num_sweeps == v_bytes.num_sweeps
+    a, b = v_path.metadata.nexrad_attrs, v_bytes.metadata.nexrad_attrs
+    assert a.dynamic_scan_type == b.dynamic_scan_type
+    assert a.rda_build_number == b.rda_build_number
+    assert a.actual_elevation_cuts == b.actual_elevation_cuts
+
+
+def test_open_nexrad_bytes_datatree_matches_engine_read(nexrad_fixture):
+    """The xarray helper must produce a DataTree with the same structure as
+    `xr.open_datatree(path, engine='radish')`."""
+    import xarray as xr
+    with open(nexrad_fixture, "rb") as f:
+        dt_bytes = radish.open_nexrad_bytes_datatree(f.read())
+    dt_file = xr.open_datatree(nexrad_fixture, engine="radish")
+    assert sorted(dt_bytes.children) == sorted(dt_file.children)
+    assert sorted(dt_bytes.attrs.keys()) == sorted(dt_file.attrs.keys())
+
+
+def test_read_nexrad_chunks_round_trips_full_file(nexrad_fixture):
+    """Splitting the fixture into N byte chunks and feeding them to
+    `read_nexrad_chunks` must reconstruct the same VolumeData as the
+    path-based read. This is the core invariant of the chunks API: any
+    in-buffer split round-trips via concatenation."""
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+    n = len(data)
+    chunks = [data[: n // 4], data[n // 4 : n // 2], data[n // 2 : 3 * n // 4], data[3 * n // 4 :]]
+
+    v_path = radish.read_nexrad(nexrad_fixture)
+    v_chunks = radish.read_nexrad_chunks(chunks)
+
+    assert v_path.metadata.instrument_name == v_chunks.metadata.instrument_name
+    assert v_path.num_sweeps == v_chunks.num_sweeps
+    # MSG_2 / MSG_5 attrs must be identical — that's the surface most
+    # likely to silently degrade if the chunked decode dropped a record.
+    a, b = v_path.metadata.nexrad_attrs, v_chunks.metadata.nexrad_attrs
+    assert a.dynamic_scan_type == b.dynamic_scan_type
+    assert a.rda_build_number == b.rda_build_number
+    assert a.actual_elevation_cuts == b.actual_elevation_cuts
+    assert a.avset_enabled == b.avset_enabled
+
+
+def test_open_nexrad_chunks_datatree_accepts_paths(nexrad_fixture):
+    """Path-like entries in the chunks list should be read eagerly and the
+    resulting DataTree must match the regular engine path."""
+    import xarray as xr
+    dt_chunks = radish.open_nexrad_chunks_datatree([nexrad_fixture])
+    dt_file = xr.open_datatree(nexrad_fixture, engine="radish")
+    assert sorted(dt_chunks.children) == sorted(dt_file.children)
+    assert sorted(dt_chunks.attrs.keys()) == sorted(dt_file.attrs.keys())
+    # Per-sweep dim sizes must agree.
+    for skey in dt_file.children:
+        if not skey.startswith("sweep_"):
+            continue
+        assert dict(dt_chunks[skey].sizes) == dict(dt_file[skey].sizes)
+
+
+def test_open_nexrad_chunks_datatree_accepts_bytes(nexrad_fixture):
+    """`bytes` entries should be passed through verbatim. We split the
+    fixture into two equal halves so the concatenated buffer is identical
+    to the original file."""
+    import xarray as xr
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+    n = len(data)
+    dt_chunks = radish.open_nexrad_chunks_datatree([data[: n // 2], data[n // 2 :]])
+    dt_file = xr.open_datatree(nexrad_fixture, engine="radish")
+    assert sorted(dt_chunks.children) == sorted(dt_file.children)
+    assert dt_chunks.attrs.get("scan_name") == dt_file.attrs.get("scan_name")
+
+
 def test_engine_radish_still_handles_cfradial1():
     """Regression: radish engine should still detect/handle .nc files."""
     from radish.backends.xarray_backend import _detect_format
