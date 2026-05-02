@@ -209,6 +209,12 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         ``sweep.azimuth``/``elevation``/``range``/``time`` come back as numpy
         arrays directly from PyO3 (one C-level memcpy each), so no
         ``np.array(...)`` wrapping is needed.
+
+        Per the CfRadial2 / WMO FM301 standard, ``sweep_mode``,
+        ``sweep_number``, ``sweep_fixed_angle``, ``prt_mode``, and
+        ``follow_mode`` are 0-dimensional **variables** of each sweep group
+        (not attributes). xradar's NEXRAD reader emits them the same way, so
+        engine-swap users see an identical structural shape.
         """
         coords = {
             "azimuth": (["time"], sweep.azimuth),
@@ -216,7 +222,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             "range": (["range"], sweep.range),
         }
 
-        data_vars = {}
+        data_vars: Dict[str, Any] = {}
         for moment_name in sweep.moment_names():
             moment = sweep.get_moment(moment_name)
             if moment is not None:
@@ -226,13 +232,18 @@ class RadishBackendEntrypoint(BackendEntrypoint):
                     {"units": moment.units},
                 )
 
-        # Attributes
-        attrs = {
-            "sweep_number": int(sweep.sweep_number),
-            "fixed_angle": float(sweep.fixed_angle),
-            "instrument_name": volume_metadata.instrument_name,
-        }
+        # FM301 scalar sweep variables.
+        data_vars["sweep_mode"] = ((), sweep.sweep_mode)
+        data_vars["sweep_number"] = ((), int(sweep.sweep_number))
+        data_vars["sweep_fixed_angle"] = (
+            (),
+            float(sweep.fixed_angle),
+            {"units": "degrees", "standard_name": "beam_target_angle"},
+        )
+        data_vars["prt_mode"] = ((), sweep.prt_mode)
+        data_vars["follow_mode"] = ((), sweep.follow_mode)
 
+        attrs = {"instrument_name": volume_metadata.instrument_name}
         return xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs)
 
     @classmethod

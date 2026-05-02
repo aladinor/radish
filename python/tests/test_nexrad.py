@@ -166,3 +166,31 @@ def test_engine_radish_still_handles_cfradial1():
     assert _detect_format("KLOT20260310_231412_V06") == "nexrad"
     assert _detect_format("foo.ar2v") == "nexrad"
     assert _detect_format("foo.txt") is None
+
+
+def test_sweep_emits_fm301_scalar_variables(nexrad_fixture):
+    """CfRadial2 / WMO FM301 spec: each sweep group must carry sweep_mode,
+    sweep_number, sweep_fixed_angle, prt_mode, and follow_mode as 0-d
+    variables (NOT attributes). Pins the structural contract so downstream
+    CfRadial2 validators don't reject the output."""
+    xr = pytest.importorskip("xarray")
+    dt = xr.open_datatree(nexrad_fixture, engine="radish")
+    for sweep_key in (k for k in dt.children if k.startswith("sweep_")):
+        s = dt[sweep_key]
+        for var in ("sweep_mode", "sweep_number", "sweep_fixed_angle", "prt_mode", "follow_mode"):
+            assert var in s.data_vars, f"{sweep_key}: missing FM301 var {var!r}"
+            assert s[var].ndim == 0, f"{sweep_key}: {var!r} must be 0-d"
+            # Spec-conformance for the categorical values.
+            if var == "sweep_mode":
+                assert str(s[var].values) == "azimuth_surveillance"
+            elif var == "prt_mode":
+                assert str(s[var].values) in {"fixed", "staggered", "dual", "not_set"}
+            elif var == "follow_mode":
+                assert str(s[var].values) in {
+                    "none", "sun", "vehicle", "aircraft", "target", "manual", "not_set",
+                }
+        # `sweep_fixed_angle` carries the degrees unit per FM301.
+        assert s["sweep_fixed_angle"].attrs.get("units") == "degrees"
+        # Old attribute-based form must NOT come back.
+        assert "fixed_angle" not in s.attrs, f"{sweep_key}: fixed_angle attr leaked"
+        assert "sweep_number" not in s.attrs, f"{sweep_key}: sweep_number attr leaked"

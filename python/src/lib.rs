@@ -209,6 +209,34 @@ impl PySweepData {
         self.metadata.fixed_angle
     }
 
+    /// CfRadial2 / FM301 `sweep_mode` value (e.g. `"azimuth_surveillance"`).
+    /// Always set; defaults to `"azimuth_surveillance"` for NEXRAD PPI volumes.
+    #[getter]
+    fn sweep_mode(&self) -> String {
+        self.metadata.sweep_mode.to_string()
+    }
+
+    /// CfRadial2 / FM301 `prt_mode` value (`"fixed"`, `"staggered"`, `"dual"`).
+    /// Falls back to `"not_set"` when the source format doesn't surface it
+    /// (matches xradar's convention so engine-swap users see the same shape).
+    #[getter]
+    fn prt_mode(&self) -> String {
+        self.metadata
+            .prt_mode
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "not_set".to_string())
+    }
+
+    /// CfRadial2 / FM301 `follow_mode` value (`"none"`, `"sun"`, ...).
+    /// Falls back to `"not_set"` when the source format doesn't surface it.
+    #[getter]
+    fn follow_mode(&self) -> String {
+        self.metadata
+            .follow_mode
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "not_set".to_string())
+    }
+
     #[getter]
     fn num_rays(&self) -> usize {
         self.coordinates.num_rays()
