@@ -24,7 +24,10 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use ndarray::Array2;
-use nexrad_model::data::{CFPMomentValue, DataMoment, MomentValue, Product, Radial, Scan, Sweep};
+use nexrad::decode::messages::rda_status_data::Message as RdaStatusMessage;
+use nexrad_model::data::{
+    CFPMomentValue, DataMoment, ElevationCut, MomentValue, Product, Radial, Scan, Sweep,
+};
 use radish_types::{PlatformType, SweepMode};
 use rayon::prelude::*;
 
@@ -33,6 +36,7 @@ use crate::{
     VolumeMetadata,
 };
 
+use super::attrs::{sweep_attrs_from_cut, volume_attrs};
 use super::mapping::{moment_meta, SUPPORTED_PRODUCTS};
 use super::sniff;
 
@@ -52,13 +56,18 @@ struct MomentGeometry {
 /// only its own `Sweep` and writes its own owned `SweepData`. We dispatch
 /// across rayon's global pool — already warmed up by the upstream
 /// `nexrad-data/parallel` decompression that ran moments earlier.
-pub(super) fn convert_scan(scan: Scan, source: &Path) -> Result<VolumeData> {
-    let metadata = build_volume_metadata(&scan, source)?;
+pub(super) fn convert_scan(
+    scan: Scan,
+    msg2: Option<RdaStatusMessage<'static>>,
+    source: &Path,
+) -> Result<VolumeData> {
+    let metadata = build_volume_metadata(&scan, msg2.as_ref(), source)?;
+    let cuts = scan.coverage_pattern().elevation_cuts();
     let sweeps: Vec<SweepData> = scan
         .sweeps()
         .par_iter()
         .enumerate()
-        .map(|(idx, sweep)| convert_sweep(sweep, idx))
+        .map(|(idx, sweep)| convert_sweep(sweep, idx, cuts.get(idx)))
         .collect::<Result<_>>()?;
     Ok(VolumeData::new(metadata, sweeps))
 }
@@ -66,7 +75,11 @@ pub(super) fn convert_scan(scan: Scan, source: &Path) -> Result<VolumeData> {
 /// Build the `VolumeMetadata` from the scan, falling back to the file path for
 /// the ICAO when the scan does not carry a `Site` (rare but possible for
 /// truncated chunk files).
-pub(super) fn build_volume_metadata(scan: &Scan, source: &Path) -> Result<VolumeMetadata> {
+pub(super) fn build_volume_metadata(
+    scan: &Scan,
+    msg2: Option<&RdaStatusMessage<'_>>,
+    source: &Path,
+) -> Result<VolumeMetadata> {
     let site = scan.site();
 
     let icao = site
@@ -116,13 +129,23 @@ pub(super) fn build_volume_metadata(scan: &Scan, source: &Path) -> Result<Volume
         .attributes
         .insert("vcp_description".to_string(), vcp.description().to_string());
 
+    metadata.nexrad = Some(volume_attrs(
+        scan.coverage_pattern(),
+        msg2,
+        num_sweeps as u32,
+    ));
+
     Ok(metadata)
 }
 
 /// Convert a single `Sweep` into `SweepData`. Returns
 /// [`RadishError::MalformedRecord`] when the sweep has no radials or no
 /// supported moments.
-pub(super) fn convert_sweep(sweep: &Sweep, sweep_idx: usize) -> Result<SweepData> {
+pub(super) fn convert_sweep(
+    sweep: &Sweep,
+    sweep_idx: usize,
+    cut: Option<&ElevationCut>,
+) -> Result<SweepData> {
     let radials = sweep.radials();
     if radials.is_empty() {
         return Err(RadishError::MalformedRecord {
@@ -189,7 +212,8 @@ pub(super) fn convert_sweep(sweep: &Sweep, sweep_idx: usize) -> Result<SweepData
     // PRT, Nyquist, PRF and polarization mode aren't surfaced by
     // `nexrad-model` 1.0.0-rc.2; they live in the RAD block at the
     // `nexrad-decode` level. Phase 2 will fill them.
-    let sweep_meta = SweepMetadata::new(sweep_number, SweepMode::Azimuth, fixed_angle);
+    let mut sweep_meta = SweepMetadata::new(sweep_number, SweepMode::Azimuth, fixed_angle);
+    sweep_meta.nexrad = cut.map(sweep_attrs_from_cut);
 
     // 4. Build moments by walking radials in sorted order and decoding gates
     //    directly into the (nrays × max_gates) Array2 — no intermediate Vec,
@@ -362,7 +386,7 @@ mod tests {
     #[test]
     fn convert_sweep_errors_on_empty_radials() {
         let sweep = empty_sweep(1);
-        match convert_sweep(&sweep, 0) {
+        match convert_sweep(&sweep, 0, None) {
             Err(RadishError::MalformedRecord { msg, .. }) => assert!(msg.contains("no radials")),
             other => panic!("expected MalformedRecord, got {other:?}"),
         }
@@ -443,7 +467,7 @@ mod tests {
                 ref_only_radial(10.0, 1, vec![2, 1, 2]),
             ],
         );
-        let sd = convert_sweep(&sweep, 0).expect("convert_sweep");
+        let sd = convert_sweep(&sweep, 0, None).expect("convert_sweep");
 
         // Coords reflect the sorted order.
         assert_eq!(sd.coordinates.azimuth, vec![10.0, 20.0]);
@@ -476,7 +500,7 @@ mod tests {
                 ref_only_radial(180.0, 1, vec![30, 40]),
             ],
         );
-        let sd = convert_sweep(&sweep, 0).expect("convert_sweep");
+        let sd = convert_sweep(&sweep, 0, None).expect("convert_sweep");
         let dbzh = &sd.moments["DBZH"];
         assert_eq!(dbzh.shape(), (2, 2));
         // raw=10 → (10-66)/2 = -28; raw=20 → (20-66)/2 = -23

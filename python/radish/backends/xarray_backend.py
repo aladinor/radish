@@ -219,10 +219,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             # Mirror xradar's `open_nexradlevel2_datatree` root attribute set
             # exactly. xradar emits these as the literal string "None" rather
             # than asserting any convention — they don't claim CfRadial2 /
-            # FM301 compliance. The richer keys (super_res_status,
-            # rda_build_number, dynamic_scan_type, avset_enabled, ...) come
-            # from MSG_2/MSG_5 and need the lower-level `nexrad-decode` API;
-            # those land in a follow-up commit.
+            # FM301 compliance.
             extra = dict(metadata.attributes) if getattr(metadata, "attributes", None) else {}
             attrs.update(
                 {
@@ -237,6 +234,31 @@ class RadishBackendEntrypoint(BackendEntrypoint):
                     "scan_name": extra.get("scan_name", ""),
                 }
             )
+            # MSG_2 / MSG_5 attrs decoded by the Rust adapter
+            # (`backends::nexrad::attrs::volume_attrs`). Each attr gets a Python
+            # primitive (bool/int/float/str — no numpy scalars) so
+            # `xr.DataTree.equals` against xradar can match.
+            nattrs = getattr(metadata, "nexrad_attrs", None)
+            if nattrs is not None:
+                attrs.update(
+                    {
+                        "dynamic_scan_type": nattrs.dynamic_scan_type,
+                        "mpda_vcp": bool(nattrs.mpda_vcp),
+                        "base_tilt_vcp": bool(nattrs.base_tilt_vcp),
+                        "num_base_tilts": int(nattrs.num_base_tilts),
+                        "vcp_truncated": bool(nattrs.vcp_truncated),
+                        "vcp_sequence_active": bool(nattrs.vcp_sequence_active),
+                        "number_elevation_cuts": int(nattrs.number_elevation_cuts),
+                        "doppler_velocity_resolution": float(nattrs.doppler_velocity_resolution),
+                        "vcp_pulse_width": nattrs.vcp_pulse_width,
+                        "avset_enabled": bool(nattrs.avset_enabled),
+                        "ebc_enabled": bool(nattrs.ebc_enabled),
+                        "super_res_status": int(nattrs.super_res_status),
+                        "rda_build_number": int(nattrs.rda_build_number),
+                        "operational_mode": int(nattrs.operational_mode),
+                        "actual_elevation_cuts": int(nattrs.actual_elevation_cuts),
+                    }
+                )
             # 0-d root data_vars that xradar exposes alongside the latitude/
             # longitude/altitude coords. NEXRAD is always a fixed ground
             # radar, so `instrument_type = 'radar'` is hard-coded; the
@@ -338,9 +360,24 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         data_vars["prt_mode"] = ((), sweep.prt_mode)
         data_vars["follow_mode"] = ((), sweep.follow_mode)
 
-        # Sweep-level attrs left empty for now; populated from MSG_5 in
-        # a follow-up commit.
-        return xr.Dataset(data_vars=data_vars, coords=coords, attrs={})
+        # Sweep-level attrs from MSG_5 elevation cut. xradar emits these via
+        # `_assign_sweep_attrs`; we populate the same 9 keys with the same
+        # types (str / int / bool) so `set(rd_sweep.attrs) == set(xd_sweep.attrs)`.
+        sweep_attrs: Dict[str, Any] = {}
+        nattrs = getattr(sweep, "nexrad_attrs", None)
+        if nattrs is not None:
+            sweep_attrs = {
+                "waveform_type": nattrs.waveform_type,
+                "channel_config": nattrs.channel_config,
+                "super_resolution": int(nattrs.super_resolution),
+                "sails_cut": bool(nattrs.sails_cut),
+                "sails_sequence_number": int(nattrs.sails_sequence_number),
+                "mrle_cut": bool(nattrs.mrle_cut),
+                "mrle_sequence_number": int(nattrs.mrle_sequence_number),
+                "mpda_cut": bool(nattrs.mpda_cut),
+                "base_tilt_cut": bool(nattrs.base_tilt_cut),
+            }
+        return xr.Dataset(data_vars=data_vars, coords=coords, attrs=sweep_attrs)
 
     @classmethod
     def guess_can_open(cls, filename_or_obj):
