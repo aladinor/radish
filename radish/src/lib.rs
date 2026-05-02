@@ -12,7 +12,10 @@ pub mod transforms;
 // Re-export commonly used types
 pub use backends::RadarBackend;
 pub use error::{RadishError, Result};
-pub use model::{Coordinates, MomentData, SweepData, SweepMetadata, VolumeData, VolumeMetadata};
+pub use model::{
+    Coordinates, MomentData, NexradSweepAttrs, NexradVolumeAttrs, SweepData, SweepMetadata,
+    VolumeData, VolumeMetadata,
+};
 
 #[cfg(test)]
 mod tests {

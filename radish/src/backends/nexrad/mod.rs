@@ -11,9 +11,13 @@
 
 use std::path::Path;
 
+use nexrad::decode::messages::rda_status_data::Message as RdaStatusMessage;
+use nexrad::decode::messages::MessageContents;
+
 use crate::{backends::RadarBackend, RadishError, Result, SweepData, VolumeData, VolumeMetadata};
 
 mod adapter;
+mod attrs;
 mod mapping;
 pub(crate) mod sniff;
 
@@ -59,34 +63,76 @@ impl RadarBackend for NexradBackend {
         // MSG_5 (VCP) — but `radish::VolumeMetadata` also wants lat/lon and
         // per-sweep angles, which need at least one decompressed LDM chunk.
         // Re-evaluate when a user needs sub-100 ms scan.
-        adapter::build_volume_metadata(&decode_scan(path)?, path)
+        let (scan, msg2) = decode_scan_and_msg2(path)?;
+        adapter::build_volume_metadata(&scan, msg2.as_ref(), path)
     }
 
     fn read_sweep(&self, path: &Path, sweep_idx: usize) -> Result<SweepData> {
-        let scan = decode_scan(path)?;
+        let (scan, _) = decode_scan_and_msg2(path)?;
         let sweep = scan
             .sweeps()
             .get(sweep_idx)
             .ok_or(RadishError::InvalidSweepIndex(sweep_idx))?;
-        adapter::convert_sweep(sweep, sweep_idx)
+        let cut = scan.coverage_pattern().elevation_cuts().get(sweep_idx);
+        adapter::convert_sweep(sweep, sweep_idx, cut)
     }
 
     fn read_volume(&self, path: &Path) -> Result<VolumeData> {
-        adapter::convert_scan(decode_scan(path)?, path)
+        let (scan, msg2) = decode_scan_and_msg2(path)?;
+        adapter::convert_scan(scan, msg2, path)
     }
 }
 
-/// Single decode entry point that avoids the extra `Vec<u8>` clone the upstream
-/// `nexrad::load_file` does internally (it reads into a `Vec`, then
-/// `File::new(data.to_vec())` clones it a second time before decompressing).
-/// Going through `nexrad::data::volume::File::new(data)` directly hands the
-/// owned buffer to the decoder with no second copy.
-fn decode_scan(path: &Path) -> Result<nexrad_model::data::Scan> {
+/// Decode the file once and return both the high-level `Scan` (moments + VCP)
+/// and the optional first MSG_2 (RDA Status) message.
+///
+/// The upstream `File::scan()` silently drops MSG_2 — see
+/// `nexrad-data/src/volume/file.rs` line 137 (`_ => {}`). To populate the
+/// xradar-parity root attrs (`avset_enabled`, `rda_build_number`, etc.) we
+/// re-walk records sequentially and early-return at the first MSG_2. The cost
+/// is one extra LDM chunk decompression (~120 KB max) and one `messages()`
+/// call — bounded under 5 ms on typical fixtures, well below the noise floor
+/// of the wall-clock benchmark vs. xradar.
+fn decode_scan_and_msg2(
+    path: &Path,
+) -> Result<(nexrad_model::data::Scan, Option<RdaStatusMessage<'static>>)> {
     let data = std::fs::read(path)?;
     let file = nexrad::data::volume::File::new(data)
         .decompress()
         .map_err(|e| RadishError::Decode(e.to_string()))?;
-    file.scan().map_err(|e| RadishError::Decode(e.to_string()))
+    let scan = file
+        .scan()
+        .map_err(|e| RadishError::Decode(e.to_string()))?;
+    let msg2 = first_msg2(&file).unwrap_or(None);
+    Ok((scan, msg2))
+}
+
+/// Walk records sequentially, decompressing only as far as needed, and return
+/// the first MSG_2 message. Returns `Ok(None)` if the file has no MSG_2 and
+/// propagates errors otherwise.
+fn first_msg2(file: &nexrad::data::volume::File) -> Result<Option<RdaStatusMessage<'static>>> {
+    use nexrad::data::volume::Record;
+    let records = file
+        .records()
+        .map_err(|e| RadishError::Decode(e.to_string()))?;
+    for record in records {
+        let record = if record.compressed() {
+            record
+                .decompress()
+                .map_err(|e| RadishError::Decode(e.to_string()))?
+        } else {
+            Record::new(record.data().to_vec())
+        };
+        let messages = record
+            .messages()
+            .map_err(|e| RadishError::Decode(e.to_string()))?;
+        for message in messages {
+            if let MessageContents::RDAStatusData(m) = message.into_contents() {
+                return Ok(Some(m.into_owned()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

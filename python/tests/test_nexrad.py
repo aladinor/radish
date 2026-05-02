@@ -193,6 +193,151 @@ def test_sweep_emits_fm301_scalar_variables(nexrad_fixture):
         assert "sweep_number" not in s.attrs, f"{sweep_key}: sweep_number attr leaked"
 
 
+def test_root_emits_msg2_msg5_attrs(nexrad_fixture):
+    """Phase B: every MSG_2 / MSG_5 root attr xradar emits is on radish's root,
+    with the same Python type (str / int / float / bool — never numpy scalars)."""
+    xr = pytest.importorskip("xarray")
+    dt = xr.open_datatree(nexrad_fixture, engine="radish")
+
+    expected_types = {
+        "dynamic_scan_type": str,
+        "mpda_vcp": bool,
+        "base_tilt_vcp": bool,
+        "num_base_tilts": int,
+        "vcp_truncated": bool,
+        "vcp_sequence_active": bool,
+        "number_elevation_cuts": int,
+        "doppler_velocity_resolution": float,
+        "vcp_pulse_width": str,
+        "avset_enabled": bool,
+        "ebc_enabled": bool,
+        "super_res_status": int,
+        "rda_build_number": int,
+        "operational_mode": int,
+        "actual_elevation_cuts": int,
+    }
+    for key, ty in expected_types.items():
+        assert key in dt.attrs, f"missing root attr {key!r}"
+        # `bool` must be checked first because `isinstance(True, int)` is True.
+        actual = dt.attrs[key]
+        if ty is bool:
+            assert isinstance(actual, bool), f"{key!r}: expected bool, got {type(actual)}"
+        elif ty is int:
+            assert isinstance(actual, int) and not isinstance(actual, bool), (
+                f"{key!r}: expected int, got {type(actual)}"
+            )
+        elif ty is float:
+            assert isinstance(actual, float), f"{key!r}: expected float, got {type(actual)}"
+        else:
+            assert isinstance(actual, ty), f"{key!r}: expected {ty}, got {type(actual)}"
+
+    # `actual_elevation_cuts` must equal the number of decoded sweeps; xradar
+    # uses the same definition.
+    n_sweeps = sum(1 for k in dt.children if k.startswith("sweep_"))
+    assert dt.attrs["actual_elevation_cuts"] == n_sweeps
+
+
+def test_sweep_emits_msg5_per_cut_attrs(nexrad_fixture):
+    """Phase B: every MSG_5 elevation-cut attr xradar emits per sweep is on
+    every radish sweep group with the right Python type."""
+    xr = pytest.importorskip("xarray")
+    dt = xr.open_datatree(nexrad_fixture, engine="radish")
+
+    expected_types = {
+        "waveform_type": str,
+        "channel_config": str,
+        "super_resolution": int,
+        "sails_cut": bool,
+        "sails_sequence_number": int,
+        "mrle_cut": bool,
+        "mrle_sequence_number": int,
+        "mpda_cut": bool,
+        "base_tilt_cut": bool,
+    }
+    valid_waveforms = {
+        "contiguous_surveillance", "contiguous_doppler",
+        "batch", "staggered_pulse_pair", "not_applicable",
+    }
+    valid_channels = {"constant_phase", "random_phase", "sz2_phase_coding"}
+
+    for sweep_key in (k for k in dt.children if k.startswith("sweep_")):
+        s = dt[sweep_key]
+        for key, ty in expected_types.items():
+            assert key in s.attrs, f"{sweep_key}: missing attr {key!r}"
+            actual = s.attrs[key]
+            if ty is bool:
+                assert isinstance(actual, bool), (
+                    f"{sweep_key}.{key!r}: expected bool, got {type(actual)}"
+                )
+            elif ty is int:
+                assert isinstance(actual, int) and not isinstance(actual, bool), (
+                    f"{sweep_key}.{key!r}: expected int, got {type(actual)}"
+                )
+            else:
+                assert isinstance(actual, ty), (
+                    f"{sweep_key}.{key!r}: expected {ty}, got {type(actual)}"
+                )
+        assert s.attrs["waveform_type"] in valid_waveforms
+        assert s.attrs["channel_config"] in valid_channels
+
+
+def test_root_attrs_match_xradar(nexrad_fixture):
+    """Phase B acceptance gate: the MSG_2 / MSG_5 root attrs we emit equal
+    xradar's values verbatim."""
+    pytest.importorskip("xarray")
+    xradar = pytest.importorskip("xradar")
+    import xarray as xr  # noqa: E402
+
+    rd = xr.open_datatree(nexrad_fixture, engine="radish")
+    xd = xradar.io.open_nexradlevel2_datatree(nexrad_fixture)
+
+    keys = (
+        "dynamic_scan_type", "mpda_vcp", "base_tilt_vcp", "num_base_tilts",
+        "vcp_truncated", "vcp_sequence_active", "number_elevation_cuts",
+        "doppler_velocity_resolution", "vcp_pulse_width", "avset_enabled",
+        "ebc_enabled", "super_res_status", "rda_build_number",
+        "operational_mode", "actual_elevation_cuts",
+    )
+    for k in keys:
+        if k not in xd.attrs:
+            # xradar may omit a key when the source field is zero — skip.
+            continue
+        rd_v, xd_v = rd.attrs[k], xd.attrs[k]
+        assert rd_v == xd_v, f"root attr {k!r}: radish={rd_v!r} xradar={xd_v!r}"
+
+
+def test_sweep_attrs_match_xradar(nexrad_fixture):
+    """Phase B acceptance gate: per-sweep MSG_5 attrs match xradar's values
+    on the sweeps both readers produce."""
+    pytest.importorskip("xarray")
+    xradar = pytest.importorskip("xradar")
+    import xarray as xr  # noqa: E402
+
+    rd = xr.open_datatree(nexrad_fixture, engine="radish")
+    xd = xradar.io.open_nexradlevel2_datatree(nexrad_fixture)
+
+    rd_keys = sorted(k for k in rd.children if k.startswith("sweep_"))
+    xd_keys = sorted(k for k in xd.children if k.startswith("sweep_"))
+    common = [k for k in rd_keys if k in xd_keys]
+    assert common, "no sweep groups in common"
+
+    keys = (
+        "waveform_type", "channel_config", "super_resolution",
+        "sails_cut", "sails_sequence_number",
+        "mrle_cut", "mrle_sequence_number",
+        "mpda_cut", "base_tilt_cut",
+    )
+    for sweep_key in common:
+        rs, xs = rd[sweep_key], xd[sweep_key]
+        for k in keys:
+            if k not in xs.attrs:
+                continue
+            rd_v, xd_v = rs.attrs[k], xs.attrs[k]
+            assert rd_v == xd_v, (
+                f"{sweep_key}.{k!r}: radish={rd_v!r} xradar={xd_v!r}"
+            )
+
+
 def test_radish_matches_xradar_structure(nexrad_fixture):
     """Pin the structural parity with `xradar.io.open_nexradlevel2_datatree`:
     same dim names, same coord set + dtypes, same per-DataArray CF attrs

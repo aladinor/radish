@@ -36,7 +36,8 @@ use pyo3::prelude::*;
 
 use radish::{
     backends::{CfRadial1Backend, NexradBackend, RadarBackend},
-    Coordinates, MomentData as RustMomentData, SweepData as RustSweepData, SweepMetadata,
+    Coordinates, MomentData as RustMomentData, NexradSweepAttrs as RustNexradSweepAttrs,
+    NexradVolumeAttrs as RustNexradVolumeAttrs, SweepData as RustSweepData, SweepMetadata,
     VolumeData as RustVolumeData, VolumeMetadata as RustVolumeMetadata,
 };
 
@@ -134,6 +135,138 @@ impl PyVolumeMetadata {
             self.inner.altitude,
             self.num_sweeps()
         )
+    }
+
+    /// NEXRAD-specific volume attrs (MSG_2 + MSG_5). `None` for non-NEXRAD volumes.
+    /// The xarray backend merges every field of the returned object into the
+    /// root Dataset's `attrs` to match xradar's output verbatim.
+    #[getter]
+    fn nexrad_attrs(&self) -> Option<PyNexradVolumeAttrs> {
+        self.inner
+            .nexrad
+            .as_ref()
+            .cloned()
+            .map(|inner| PyNexradVolumeAttrs { inner })
+    }
+}
+
+/// Volume-level NEXRAD attrs surfaced from MSG_2 + MSG_5. Field names match
+/// xradar's `Dataset.attrs` keys for drop-in compatibility.
+#[pyclass(name = "NexradVolumeAttrs")]
+#[derive(Clone)]
+pub struct PyNexradVolumeAttrs {
+    inner: RustNexradVolumeAttrs,
+}
+
+#[pymethods]
+impl PyNexradVolumeAttrs {
+    #[getter]
+    fn dynamic_scan_type(&self) -> &str {
+        &self.inner.dynamic_scan_type
+    }
+    #[getter]
+    fn mpda_vcp(&self) -> bool {
+        self.inner.mpda_vcp
+    }
+    #[getter]
+    fn base_tilt_vcp(&self) -> bool {
+        self.inner.base_tilt_vcp
+    }
+    #[getter]
+    fn num_base_tilts(&self) -> u8 {
+        self.inner.num_base_tilts
+    }
+    #[getter]
+    fn vcp_truncated(&self) -> bool {
+        self.inner.vcp_truncated
+    }
+    #[getter]
+    fn vcp_sequence_active(&self) -> bool {
+        self.inner.vcp_sequence_active
+    }
+    #[getter]
+    fn number_elevation_cuts(&self) -> u32 {
+        self.inner.number_elevation_cuts
+    }
+    #[getter]
+    fn doppler_velocity_resolution(&self) -> f32 {
+        self.inner.doppler_velocity_resolution
+    }
+    #[getter]
+    fn vcp_pulse_width(&self) -> &str {
+        &self.inner.vcp_pulse_width
+    }
+    #[getter]
+    fn avset_enabled(&self) -> bool {
+        self.inner.avset_enabled
+    }
+    #[getter]
+    fn ebc_enabled(&self) -> bool {
+        self.inner.ebc_enabled
+    }
+    #[getter]
+    fn super_res_status(&self) -> u16 {
+        self.inner.super_res_status
+    }
+    #[getter]
+    fn rda_build_number(&self) -> u16 {
+        self.inner.rda_build_number
+    }
+    #[getter]
+    fn operational_mode(&self) -> u16 {
+        self.inner.operational_mode
+    }
+    #[getter]
+    fn actual_elevation_cuts(&self) -> u32 {
+        self.inner.actual_elevation_cuts
+    }
+}
+
+/// Per-sweep NEXRAD attrs from MSG_5 elevation cuts. Field names match
+/// xradar's per-sweep `Dataset.attrs` keys.
+#[pyclass(name = "NexradSweepAttrs")]
+#[derive(Clone)]
+pub struct PyNexradSweepAttrs {
+    inner: RustNexradSweepAttrs,
+}
+
+#[pymethods]
+impl PyNexradSweepAttrs {
+    #[getter]
+    fn waveform_type(&self) -> &str {
+        &self.inner.waveform_type
+    }
+    #[getter]
+    fn channel_config(&self) -> &str {
+        &self.inner.channel_config
+    }
+    #[getter]
+    fn super_resolution(&self) -> u8 {
+        self.inner.super_resolution
+    }
+    #[getter]
+    fn sails_cut(&self) -> bool {
+        self.inner.sails_cut
+    }
+    #[getter]
+    fn sails_sequence_number(&self) -> u8 {
+        self.inner.sails_sequence_number
+    }
+    #[getter]
+    fn mrle_cut(&self) -> bool {
+        self.inner.mrle_cut
+    }
+    #[getter]
+    fn mrle_sequence_number(&self) -> u8 {
+        self.inner.mrle_sequence_number
+    }
+    #[getter]
+    fn mpda_cut(&self) -> bool {
+        self.inner.mpda_cut
+    }
+    #[getter]
+    fn base_tilt_cut(&self) -> bool {
+        self.inner.base_tilt_cut
     }
 }
 
@@ -340,6 +473,16 @@ impl PySweepData {
             self.moment_order.len()
         )
     }
+
+    /// NEXRAD-specific sweep attrs (MSG_5 elevation cut). `None` for non-NEXRAD sweeps.
+    #[getter]
+    fn nexrad_attrs(&self) -> Option<PyNexradSweepAttrs> {
+        self.metadata
+            .nexrad
+            .as_ref()
+            .cloned()
+            .map(|inner| PyNexradSweepAttrs { inner })
+    }
 }
 
 /// Python wrapper for `VolumeData`.
@@ -442,6 +585,8 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVolumeMetadata>()?;
     m.add_class::<PySweepData>()?;
     m.add_class::<PyMomentData>()?;
+    m.add_class::<PyNexradVolumeAttrs>()?;
+    m.add_class::<PyNexradSweepAttrs>()?;
     m.add_function(wrap_pyfunction!(read_cfradial1, m)?)?;
     m.add_function(wrap_pyfunction!(scan_cfradial1, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad, m)?)?;
