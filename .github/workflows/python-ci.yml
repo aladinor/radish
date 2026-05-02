@@ -74,14 +74,19 @@ jobs:
         maturin build --release
 
     - name: Install Python package
-      run: |
-        cd python
-        pip install --find-links=target/wheels radish
+      # `maturin build` writes wheels to the workspace `target/wheels/` dir,
+      # not `python/target/wheels/`. Install from the workspace path.
+      run: pip install --find-links=target/wheels radish
 
     - name: Install test dependencies
+      # `xarray` is a hard dep of the engine tests in test_nexrad.py.
+      # `datatree` is the legacy DataTree package; xarray>=2024.10 ships
+      # `xarray.DataTree` natively. Modern xarray covers both.
+      # `xradar` is loaded via pytest.importorskip in the parity test —
+      # if missing, the parity check is skipped instead of failing.
       run: |
-        pip install pytest pytest-cov numpy
-        pip install xarray datatree || echo "Optional dependencies not available"
+        pip install pytest pytest-cov numpy xarray
+        pip install xradar || echo "xradar not available — parity test will skip"
 
     - name: Run Python tests
       run: |
@@ -127,11 +132,12 @@ jobs:
         python-version: '3.11'
 
     - name: Install dependencies
-      run: |
-        pip install mypy numpy
-        pip install xarray datatree || echo "Optional dependencies skipped"
+      # xarray is needed for the BackendEntrypoint class that
+      # RadishBackendEntrypoint subclasses; without it the type-check is
+      # meaningless.
+      run: pip install mypy numpy xarray
 
     - name: Run mypy
       run: |
         cd python
-        mypy radish/ --ignore-missing-imports || echo "Type checking completed with warnings"
+        mypy radish/ --ignore-missing-imports

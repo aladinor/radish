@@ -14,13 +14,14 @@ compatible with ``xradar.io.open_nexradlevel2_datatree``.
 
 import os
 import re
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, ClassVar, Dict, Iterable, Optional, Tuple
+
 import numpy as np
 
 try:
     import xarray as xr
     from xarray.backends import BackendEntrypoint
-    from xarray.core import indexing
+
     XARRAY_AVAILABLE = True
 except ImportError:
     XARRAY_AVAILABLE = False
@@ -28,17 +29,19 @@ except ImportError:
 
 try:
     from datatree import DataTree
+
     DATATREE_AVAILABLE = True
 except ImportError:
     DATATREE_AVAILABLE = False
-    # xarray ≥ 2024 also exposes DataTree natively
+    # xarray ≥ 2024.10 also exposes DataTree natively
     try:
         from xarray import DataTree  # type: ignore
+
         DATATREE_AVAILABLE = True
     except ImportError:
         pass
 
-from radish import read_cfradial1, read_nexrad, VolumeData
+from radish import read_cfradial1, read_nexrad
 
 _NEXRAD_NAME_RE = re.compile(r"[A-Z]{4}\d{8}_\d{6}(_V\d{2})?$")
 _CFRADIAL_EXTS = (".nc", ".nc4", ".netcdf")
@@ -87,18 +90,14 @@ def _parse_sweep_index(group: Optional[str], num_sweeps: int) -> int:
     if not group:
         return 0
     if not group.startswith("sweep_"):
-        raise ValueError(
-            f"unrecognised group {group!r}; expected 'sweep_<N>' or no group"
-        )
+        raise ValueError(f"unrecognised group {group!r}; expected 'sweep_<N>' or no group")
     suffix = group.split("_", 1)[1]
     try:
         idx = int(suffix)
     except ValueError as e:
         raise ValueError(f"sweep group {group!r} is not numeric") from e
     if not (0 <= idx < num_sweeps):
-        raise ValueError(
-            f"sweep group {group!r} out of range [0, {num_sweeps})"
-        )
+        raise ValueError(f"sweep group {group!r} out of range [0, {num_sweeps})")
     return idx
 
 
@@ -109,7 +108,9 @@ class RadishBackendEntrypoint(BackendEntrypoint):
     url = "https://github.com/mgrover1/radish"
 
     # xarray's plugin discovery introspects the signature and rejects *args/**kwargs.
-    open_dataset_parameters: tuple = (
+    # `BackendEntrypoint.open_dataset_parameters` is a class variable; mark ours
+    # `ClassVar` too so mypy doesn't read this as an instance-attribute override.
+    open_dataset_parameters: ClassVar[Optional[Tuple[str, ...]]] = (
         "filename_or_obj",
         "drop_variables",
         "group",
@@ -182,11 +183,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             # these from MSG_2/MSG_5 (RDA status / VCP) which `nexrad-model`
             # 1.0.0-rc.2 doesn't surface; until Phase 3 wires the lower-level
             # API, those slots are explicitly empty rather than missing.
-            extra = (
-                dict(metadata.attributes)
-                if getattr(metadata, "attributes", None)
-                else {}
-            )
+            extra = dict(metadata.attributes) if getattr(metadata, "attributes", None) else {}
             attrs.update(
                 {
                     "Conventions": "ODIM_H5/V2_2",
