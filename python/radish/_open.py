@@ -1,0 +1,323 @@
+"""Unified entry points: ``radish.open_datatree`` / ``radish.open_dataset``.
+
+One canonical entry takes any input shape (path, raw bytes, file-like,
+chunk list) and any backend (auto-detected or explicit ``backend="nexrad"``)
+and produces an ``xarray.DataTree`` or ``xarray.Dataset``. The
+``xr.open_datatree(path, engine="radish")`` plugin entry-point delegates
+into the same code path so existing callers keep working.
+
+Adding a new format backend is now a two-step ritual:
+
+1. Implement the Rust ``RadarBackend`` trait (in particular
+   ``can_read_bytes`` for the in-memory path).
+2. Register the backend's per-shape Rust→Python reader entries in
+   ``_DISPATCH`` below. No new Python helpers, no new top-level names.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+
+from radish._radish import (
+    auto_backend_name,
+    auto_backend_name_for_bytes,
+    read_cfradial1,
+    read_nexrad,
+    read_nexrad_bytes,
+    read_nexrad_chunks,
+)
+
+# Type aliases for input shapes the dispatcher recognises.
+InputShape = str  # one of the constants below
+SHAPE_PATH = "path"
+SHAPE_BYTES = "bytes"
+SHAPE_FILELIKE = "file-like"
+# `chunk-list` is intentionally restrictive: we accept only `list` / `tuple`,
+# not arbitrary iterables. Peeking at element 0 to classify the input would
+# consume a generator's first chunk; rejecting generators up front keeps the
+# contract honest. Callers with a generator must `list(...)` it first.
+SHAPE_CHUNKS = "chunk-list"
+
+# How many bytes to peek when sniffing a file-like or buffer. 16 covers
+# every magic we currently sniff (HDF5 = 8, AR2V = 4, gzip = 2).
+_PEEK_BYTES = 16
+
+
+def _is_bytes_like(obj: Any) -> bool:
+    return isinstance(obj, (bytes, bytearray, memoryview))
+
+
+def _is_path_like(obj: Any) -> bool:
+    return isinstance(obj, str) or hasattr(obj, "__fspath__")
+
+
+def _is_file_like(obj: Any) -> bool:
+    """A `.read()`-having object that isn't already a path-like wrapper."""
+    return hasattr(obj, "read") and not _is_path_like(obj)
+
+
+def _is_chunk_list(obj: Any) -> bool:
+    """A non-empty ``list`` / ``tuple`` whose first element is bytes or path-like.
+
+    We deliberately accept only **materialized sequences** (``list`` / ``tuple``)
+    rather than arbitrary iterables: classifying an iterable requires peeking
+    at the first element, and that peek would consume a generator. Forcing
+    callers to pass a list makes the contract explicit (no hidden chunk
+    drops), and the cost is one ``list(...)`` call at the boundary if their
+    source is a generator.
+    """
+    if not isinstance(obj, (list, tuple)):
+        return False
+    if not obj:
+        return False
+    first = obj[0]
+    return _is_bytes_like(first) or _is_path_like(first)
+
+
+def _classify_shape(input_obj: Any) -> InputShape:
+    """Return one of the SHAPE_* constants for ``input_obj``."""
+    if _is_bytes_like(input_obj):
+        return SHAPE_BYTES
+    if _is_path_like(input_obj):
+        return SHAPE_PATH
+    if _is_file_like(input_obj):
+        return SHAPE_FILELIKE
+    if _is_chunk_list(input_obj):
+        return SHAPE_CHUNKS
+    raise TypeError(
+        f"Unsupported input type for radish.open_datatree: {type(input_obj).__name__}. "
+        "Expected path-like (str / os.PathLike), bytes-like, file-like with "
+        ".read(), or a list/tuple of bytes/paths. (Generator inputs are "
+        "rejected explicitly because classification needs to peek at the "
+        "first element — wrap your generator in `list(...)` first.)"
+    )
+
+
+def _materialize_chunks(chunks: Any) -> "list[bytes]":
+    """Collapse a chunk list/tuple into a list of `bytes`, reading paths eagerly.
+
+    Caller (``_classify_shape``) has already confirmed ``chunks`` is a
+    ``list``/``tuple`` whose first element is bytes/path-like; we still
+    validate every element here so a heterogeneous list raises before
+    we hand truncated input to the Rust decoder.
+    """
+    out: list[bytes] = []
+    for c in chunks:
+        if _is_bytes_like(c):
+            out.append(bytes(c))
+        elif _is_path_like(c):
+            with open(os.fspath(c), "rb") as f:
+                out.append(f.read())
+        else:
+            raise TypeError(f"Each chunk must be bytes or a path; got {type(c).__name__}")
+    return out
+
+
+def _peek_filelike(file_obj: Any) -> bytes:
+    """Read up to `_PEEK_BYTES` from a file-like and rewind so the next read
+    sees the same buffer. Falls back to consuming the stream if `seek` fails.
+    """
+    head = file_obj.read(_PEEK_BYTES)
+    if hasattr(file_obj, "seek"):
+        try:
+            file_obj.seek(-len(head), 1)
+        except (OSError, ValueError):
+            # Non-seekable file-like (some HTTP responses, etc.) — caller
+            # ends up reading the rest of the stream and we'd lose `head`.
+            # Reattach the prefix by wrapping in BytesIO downstream.
+            return head
+    return head
+
+
+def _sniff_backend(input_obj: Any, shape: InputShape) -> Optional[str]:
+    """Run the per-shape Rust auto-detect for an already-classified input.
+
+    Single source of truth for "which backend can read this input?"
+    Both :func:`detect_backend` (which swallows failures and returns
+    ``None``) and :func:`_read_volume` (which propagates so the caller
+    sees a real error) call this helper.
+
+    May raise ``RuntimeError`` from the Rust side when no backend matches
+    a path / bytes prefix; chunk lists short-circuit to ``"nexrad_level2"``
+    because chunk streams are NEXRAD-specific.
+    """
+    if shape == SHAPE_PATH:
+        return auto_backend_name(os.fspath(input_obj))
+    if shape == SHAPE_BYTES:
+        return auto_backend_name_for_bytes(bytes(input_obj[:_PEEK_BYTES]))
+    if shape == SHAPE_FILELIKE:
+        return auto_backend_name_for_bytes(_peek_filelike(input_obj))
+    if shape == SHAPE_CHUNKS:
+        return "nexrad_level2"
+    return None
+
+
+def detect_backend(input_obj: Any) -> Optional[str]:
+    """Identify which radish backend will own this input.
+
+    Returns the canonical backend name (``"nexrad_level2"`` /
+    ``"cfradial1"``) or ``None`` when no backend recognises the input.
+    Useful for routing decisions outside the open path. Doesn't decode.
+    """
+    try:
+        shape = _classify_shape(input_obj)
+    except TypeError:
+        return None
+    try:
+        return _sniff_backend(input_obj, shape)
+    except RuntimeError:
+        return None
+
+
+# Dispatch table: (backend_name, input_shape) -> reader callable returning
+# `radish.VolumeData`. Each cell is one Rust→Python entry point. Adding a
+# format means appending its rows here.
+_DISPATCH: Dict[Tuple[str, InputShape], Callable[[Any], Any]] = {
+    ("nexrad_level2", SHAPE_PATH): lambda obj: read_nexrad(os.fspath(obj)),
+    ("nexrad_level2", SHAPE_BYTES): lambda obj: read_nexrad_bytes(bytes(obj)),
+    ("nexrad_level2", SHAPE_FILELIKE): lambda obj: read_nexrad_bytes(obj.read()),
+    ("nexrad_level2", SHAPE_CHUNKS): lambda obj: read_nexrad_chunks(_materialize_chunks(obj)),
+    ("cfradial1", SHAPE_PATH): lambda obj: read_cfradial1(os.fspath(obj)),
+}
+
+
+def _read_volume(input_obj: Any, backend: Optional[str]):
+    """Pick the right Rust reader for `(backend, shape)` and decode."""
+    shape = _classify_shape(input_obj)
+    if backend is None:
+        backend = _sniff_backend(input_obj, shape)
+    if backend is None:
+        # `_sniff_backend` returns None only for unknown shapes, which
+        # `_classify_shape` would already have rejected — keep the guard
+        # for mypy and as a defence-in-depth check, but make the message
+        # actionable in case it ever fires.
+        raise ValueError(
+            f"radish could not auto-detect a backend for input shape {shape!r}. "
+            f"Pass `backend='nexrad'` or `backend='cfradial1'` explicitly."
+        )
+    reader = _DISPATCH.get((backend, shape))
+    if reader is None:
+        raise ValueError(
+            f"radish backend {backend!r} does not support input shape {shape!r}. "
+            f"(Common: cfradial1 only accepts paths — `libnetcdf` doesn't expose "
+            f"an in-memory open. Pass a path or use NEXRAD bytes/chunks instead.)"
+        )
+    return reader(input_obj)
+
+
+def open_datatree(
+    filename_or_obj: Any,
+    backend: Optional[str] = None,
+    *,
+    drop_variables: Optional[Iterable[str]] = None,
+) -> "Any":  # xarray.DataTree
+    """Open a radar volume as an ``xarray.DataTree``.
+
+    Parameters
+    ----------
+    filename_or_obj
+        One of: a path-like (``str`` / ``os.PathLike``), raw ``bytes`` /
+        ``bytearray`` / ``memoryview``, a file-like with ``.read()``, or a
+        ``list`` / ``tuple`` of bytes/paths (NEXRAD chunk stream). Generators
+        are rejected — wrap with ``list(...)`` first.
+    backend
+        ``"nexrad_level2"`` (or alias ``"nexrad"``) or ``"cfradial1"``.
+        ``None`` (default) auto-detects from the input.
+    drop_variables
+        Reserved for API parity with xarray's plugin ``open_datatree``;
+        currently unused.
+
+    Returns
+    -------
+    xarray.DataTree
+
+    Examples
+    --------
+    The ``radish.open_datatree`` API mirrors ``xr.open_datatree(path,
+    engine="radish")`` but accepts in-memory inputs and chunk lists too::
+
+        radish.open_datatree("KLOT20260310_231412_V06")
+        radish.open_datatree(open("file.gz", "rb").read())     # bytes
+        radish.open_datatree([s_bytes, i01_bytes, e_bytes])    # chunks
+        radish.open_datatree("foo.nc", backend="cfradial1")    # explicit
+    """
+    backend = _normalize_backend(backend)
+    volume = _read_volume(filename_or_obj, backend)
+    return _build_datatree(volume, _format_for_root(backend or _infer_backend_from_volume(volume)))
+
+
+def open_dataset(
+    filename_or_obj: Any,
+    backend: Optional[str] = None,
+    *,
+    group: Optional[str] = None,
+    drop_variables: Optional[Iterable[str]] = None,
+) -> "Any":  # xarray.Dataset
+    """Open a single sweep as an ``xarray.Dataset``. Use ``open_datatree`` for
+    multi-sweep volumes.
+
+    See :func:`open_datatree` for input-shape and ``backend`` semantics.
+    """
+    backend = _normalize_backend(backend)
+    volume = _read_volume(filename_or_obj, backend)
+    # Lazy import to break the radish ↔ xarray_backend module cycle.
+    from radish.backends.xarray_backend import RadishBackendEntrypoint, _parse_sweep_index
+
+    sweep_idx = _parse_sweep_index(group, volume.num_sweeps)
+    sweep = volume.get_sweep(sweep_idx)
+    return RadishBackendEntrypoint()._sweep_to_dataset(sweep, volume.metadata)
+
+
+# ---- internals -----------------------------------------------------------
+
+
+_BACKEND_ALIASES: Dict[str, str] = {
+    "nexrad": "nexrad_level2",
+    "nexrad_level2": "nexrad_level2",
+    "cfradial1": "cfradial1",
+}
+
+
+def _normalize_backend(backend: Optional[str]) -> Optional[str]:
+    if backend is None:
+        return None
+    canonical = _BACKEND_ALIASES.get(backend.lower())
+    if canonical is None:
+        valid = ", ".join(sorted(set(_BACKEND_ALIASES.values())))
+        raise ValueError(f"Unknown backend {backend!r}. Valid: {valid}")
+    return canonical
+
+
+def _format_for_root(backend_name: Optional[str]) -> str:
+    """Translate a backend name to the format key used by
+    `_create_root_dataset`. The xarray backend currently switches on the
+    string `"nexrad"` for NEXRAD-specific root attrs."""
+    if backend_name is None:
+        return "cfradial1"  # safe default — produces minimal root
+    if backend_name == "nexrad_level2":
+        return "nexrad"
+    return backend_name
+
+
+def _infer_backend_from_volume(volume: Any) -> str:
+    """Best-effort backend identification when we never sniffed (chunk-
+    list inputs go straight to read_nexrad_chunks). Matches the
+    `_format_for_root` contract.
+    """
+    if getattr(volume.metadata, "nexrad_attrs", None) is not None:
+        return "nexrad_level2"
+    return "cfradial1"
+
+
+def _build_datatree(volume: Any, fmt: str):
+    """Build an `xr.DataTree` from a `VolumeData`. Reuses the xarray
+    backend's existing `_volume_to_datatree` helper so the dim/coord/attr
+    layout is identical to `xr.open_datatree(path, engine="radish")`.
+    """
+    from radish.backends.xarray_backend import RadishBackendEntrypoint
+
+    return RadishBackendEntrypoint()._volume_to_datatree(volume, fmt)
+
+
+__all__ = ["open_datatree", "open_dataset", "detect_backend"]

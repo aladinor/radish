@@ -57,6 +57,24 @@ impl RadarBackend for NexradBackend {
         sniff::looks_like_nexrad(path)
     }
 
+    /// Magic-byte sniff for in-memory buffers — recognises raw `AR2V` and
+    /// gzip-wrapped (older `*.gz` archive volume) buffers.
+    fn can_read_bytes(&self, head: &[u8]) -> bool {
+        sniff::looks_like_ar2v_bytes(head)
+    }
+
+    /// Decode a NEXRAD Level 2 volume from a single in-memory byte buffer.
+    ///
+    /// Convenience entry point for the common case of "fetch the whole file
+    /// from S3 / HTTP / fsspec, then decode" — equivalent to xradar's
+    /// `xradar.io.open_nexradlevel2_datatree(data)` when given one bytes
+    /// object. If the buffer is gzip-compressed (older `*.gz` archive
+    /// volumes), the upstream `File::decompress()` handles it transparently.
+    fn read_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeData> {
+        let (scan, msg2) = decode_bytes(data)?;
+        adapter::convert_scan(scan, msg2, Path::new("<bytes>"))
+    }
+
     fn scan_file(&self, path: &Path) -> Result<VolumeMetadata> {
         // Phase 1 does a full decode then drops sweeps. A truly cheap path
         // would read only the 24-byte volume header (ICAO + datetime) plus
@@ -106,18 +124,6 @@ impl NexradBackend {
         let combined = concat_chunks(chunks);
         let (scan, msg2) = decode_bytes(combined)?;
         adapter::convert_scan(scan, msg2, Path::new("<chunks>"))
-    }
-
-    /// Decode a NEXRAD Level 2 volume from a single in-memory byte buffer.
-    ///
-    /// Convenience entry point for the common case of "fetch the whole file
-    /// from S3 / HTTP / fsspec, then decode" — equivalent to xradar's
-    /// `xradar.io.open_nexradlevel2_datatree(data)` when given one bytes
-    /// object. If the buffer is gzip-compressed (older `*.gz` archive
-    /// volumes), the upstream `File::decompress()` handles it transparently.
-    pub fn read_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeData> {
-        let (scan, msg2) = decode_bytes(data)?;
-        adapter::convert_scan(scan, msg2, Path::new("<bytes>"))
     }
 }
 

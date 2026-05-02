@@ -157,38 +157,48 @@ def test_radish_matches_xradar_per_moment(nexrad_fixture):
     )
 
 
-def test_read_nexrad_bytes_matches_path_read(nexrad_fixture):
-    """`read_nexrad_bytes(open(path, 'rb').read())` must produce the same
-    `VolumeData` as `read_nexrad(path)`. Pinning the contract for the
-    common 'fetch from S3 / HTTP / fsspec then decode' workflow."""
+def test_open_datatree_bytes_auto(nexrad_fixture):
+    """`radish.open_datatree(open(path, 'rb').read())` must produce the
+    same DataTree as `radish.open_datatree(path)`. Pinning the contract for
+    the common 'fetch from S3 / HTTP / fsspec then decode' workflow."""
+    import xarray as xr  # noqa: F401  (used implicitly via DataTree)
+
     with open(nexrad_fixture, "rb") as f:
         data = f.read()
-    v_path = radish.read_nexrad(nexrad_fixture)
-    v_bytes = radish.read_nexrad_bytes(data)
-    assert v_path.metadata.instrument_name == v_bytes.metadata.instrument_name
-    assert v_path.num_sweeps == v_bytes.num_sweeps
-    a, b = v_path.metadata.nexrad_attrs, v_bytes.metadata.nexrad_attrs
-    assert a.dynamic_scan_type == b.dynamic_scan_type
-    assert a.rda_build_number == b.rda_build_number
-    assert a.actual_elevation_cuts == b.actual_elevation_cuts
+    dt_path = radish.open_datatree(nexrad_fixture)
+    dt_bytes = radish.open_datatree(data)
+    assert sorted(dt_path.children) == sorted(dt_bytes.children)
+    assert sorted(dt_path.attrs.keys()) == sorted(dt_bytes.attrs.keys())
 
 
-def test_open_nexrad_bytes_datatree_matches_engine_read(nexrad_fixture):
-    """The xarray helper must produce a DataTree with the same structure as
-    `xr.open_datatree(path, engine='radish')`."""
-    import xarray as xr
+def test_open_datatree_bytes_matches_path(nexrad_fixture):
+    """Same as the auto-detect bytes test but with explicit `backend=`."""
     with open(nexrad_fixture, "rb") as f:
-        dt_bytes = radish.open_nexrad_bytes_datatree(f.read())
-    dt_file = xr.open_datatree(nexrad_fixture, engine="radish")
-    assert sorted(dt_bytes.children) == sorted(dt_file.children)
-    assert sorted(dt_bytes.attrs.keys()) == sorted(dt_file.attrs.keys())
+        data = f.read()
+    dt_path = radish.open_datatree(nexrad_fixture)
+    dt_explicit = radish.open_datatree(data, backend="nexrad")
+    assert sorted(dt_path.children) == sorted(dt_explicit.children)
+
+
+def test_open_datatree_filelike_auto(nexrad_fixture):
+    """`io.BytesIO` (and other `.read()`-having objects) must be sniffable
+    and seek back so the actual decode sees the full buffer."""
+    import io
+
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+    buf = io.BytesIO(data)
+    dt = radish.open_datatree(buf)
+    n_sweeps = sum(1 for k in dt.children if k.startswith("sweep_"))
+    assert n_sweeps > 0
+    assert dt.attrs["instrument_name"] == "KLOT"
 
 
 def test_read_nexrad_chunks_round_trips_full_file(nexrad_fixture):
     """Splitting the fixture into N byte chunks and feeding them to
     `read_nexrad_chunks` must reconstruct the same VolumeData as the
-    path-based read. This is the core invariant of the chunks API: any
-    in-buffer split round-trips via concatenation."""
+    path-based read. Covers the low-level building block that the unified
+    `radish.open_datatree([...])` dispatches into."""
     with open(nexrad_fixture, "rb") as f:
         data = f.read()
     n = len(data)
@@ -199,8 +209,6 @@ def test_read_nexrad_chunks_round_trips_full_file(nexrad_fixture):
 
     assert v_path.metadata.instrument_name == v_chunks.metadata.instrument_name
     assert v_path.num_sweeps == v_chunks.num_sweeps
-    # MSG_2 / MSG_5 attrs must be identical — that's the surface most
-    # likely to silently degrade if the chunked decode dropped a record.
     a, b = v_path.metadata.nexrad_attrs, v_chunks.metadata.nexrad_attrs
     assert a.dynamic_scan_type == b.dynamic_scan_type
     assert a.rda_build_number == b.rda_build_number
@@ -208,44 +216,148 @@ def test_read_nexrad_chunks_round_trips_full_file(nexrad_fixture):
     assert a.avset_enabled == b.avset_enabled
 
 
-def test_open_nexrad_chunks_datatree_accepts_paths(nexrad_fixture):
-    """Path-like entries in the chunks list should be read eagerly and the
-    resulting DataTree must match the regular engine path."""
+def test_open_datatree_path_list(nexrad_fixture):
+    """Single-path chunk list: the unified API must accept it and produce
+    a DataTree equivalent to the regular path open."""
     import xarray as xr
-    dt_chunks = radish.open_nexrad_chunks_datatree([nexrad_fixture])
+
+    dt_chunks = radish.open_datatree([nexrad_fixture])
     dt_file = xr.open_datatree(nexrad_fixture, engine="radish")
     assert sorted(dt_chunks.children) == sorted(dt_file.children)
     assert sorted(dt_chunks.attrs.keys()) == sorted(dt_file.attrs.keys())
-    # Per-sweep dim sizes must agree.
     for skey in dt_file.children:
         if not skey.startswith("sweep_"):
             continue
         assert dict(dt_chunks[skey].sizes) == dict(dt_file[skey].sizes)
 
 
-def test_open_nexrad_chunks_datatree_accepts_bytes(nexrad_fixture):
-    """`bytes` entries should be passed through verbatim. We split the
-    fixture into two equal halves so the concatenated buffer is identical
-    to the original file."""
+def test_open_datatree_bytes_list(nexrad_fixture):
+    """Two-bytes chunk list: split the fixture in half, decode via the
+    unified API, confirm the concatenated buffer reconstructs the same
+    DataTree as the regular engine."""
     import xarray as xr
+
     with open(nexrad_fixture, "rb") as f:
         data = f.read()
     n = len(data)
-    dt_chunks = radish.open_nexrad_chunks_datatree([data[: n // 2], data[n // 2 :]])
+    dt_chunks = radish.open_datatree([data[: n // 2], data[n // 2 :]])
     dt_file = xr.open_datatree(nexrad_fixture, engine="radish")
     assert sorted(dt_chunks.children) == sorted(dt_file.children)
     assert dt_chunks.attrs.get("scan_name") == dt_file.attrs.get("scan_name")
 
 
-def test_engine_radish_still_handles_cfradial1():
-    """Regression: radish engine should still detect/handle .nc files."""
-    from radish.backends.xarray_backend import _detect_format
-    assert _detect_format("foo.nc") == "cfradial1"
-    assert _detect_format("foo.nc4") == "cfradial1"
-    assert _detect_format("foo.netcdf") == "cfradial1"
-    assert _detect_format("KLOT20260310_231412_V06") == "nexrad"
-    assert _detect_format("foo.ar2v") == "nexrad"
-    assert _detect_format("foo.txt") is None
+def test_xarray_engine_accepts_backend_kwarg(nexrad_fixture):
+    """`xr.open_datatree(path, engine="radish", backend="nexrad")` should
+    pass `backend=` through to radish.open_datatree. Pins the engine-plugin
+    contract so adding new backends remains useful through xarray, not
+    only through `radish.open_datatree(...)` directly."""
+    import xarray as xr
+
+    # Auto-detect path: equivalent to engine="radish" only.
+    dt_auto = xr.open_datatree(nexrad_fixture, engine="radish")
+    # Explicit backend selection through the plugin.
+    dt_explicit = xr.open_datatree(nexrad_fixture, engine="radish", backend="nexrad")
+
+    assert sorted(dt_auto.children) == sorted(dt_explicit.children)
+    assert sorted(dt_auto.attrs.keys()) == sorted(dt_explicit.attrs.keys())
+
+    # Aliasing — `backend="nexrad_level2"` is the canonical name; `nexrad` is the alias.
+    dt_canonical = xr.open_datatree(
+        nexrad_fixture, engine="radish", backend="nexrad_level2"
+    )
+    assert sorted(dt_canonical.children) == sorted(dt_auto.children)
+
+
+def test_open_datatree_rejects_generator_chunks(nexrad_fixture):
+    """Regression for the silent-first-chunk-drop bug: classification needs
+    to peek at the chunk list's first element, and generators don't
+    survive that peek (``next(iter(gen))`` advances the generator). The
+    contract is "pass a list/tuple, not a generator" and the dispatcher
+    raises a clear ``TypeError`` for anything else."""
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+    n = len(data)
+
+    # Generator yielding chunk bytes — the previous implementation would
+    # have classified this as a chunk-list input and then iterated the
+    # generator a second time, dropping the first chunk silently.
+    def gen():
+        yield data[: n // 2]
+        yield data[n // 2 :]
+
+    with pytest.raises(TypeError) as exc_info:
+        radish.open_datatree(gen())
+    msg = str(exc_info.value).lower()
+    assert "generator" in msg or "list/tuple" in msg
+
+    # The escape hatch — wrap the generator with `list(...)`.
+    dt = radish.open_datatree(list(gen()))
+    n_sweeps = sum(1 for k in dt.children if k.startswith("sweep_"))
+    assert n_sweeps > 0
+
+
+def test_open_datatree_explicit_backend_skips_sniff(tmp_path, nexrad_fixture):
+    """`backend="nexrad"` must skip format sniffing — verified by feeding a
+    file whose name and extension do NOT look like NEXRAD and confirming
+    the decode succeeds anyway. (If sniffing ran, an extension-less,
+    non-canonical filename would not produce a NEXRAD path on the
+    auto-detect side because the file's first 4 bytes are still `AR2V`,
+    so we go a step further: drop the magic too.)
+    """
+    # Read the fixture, prepend 32 bytes of garbage (so AR2V magic is
+    # gone from the head), and assert that the auto-detect path raises
+    # — but `backend="nexrad"` still tries the decode and then fails at
+    # the parser stage rather than at the sniff stage.
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+    garbage_then_data = b"X" * 32 + data
+
+    # Auto-detect: no backend matches the buffer head.
+    with pytest.raises((RuntimeError, ValueError)):
+        radish.open_datatree(garbage_then_data)
+
+    # Explicit backend: skips sniff, hits the parser, fails with a
+    # decode-stage error (not the "no backend matched" sniff error).
+    with pytest.raises(RuntimeError) as exc_info:
+        radish.open_datatree(garbage_then_data, backend="nexrad")
+    msg = str(exc_info.value)
+    assert "No backend matched" not in msg
+
+
+def test_open_datatree_cfradial1_bytes_raises(tmp_path):
+    """CfRadial1 doesn't support in-memory bytes (libnetcdf needs a file).
+    The unified API must surface a clear ValueError instead of a confusing
+    parser error from deep in the stack."""
+    head = b"\x89HDF\r\n\x1a\n" + b"\x00" * 64
+    with pytest.raises((ValueError, RuntimeError)) as exc_info:
+        radish.open_datatree(head, backend="cfradial1")
+    msg = str(exc_info.value).lower()
+    assert "cfradial1" in msg or "in-memory" in msg or "not supported" in msg
+
+
+def test_detect_backend_introspection(nexrad_fixture, tmp_path):
+    """`radish.detect_backend(input)` covers all input shapes."""
+    with open(nexrad_fixture, "rb") as f:
+        data = f.read()
+
+    assert radish.detect_backend(nexrad_fixture) == "nexrad_level2"
+    assert radish.detect_backend(data) == "nexrad_level2"
+    assert radish.detect_backend([data]) == "nexrad_level2"
+
+    import io
+    assert radish.detect_backend(io.BytesIO(data)) == "nexrad_level2"
+
+    # Path-by-extension routing: the file doesn't need to exist for the
+    # extension-based check to succeed (auto_backend(path) only inspects
+    # the path string for path-like backends like CfRadial1).
+    assert radish.detect_backend("foo.nc") == "cfradial1"
+    assert radish.detect_backend("foo.nc4") == "cfradial1"
+    assert radish.detect_backend("foo.ar2v") == "nexrad_level2"
+    assert radish.detect_backend("KLOT20260310_231412_V06") == "nexrad_level2"
+
+    # Unknown filename / unrecognised buffer
+    assert radish.detect_backend("garbage_filename_with_no_extension") is None
+    assert radish.detect_backend(b"GARBAGE!" * 8) is None
 
 
 def test_sweep_emits_fm301_scalar_variables(nexrad_fixture):

@@ -1,25 +1,13 @@
-"""Xarray backend for radish.
+"""Xarray backend entrypoint for radish.
 
-Supports two file formats today:
-
-* CfRadial1 NetCDF (extensions ``.nc``, ``.nc4``, ``.netcdf``)
-* NEXRAD Level 2 Archive II (extension ``.ar2``/``.ar2v``, the ``AR2V`` magic
-  bytes, or the canonical ``KXXX########_######`` filename pattern used by
-  NOAA's NEXRAD archive)
-
-The backend dispatches to the matching radish reader at open time. The
-NEXRAD path is built to match the structural shape of
-``xradar.io.open_nexradlevel2_datatree`` byte-for-byte at the structural
-level — same dim names (``azimuth`` not ``time``), same coord set + attrs,
-same per-DataArray CF metadata, same variable set. Numeric values may
-differ within tolerance (e.g. radish uses NaN for missing data while
-xradar uses negative-float sentinels), but the trees are interchangeable
-for any code that walks dim names / coord names / variable names /
-attribute keys.
+Provides the ``engine="radish"`` plugin registration. All format detection
+and per-shape dispatch lives in :mod:`radish._open` — this module is just
+the xarray-side adapter that delegates to ``radish.open_datatree`` /
+``radish.open_dataset`` and houses the ``VolumeData → DataTree`` builder
+helpers (``_volume_to_datatree``, ``_create_root_dataset``,
+``_sweep_to_dataset``) that those entry points reuse.
 """
 
-import os
-import re
 from typing import Any, ClassVar, Dict, Iterable, Optional, Tuple
 
 import numpy as np
@@ -47,46 +35,6 @@ except ImportError:
         DATATREE_AVAILABLE = True
     except ImportError:
         pass
-
-from radish import read_cfradial1, read_nexrad
-
-_NEXRAD_NAME_RE = re.compile(r"[A-Z]{4}\d{8}_\d{6}(_V\d{2})?$")
-_CFRADIAL_EXTS = (".nc", ".nc4", ".netcdf")
-_NEXRAD_EXTS = (".ar2", ".ar2v")
-
-
-def _detect_format(filename_or_obj) -> Optional[str]:
-    """Return ``"nexrad"``, ``"cfradial1"``, or ``None``.
-
-    Three signals (any one is enough):
-      1. file extension match,
-      2. AR2V magic bytes,
-      3. canonical NEXRAD filename pattern.
-    """
-    try:
-        path = os.fspath(filename_or_obj)
-    except (TypeError, AttributeError):
-        return None
-    lower = path.lower()
-    if lower.endswith(_CFRADIAL_EXTS):
-        return "cfradial1"
-    if lower.endswith(_NEXRAD_EXTS):
-        return "nexrad"
-    if _NEXRAD_NAME_RE.search(os.path.basename(path)):
-        return "nexrad"
-    try:
-        with open(path, "rb") as f:
-            if f.read(4) == b"AR2V":
-                return "nexrad"
-    except OSError:
-        pass
-    return None
-
-
-def _read_volume(path: str, fmt: str):
-    if fmt == "nexrad":
-        return read_nexrad(path)
-    return read_cfradial1(path)
 
 
 def _moment_cf_attrs(moment) -> Dict[str, str]:
@@ -134,10 +82,14 @@ class RadishBackendEntrypoint(BackendEntrypoint):
     # xarray's plugin discovery introspects the signature and rejects *args/**kwargs.
     # `BackendEntrypoint.open_dataset_parameters` is a class variable; mark ours
     # `ClassVar` too so mypy doesn't read this as an instance-attribute override.
+    # `backend` is listed here so xarray's plugin loader passes it through
+    # `xr.open_datatree(path, engine="radish", backend="nexrad")` instead of
+    # rejecting it as an unknown kwarg.
     open_dataset_parameters: ClassVar[Optional[Tuple[str, ...]]] = (
         "filename_or_obj",
         "drop_variables",
         "group",
+        "backend",
     )
 
     def open_dataset(
@@ -146,42 +98,46 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         *,
         drop_variables: Optional[Iterable[str]] = None,
         group: Optional[str] = None,
+        backend: Optional[str] = None,
     ):
+        """Delegate to :func:`radish.open_dataset`. Existing
+        ``xr.open_dataset(path, engine="radish")`` callers go through this
+        path; ``backend="nexrad"`` / ``backend="cfradial1"`` skips the
+        format-sniff and forces the chosen radish backend.
         """
-        Open a single dataset (sweep).
+        from radish import open_dataset as _open_dataset
 
-        For multi-sweep files, use open_datatree instead.
-        """
-        path = os.fspath(filename_or_obj)
-        fmt = _detect_format(filename_or_obj) or "cfradial1"
-        volume = _read_volume(path, fmt)
-        sweep_idx = _parse_sweep_index(group, volume.num_sweeps)
-        sweep = volume.get_sweep(sweep_idx)
-        return self._sweep_to_dataset(sweep, volume.metadata)
+        return _open_dataset(
+            filename_or_obj,
+            backend=backend,
+            group=group,
+            drop_variables=drop_variables,
+        )
 
     def open_datatree(
         self,
         filename_or_obj,
         *,
         drop_variables: Optional[Iterable[str]] = None,
+        backend: Optional[str] = None,
     ):
-        """
-        Open a radar volume as a DataTree with multiple sweeps.
-
-        Returns a DataTree with:
-        - Root group: volume metadata
-        - sweep_N groups: individual sweep data
+        """Delegate to :func:`radish.open_datatree`. Existing
+        ``xr.open_datatree(path, engine="radish")`` callers go through this
+        path; ``backend="nexrad"`` / ``backend="cfradial1"`` skips the
+        format-sniff and forces the chosen radish backend.
         """
         if not DATATREE_AVAILABLE:
             raise ImportError(
                 "DataTree support requires xarray>=2024.10 or the legacy "
                 "datatree package. Install with: pip install -U xarray"
             )
+        from radish import open_datatree as _open_datatree
 
-        path = os.fspath(filename_or_obj)
-        fmt = _detect_format(filename_or_obj) or "cfradial1"
-        volume = _read_volume(path, fmt)
-        return self._volume_to_datatree(volume, fmt)
+        return _open_datatree(
+            filename_or_obj,
+            backend=backend,
+            drop_variables=drop_variables,
+        )
 
     def _volume_to_datatree(self, volume, fmt: str) -> "DataTree":
         """Build a DataTree from an already-decoded `VolumeData`.
@@ -389,80 +345,11 @@ class RadishBackendEntrypoint(BackendEntrypoint):
 
     @classmethod
     def guess_can_open(cls, filename_or_obj):
-        """Return True if radish can open this file (CfRadial1 or NEXRAD L2)."""
-        return _detect_format(filename_or_obj) is not None
+        """Return True if radish can open this file (any registered backend)."""
+        from radish import detect_backend
+
+        return detect_backend(filename_or_obj) is not None
 
 
 # For backwards compatibility
 RadishBackend = RadishBackendEntrypoint
-
-
-def open_nexrad_chunks_datatree(chunks: Iterable[Any]) -> "DataTree":
-    """Open a NEXRAD Level 2 volume as a DataTree from a sequence of chunks.
-
-    Mirrors xradar's ``open_nexradlevel2_datatree(list_of_bytes)`` for the
-    live ``unidata-nexrad-level2-chunks`` S3 stream. Each entry in
-    ``chunks`` may be:
-
-    * ``bytes`` — already-read chunk contents, or
-    * a path-like (``str`` / ``os.PathLike``) — read from disk eagerly.
-
-    Chunks must be in scan order (``S`` first, then ``I00..In``, then
-    ``E``). Concatenating them reconstitutes a complete Archive II buffer.
-    A truncated volume (no ``E`` or only the first few ``I`` chunks)
-    decodes whatever rays survive — incomplete trailing sweeps come
-    through with fewer rays than the VCP would normally produce.
-
-    Example
-    -------
-    >>> import fsspec, radish
-    >>> fs = fsspec.filesystem("s3", anon=True)
-    >>> paths = sorted(fs.ls("unidata-nexrad-level2-chunks/KABR/903/"))
-    >>> chunks = [fs.open(p, "rb").read() for p in paths]
-    >>> dt = radish.open_nexrad_chunks_datatree(chunks)
-    """
-    if not DATATREE_AVAILABLE:
-        raise ImportError(
-            "DataTree support requires xarray>=2024.10 or the legacy "
-            "datatree package. Install with: pip install -U xarray"
-        )
-    from radish import read_nexrad_chunks
-
-    materialized: list[bytes] = []
-    for c in chunks:
-        if isinstance(c, (bytes, bytearray, memoryview)):
-            materialized.append(bytes(c))
-        else:
-            with open(os.fspath(c), "rb") as f:
-                materialized.append(f.read())
-
-    volume = read_nexrad_chunks(materialized)
-    return RadishBackendEntrypoint()._volume_to_datatree(volume, "nexrad")
-
-
-def open_nexrad_bytes_datatree(data: bytes) -> "DataTree":
-    """Open a NEXRAD Level 2 volume as a DataTree from a single in-memory
-    byte buffer.
-
-    Convenience wrapper for the common "fetch the whole file from S3 /
-    HTTP / fsspec, then decode" workflow — equivalent to xradar's
-    ``xradar.io.open_nexradlevel2_datatree(data)``. Older `*.gz` archive
-    volumes (gzip-compressed) are inflated transparently by the upstream
-    decoder.
-
-    Example
-    -------
-    >>> import fsspec, radish
-    >>> filepath = 's3://unidata-nexrad-level2/2011/05/20/KVNX/KVNX20110520_000023_V06.gz'
-    >>> stream = fsspec.open(filepath, mode='rb', compression='gzip', anon=True).open()
-    >>> dt = radish.open_nexrad_bytes_datatree(stream.read())
-    """
-    if not DATATREE_AVAILABLE:
-        raise ImportError(
-            "DataTree support requires xarray>=2024.10 or the legacy "
-            "datatree package. Install with: pip install -U xarray"
-        )
-    from radish import read_nexrad_bytes
-
-    volume = read_nexrad_bytes(bytes(data))
-    return RadishBackendEntrypoint()._volume_to_datatree(volume, "nexrad")

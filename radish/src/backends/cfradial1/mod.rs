@@ -11,6 +11,7 @@
 //!   `parse_sweep_mode`, `parse_platform_type`).
 
 mod helpers;
+mod sniff;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -243,6 +244,15 @@ impl RadarBackend for CfRadial1Backend {
 
     fn supported_extensions(&self) -> &[&str] {
         &["nc", "nc4", "netcdf"]
+    }
+
+    /// Sniff a byte-prefix for HDF5 / netCDF-3 magic. Used by the central
+    /// `auto_backend_for_bytes` dispatcher. The CfRadial1 reader itself
+    /// can't decode in-memory buffers (libnetcdf needs a filename), so
+    /// `read_bytes_volume` keeps the trait default that returns
+    /// `RadishError::Unsupported`.
+    fn can_read_bytes(&self, head: &[u8]) -> bool {
+        sniff::looks_like_cfradial1(head)
     }
 
     fn scan_file(&self, path: &Path) -> Result<VolumeMetadata> {

@@ -35,7 +35,9 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use radish::{
-    backends::{CfRadial1Backend, NexradBackend, RadarBackend},
+    backends::{
+        auto_backend, auto_backend_for_bytes, CfRadial1Backend, NexradBackend, RadarBackend,
+    },
     Coordinates, MomentData as RustMomentData, NexradSweepAttrs as RustNexradSweepAttrs,
     NexradVolumeAttrs as RustNexradVolumeAttrs, SweepData as RustSweepData, SweepMetadata,
     VolumeData as RustVolumeData, VolumeMetadata as RustVolumeMetadata,
@@ -601,17 +603,42 @@ fn read_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeData> {
 
 /// Read a NEXRAD Level 2 volume from a single in-memory byte buffer.
 ///
-/// Convenience entry point for the common "fetch from S3 / HTTP / fsspec
-/// then decode" workflow — equivalent to xradar's
-/// `xradar.io.open_nexradlevel2_datatree(data)` when called with one
-/// `bytes` object. The upstream decoder transparently inflates gzip-
-/// compressed older `*.gz` archive volumes.
+/// Internal building block — the public Python entry point is
+/// `radish.open_datatree(data)` (in `python/radish/_open.py`). Kept
+/// reachable as `radish._radish.read_nexrad_bytes` so the dispatcher can
+/// import it without a Rust-only call path.
 #[pyfunction]
 fn read_nexrad_bytes(data: Vec<u8>) -> PyResult<PyVolumeData> {
     NexradBackend::new()
         .read_bytes_volume(data)
         .map(PyVolumeData::from_inner)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD bytes: {e}")))
+}
+
+/// Identify which radish backend (`"nexrad_level2"`, `"cfradial1"`, …)
+/// owns a file path. Wraps `radish::backends::auto_backend(path).name()`.
+///
+/// Returns the backend's canonical short name; the Python `_open.py`
+/// dispatcher maps that to the right reader. Failure (no backend matched)
+/// surfaces as a `PyRuntimeError`.
+#[pyfunction]
+fn auto_backend_name(path: &str) -> PyResult<String> {
+    auto_backend(Path::new(path))
+        .map(|b| b.name().to_string())
+        .map_err(|e| PyRuntimeError::new_err(format!("No backend matched: {e}")))
+}
+
+/// Identify which radish backend recognises an in-memory byte prefix.
+/// Mirrors [`auto_backend_name`] for the bytes-input path.
+///
+/// 16 bytes is enough for every magic check we currently do (HDF5 needs
+/// 8, AR2V needs 4, gzip needs 2). Callers may pass shorter slices; they
+/// just risk getting "no backend matched" if the magic straddled the cut.
+#[pyfunction]
+fn auto_backend_name_for_bytes(head: Vec<u8>) -> PyResult<String> {
+    auto_backend_for_bytes(&head)
+        .map(|b| b.name().to_string())
+        .map_err(|e| PyRuntimeError::new_err(format!("No backend matched: {e}")))
 }
 
 #[pymodule]
@@ -628,5 +655,7 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_nexrad, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(auto_backend_name, m)?)?;
+    m.add_function(wrap_pyfunction!(auto_backend_name_for_bytes, m)?)?;
     Ok(())
 }
