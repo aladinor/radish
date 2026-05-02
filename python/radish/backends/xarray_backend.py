@@ -89,58 +89,21 @@ def _read_volume(path: str, fmt: str):
     return read_cfradial1(path)
 
 
-# Per-moment CF metadata. Strings are chosen to match xradar's NEXRAD reader
-# verbatim so engine-swap users see identical per-DataArray attrs. The Rust
-# adapter's `mapping.rs::moment_meta` is the source of truth for the moment
-# names and gets these same strings when constructing the underlying
-# `MomentData.units` field; we look those up here too because the xarray
-# layer needs `standard_name` and `long_name` which the Rust `MomentData`
-# struct exposes in `attributes` but PyO3 doesn't surface (today).
-_MOMENT_CF_METADATA: Dict[str, Dict[str, str]] = {
-    "DBZH": {
-        "standard_name": "radar_equivalent_reflectivity_factor_h",
-        "long_name": "Equivalent reflectivity factor H",
-    },
-    "VRADH": {
-        "standard_name": "radial_velocity_of_scatterers_away_from_instrument_h",
-        "long_name": "Radial velocity of scatterers away from instrument H",
-    },
-    "WRADH": {
-        "standard_name": "radar_doppler_spectrum_width_h",
-        "long_name": "Doppler spectrum width H",
-    },
-    "ZDR": {
-        "standard_name": "radar_differential_reflectivity_hv",
-        "long_name": "Log differential reflectivity H/V",
-    },
-    "PHIDP": {
-        "standard_name": "radar_differential_phase_hv",
-        "long_name": "Differential phase HV",
-    },
-    "RHOHV": {
-        "standard_name": "radar_correlation_coefficient_hv",
-        "long_name": "Correlation coefficient HV",
-    },
-    "CCORH": {
-        "standard_name": "clutter_correction_h",
-        "long_name": "Clutter Correction H",
-    },
-}
+def _moment_cf_attrs(moment) -> Dict[str, str]:
+    """Resolve the full CF attribute set for a moment from the Rust side.
 
-
-def _moment_cf_attrs(moment_name: str, units: str) -> Dict[str, str]:
-    """Resolve the full CF attribute set for a moment.
-
-    `units` comes from the Rust `MomentData.units` field (already the
-    xradar string). `standard_name` and `long_name` are looked up in the
-    static table above; unknown moments fall back to an attrs dict with
-    just `units` so the variable is at least minimally annotated.
+    The Rust adapter's `radish::backends::nexrad::mapping::moment_meta` is
+    the single source of truth for `units`, `standard_name`, and `long_name`.
+    PyMomentData exposes all three; if the backend didn't set
+    `standard_name` / `long_name` (e.g. an unknown CfRadial1 variable), we
+    fall back to the moment name so the variable is at least minimally
+    annotated.
     """
-    base = {"long_name": moment_name, "units": units, "standard_name": moment_name}
-    overrides = _MOMENT_CF_METADATA.get(moment_name)
-    if overrides:
-        base.update(overrides)
-    return base
+    return {
+        "units": moment.units,
+        "standard_name": moment.standard_name or moment.name,
+        "long_name": moment.long_name or moment.name,
+    }
 
 
 def _parse_sweep_index(group: Optional[str], num_sweeps: int) -> int:
@@ -365,7 +328,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             data_vars[moment_name] = (
                 ["azimuth", "range"],
                 moment.data().astype(np.float64),
-                _moment_cf_attrs(moment_name, moment.units),
+                _moment_cf_attrs(moment),
             )
 
         # FM301 scalar sweep variables (also matches xradar).
@@ -378,11 +341,6 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         # Sweep-level attrs left empty for now; populated from MSG_5 in
         # a follow-up commit.
         return xr.Dataset(data_vars=data_vars, coords=coords, attrs={})
-
-    @staticmethod
-    def _data_var_dims(name: str):
-        # Helper kept for forward compatibility / readability.
-        return ["azimuth", "range"]
 
     @classmethod
     def guess_can_open(cls, filename_or_obj):

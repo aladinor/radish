@@ -146,6 +146,8 @@ impl PyVolumeMetadata {
 pub struct PyMomentData {
     name: String,
     units: String,
+    standard_name: Option<String>,
+    long_name: Option<String>,
     shape: (usize, usize),
     data: Option<Array2<f32>>,
 }
@@ -156,6 +158,8 @@ impl PyMomentData {
         Self {
             name: m.name,
             units: m.units,
+            standard_name: m.standard_name,
+            long_name: m.long_name,
             shape,
             data: Some(m.data),
         }
@@ -172,6 +176,20 @@ impl PyMomentData {
     #[getter]
     fn units(&self) -> &str {
         &self.units
+    }
+
+    /// CF `standard_name` (e.g. `"radar_equivalent_reflectivity_factor_h"`).
+    /// `None` when the backend doesn't have a mapping for the moment.
+    #[getter]
+    fn standard_name(&self) -> Option<&str> {
+        self.standard_name.as_deref()
+    }
+
+    /// CF `long_name` (e.g. `"Equivalent reflectivity factor H"`).
+    /// `None` when the backend doesn't have a mapping for the moment.
+    #[getter]
+    fn long_name(&self) -> Option<&str> {
+        self.long_name.as_deref()
     }
 
     #[getter]

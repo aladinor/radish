@@ -244,12 +244,19 @@ fn probe_geometry(radials: &[Radial], product: Product) -> Option<MomentGeometry
 /// (nrays × max_gates) `Array2<f32>`. The decode walks the canonical sort
 /// order and skips the upstream `SweepField` allocation+sort pair.
 ///
-/// Padding rules:
+/// Padding rules (encoded in the buffer's pre-fill + closure contract):
 /// * If a radial doesn't carry the product, its row becomes all-NaN.
 /// * If a radial's `gate_count` < the sweep's `max_gates`, the trailing cells
 ///   become NaN.
 /// * `MomentValue::BelowThreshold` / `RangeFolded` and any non-`Value` CFP
 ///   status code map to NaN, matching xradar's masked-array convention.
+///
+/// Dispatches between the two upstream accessor flavours: regular `Product`s
+/// expose `Product::moment_data(radial) -> Option<&MomentData>`, while
+/// `ClutterFilterPower` lives on `Radial::clutter_filter_power() ->
+/// Option<&CFPMomentData>` with a different value enum. Both are funneled
+/// through `decode_into_array` via a `fill_row` closure so the buffer-
+/// management scaffold is shared.
 fn decode_product(
     radials: &[Radial],
     order: &[usize],
@@ -257,106 +264,56 @@ fn decode_product(
     nrays: usize,
     max_gates: usize,
 ) -> Result<Array2<f32>> {
+    let ngates = geometry.gate_count;
     if geometry.product == Product::ClutterFilterPower {
-        decode_cfp(radials, order, geometry, nrays, max_gates)
+        decode_into_array(radials, order, nrays, ngates, max_gates, |r, dst| {
+            if let Some(cfp) = r.clutter_filter_power() {
+                let n = dst.len();
+                for (slot, v) in dst.iter_mut().zip(cfp.iter().take(n)) {
+                    *slot = scaled_cfp(v);
+                }
+            }
+            // Untouched cells (radial without product, or md shorter than
+            // dst) keep their pre-NaN value.
+        })
     } else {
-        decode_regular(radials, order, geometry, nrays, max_gates)
+        let product = geometry.product;
+        decode_into_array(radials, order, nrays, ngates, max_gates, |r, dst| {
+            if let Some(md) = product.moment_data(r) {
+                let n = dst.len();
+                for (slot, mv) in dst.iter_mut().zip(md.iter().take(n)) {
+                    *slot = scaled_moment(mv);
+                }
+            }
+        })
     }
 }
 
-fn decode_regular(
+/// Shared buffer-management scaffold for both regular and CFP decode paths.
+///
+/// The buffer is pre-filled with NaN exactly once. The `fill_row` closure
+/// gets a `&mut [f32]` of length `ngates` per radial and is expected to
+/// overwrite cells where data is available. Cells the closure doesn't
+/// touch (because the radial lacks the product, or the moment yielded
+/// fewer items than `ngates`, or the row tail beyond `ngates` is padding)
+/// keep the NaN.
+fn decode_into_array<F>(
     radials: &[Radial],
     order: &[usize],
-    geometry: &MomentGeometry,
     nrays: usize,
+    ngates: usize,
     max_gates: usize,
-) -> Result<Array2<f32>> {
-    let ngates = geometry.gate_count;
-    let needs_padding = ngates < max_gates;
-    let mut buf: Vec<f32> = if needs_padding {
-        vec![f32::NAN; nrays * max_gates]
-    } else {
-        Vec::with_capacity(nrays * max_gates)
-    };
-
+    fill_row: F,
+) -> Result<Array2<f32>>
+where
+    F: Fn(&Radial, &mut [f32]),
+{
+    let mut buf: Vec<f32> = vec![f32::NAN; nrays * max_gates];
     for (row, &radial_idx) in order.iter().enumerate() {
-        match geometry.product.moment_data(&radials[radial_idx]) {
-            Some(md) if needs_padding => {
-                let dst_off = row * max_gates;
-                for (i, mv) in md.iter().take(ngates).enumerate() {
-                    buf[dst_off + i] = scaled_moment(mv);
-                }
-            }
-            Some(md) => {
-                let mut written = 0;
-                for mv in md.iter().take(ngates) {
-                    buf.push(scaled_moment(mv));
-                    written += 1;
-                }
-                while written < ngates {
-                    buf.push(f32::NAN);
-                    written += 1;
-                }
-            }
-            None if needs_padding => {}
-            None => {
-                for _ in 0..ngates {
-                    buf.push(f32::NAN);
-                }
-            }
-        }
+        let dst_off = row * max_gates;
+        let dst = &mut buf[dst_off..dst_off + ngates];
+        fill_row(&radials[radial_idx], dst);
     }
-
-    Array2::from_shape_vec((nrays, max_gates), buf)
-        .map_err(|e| RadishError::Conversion(e.to_string()))
-}
-
-/// CFP decode path. `Product::moment_data` returns `None` for
-/// `ClutterFilterPower`; the data lives on a separate `CFPMomentData`
-/// accessor with its own `CFPMomentValue` variant set.
-fn decode_cfp(
-    radials: &[Radial],
-    order: &[usize],
-    geometry: &MomentGeometry,
-    nrays: usize,
-    max_gates: usize,
-) -> Result<Array2<f32>> {
-    let ngates = geometry.gate_count;
-    let needs_padding = ngates < max_gates;
-    let mut buf: Vec<f32> = if needs_padding {
-        vec![f32::NAN; nrays * max_gates]
-    } else {
-        Vec::with_capacity(nrays * max_gates)
-    };
-
-    for (row, &radial_idx) in order.iter().enumerate() {
-        match radials[radial_idx].clutter_filter_power() {
-            Some(cfp) if needs_padding => {
-                let dst_off = row * max_gates;
-                for (i, v) in cfp.iter().take(ngates).enumerate() {
-                    buf[dst_off + i] = scaled_cfp(v);
-                }
-            }
-            Some(cfp) => {
-                let mut written = 0;
-                for v in cfp.iter().take(ngates) {
-                    buf.push(scaled_cfp(v));
-                    written += 1;
-                }
-                while written < ngates {
-                    buf.push(f32::NAN);
-                    written += 1;
-                }
-            }
-            None if needs_padding => {}
-            None => {
-                for _ in 0..ngates {
-                    buf.push(f32::NAN);
-                }
-            }
-        }
-    }
-
     Array2::from_shape_vec((nrays, max_gates), buf)
         .map_err(|e| RadishError::Conversion(e.to_string()))
 }
