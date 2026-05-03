@@ -18,6 +18,15 @@ use crate::{backends::RadarBackend, RadishError, Result, SweepData, VolumeData, 
 
 mod adapter;
 mod attrs;
+// Internal byte-level NEXRAD decoder. Plan 0003 lands this
+// incrementally — Phase 1+2 stages reader / record / header /
+// message-iteration; Phase 3+4 fill in MSG_31 / MSG_2 / MSG_5
+// parsers; Phase 7 cuts over the runtime read path. Until then
+// some helpers (e.g. `read_i32_be`, `MissingCoveragePattern`) are
+// unused; flagging the whole module with `#[allow(dead_code)]`
+// avoids polluting individual files with the attribute.
+#[allow(dead_code)]
+mod decode;
 mod mapping;
 pub(crate) mod sniff;
 
