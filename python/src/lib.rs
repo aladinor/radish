@@ -49,10 +49,11 @@ use radish::{
 /// inventory, and any backend-specific typed attribute objects
 /// (NEXRAD `nexrad_attrs`, Sigmet `sigmet_attrs`).
 ///
-/// Returned by [`VolumeData.metadata`][PyVolumeData::metadata] and by
-/// the format-specific scan helpers (`radish.scan_cfradial1`,
-/// `radish.scan_nexrad`, `radish.scan_sigmet`). Cheap to clone — the
-/// inner data is shared per-volume and never grows with sweep count.
+/// Returned by `VolumeData.metadata` (a getter on
+/// [`PyVolumeData`]) and by the format-specific scan helpers
+/// (`radish.scan_cfradial1`, `radish.scan_nexrad`,
+/// `radish.scan_sigmet`). Cheap to clone — the inner data is shared
+/// per-volume and never grows with sweep count.
 ///
 /// All angle and altitude fields use FM301 units (degrees, metres).
 #[pyclass(name = "VolumeMetadata")]
@@ -399,8 +400,8 @@ impl PySigmetVolumeAttrs {
 
 /// Per-sweep Sigmet/IRIS attrs.
 ///
-/// Reachable via [`SweepData.sigmet_attrs`][PySweepData::sigmet_attrs].
-/// Returns `None` for non-Sigmet sweeps. The same fields surface as
+/// Reachable via `SweepData.sigmet_attrs` (a getter on
+/// [`PySweepData`]). Returns `None` for non-Sigmet sweeps. The same fields surface as
 /// FM301 0-d data variables (`sweep_mode`, `sweep_fixed_angle`) inside
 /// the per-sweep xarray Dataset; this typed accessor is the
 /// lower-level path.
