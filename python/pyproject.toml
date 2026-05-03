@@ -12,7 +12,7 @@ name = "radish-rs"
 version = "0.2.0"
 description = "High-performance weather radar data library with Rust core"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = { text = "MIT OR Apache-2.0" }
 authors = [
     { name = "Alfonso Ladino", email = "alfonso@atmoscale.ai" },
@@ -24,10 +24,8 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
 ]
 

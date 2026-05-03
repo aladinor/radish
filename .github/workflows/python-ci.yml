@@ -17,7 +17,11 @@ jobs:
         # (currently the workflow has a stub for it that always fails).
         # Re-add via vcpkg or pre-built `libnetcdf` / `libhdf5` binaries.
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        # Python 3.9-3.11 dropped: 3.9 is EOL (Oct 2025) and our
+        # internal NEXRAD decoder uses PEP 604 (`Path | None`)
+        # which requires 3.10+; condensing the matrix to current
+        # supported versions only.
+        python-version: ['3.12', '3.13']
 
     steps:
     - name: Checkout code
@@ -103,7 +107,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.13'
 
     - name: Install linting tools
       run: |
@@ -129,7 +133,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.13'
 
     - name: Install dependencies
       # xarray is needed for the BackendEntrypoint class that

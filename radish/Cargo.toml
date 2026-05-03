@@ -30,6 +30,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # never panic, untouched cells always NaN, output shape always
 # `(nrays × max_gates)`). std-feature only; we don't need `regex`.
 proptest = { version = "1.5", default-features = false, features = ["std"] }
+# SHA-256 verification of NEXRAD test-fixture corpus. See
+# `radish/tests/fixtures/CORPUS.md` for the canonical sums.
+sha2 = "0.10"
 
 [[bench]]
 name = "nexrad"
