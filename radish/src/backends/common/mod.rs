@@ -32,3 +32,15 @@ pub(crate) mod geometry;
 pub(crate) mod metadata;
 pub(crate) mod sniff;
 pub(crate) mod sort;
+
+// Flat re-exports of the most-used items so adapters can write
+// `use crate::backends::common::{decode_into_array, MomentGeometry, ...};`
+// instead of one `use` line per submodule. Keeps each item still
+// accessible under its full path for tests / for items that namespace
+// nicely (`metadata::meta_for`, `sniff::SniffConfig`).
+pub(crate) use buffer::decode_into_array;
+pub(crate) use coords::assemble_ppi_coordinates;
+pub(crate) use geometry::{build_range_axis, MomentGeometry};
+pub(crate) use metadata::{meta_for, OdimMomentMeta};
+pub(crate) use sniff::{looks_like, looks_like_bytes, SniffConfig};
+pub(crate) use sort::sort_indices_by_key;

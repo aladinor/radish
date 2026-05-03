@@ -10,7 +10,7 @@
 use nexrad_model::data::Product;
 use radish_types::moments;
 
-use crate::backends::common::metadata::{meta_for, OdimMomentMeta};
+use crate::backends::common::{meta_for, OdimMomentMeta};
 
 /// `CCORH` isn't in `radish_types::moments` (which mirrors the CfRadial2 short
 /// names, where this product is undefined). Keep it as a local constant for the

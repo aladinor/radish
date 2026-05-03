@@ -146,4 +146,55 @@ mod tests {
         };
         assert!(!looks_like(&PathBuf::from("/no/such/file"), &cfg));
     }
+
+    /// Magic-byte sniff actually reads from disk. Pin the contract: a file
+    /// whose name and extension don't match any signal but whose first
+    /// bytes do, is recognised. Mirrors the `KLOT...` extension-less path
+    /// the NEXRAD backend handles in production.
+    #[test]
+    fn magic_byte_read_from_disk_recognises_known_prefix() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // Bytes the sniff should match (AR2V + filler).
+        tmp.write_all(b"AR2V0006.001\x00\x00\x00\x00")
+            .expect("write");
+        tmp.flush().expect("flush");
+        let cfg = SniffConfig {
+            // Deliberately empty extensions + no filename pattern: only the
+            // disk-read magic check can succeed here.
+            extensions: &[],
+            magic_prefixes: &[b"AR2V"],
+            filename_pattern: None,
+        };
+        assert!(looks_like(tmp.path(), &cfg));
+    }
+
+    #[test]
+    fn magic_byte_read_from_disk_rejects_unknown_prefix() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        tmp.write_all(b"GARBAGE!").expect("write");
+        tmp.flush().expect("flush");
+        let cfg = SniffConfig {
+            extensions: &[],
+            magic_prefixes: &[b"AR2V", b"\x89HDF"],
+            filename_pattern: None,
+        };
+        assert!(!looks_like(tmp.path(), &cfg));
+    }
+
+    #[test]
+    fn magic_byte_short_file_does_not_panic() {
+        // File shorter than the longest configured magic — must not crash.
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        tmp.write_all(b"AR").expect("write");
+        tmp.flush().expect("flush");
+        let cfg = SniffConfig {
+            extensions: &[],
+            magic_prefixes: &[b"AR2V"],
+            filename_pattern: None,
+        };
+        assert!(!looks_like(tmp.path(), &cfg));
+    }
 }

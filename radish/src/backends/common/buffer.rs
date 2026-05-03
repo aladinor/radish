@@ -107,4 +107,69 @@ mod tests {
         assert_eq!(arr[(1, 0)], 0.0);
         assert_eq!(arr[(1, 3)], 3.0);
     }
+
+    /// Property-based tests covering the contract surface beyond the
+    /// hand-picked unit tests. Adapter ports (sigmet, etc.) lean on these
+    /// invariants when they wire `decode_into_array` into a new format —
+    /// random shapes catch off-by-ones and panic-on-edge bugs the explicit
+    /// tests above don't.
+    mod properties {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// For any well-formed `(nrays, ngates, max_gates)` triple
+            /// (with ngates ≤ max_gates) and any closure that doesn't
+            /// touch the buffer, every cell stays NaN and the resulting
+            /// shape is exactly `(nrays × max_gates)`.
+            #[test]
+            fn untouched_buffer_is_all_nan_with_correct_shape(
+                nrays in 0usize..16,
+                max_gates in 1usize..32,
+                ngates_extra in 0usize..32,
+            ) {
+                let ngates = (ngates_extra % max_gates).min(max_gates);
+                let items: Vec<u8> = (0..nrays).map(|i| i as u8).collect();
+                let order: Vec<usize> = (0..nrays).collect();
+                let arr = decode_into_array::<u8, _>(
+                    &items, &order, nrays, ngates, max_gates,
+                    |_, _dst| { /* deliberately untouched */ },
+                ).unwrap();
+                prop_assert_eq!(arr.shape(), &[nrays, max_gates]);
+                prop_assert!(arr.iter().all(|v| v.is_nan()));
+            }
+
+            /// A closure that fills exactly the first `ngates` cells with
+            /// a sentinel leaves the trailing `max_gates - ngates` cells
+            /// NaN on every row, regardless of the permutation order.
+            #[test]
+            fn trailing_gates_stay_nan_when_closure_fills_only_ngates(
+                nrays in 1usize..8,
+                max_gates in 2usize..16,
+                ngates_extra in 0usize..16,
+            ) {
+                let ngates = ((ngates_extra % max_gates).max(1)).min(max_gates);
+                let items: Vec<f32> = (0..nrays).map(|i| (i + 1) as f32 * 10.0).collect();
+                // Reverse order so the test isn't trivially the identity.
+                let order: Vec<usize> = (0..nrays).rev().collect();
+                let arr = decode_into_array(
+                    &items, &order, nrays, ngates, max_gates,
+                    |&v, dst| {
+                        for slot in dst.iter_mut() { *slot = v; }
+                    },
+                ).unwrap();
+                for row in 0..nrays {
+                    // Filled prefix matches the item the closure saw.
+                    let expected = items[order[row]];
+                    for col in 0..ngates {
+                        prop_assert_eq!(arr[(row, col)], expected);
+                    }
+                    // Trailing tail is NaN.
+                    for col in ngates..max_gates {
+                        prop_assert!(arr[(row, col)].is_nan());
+                    }
+                }
+            }
+        }
+    }
 }

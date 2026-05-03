@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use crate::backends::common::sniff::{looks_like, looks_like_bytes, SniffConfig};
+use crate::backends::common::{looks_like, looks_like_bytes, SniffConfig};
 
 /// Length of the canonical filename core: 4 ICAO + 8 date + `_` + 6 time.
 const NEXRAD_NAME_CORE_LEN: usize = 19;
@@ -29,7 +29,12 @@ pub(crate) const GZIP_MAGIC: &[u8; 2] = &[0x1f, 0x8b];
 
 /// Centralised sniff config consumed by the common dispatcher. Adding a new
 /// signal (more extensions, a different magic) is a one-line edit here.
-pub(crate) static NEXRAD_SNIFF: SniffConfig = SniffConfig {
+///
+/// `const` rather than `static` because `SniffConfig` is `Copy` and the
+/// literal contains only `&'static` references plus a function pointer —
+/// the compile-time form makes it explicit that no addressable storage
+/// lives at runtime.
+pub(crate) const NEXRAD_SNIFF: SniffConfig = SniffConfig {
     extensions: EXTENSIONS,
     magic_prefixes: &[AR2V_MAGIC, GZIP_MAGIC],
     filename_pattern: Some(matches_nexrad_filename),

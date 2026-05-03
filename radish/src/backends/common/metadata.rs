@@ -24,9 +24,21 @@
 /// key (radish-public short name), the others are pure attribute strings
 /// emitted on the resulting `xarray.DataArray`.
 pub(crate) struct OdimMomentMeta {
+    /// ODIM short name — the key consumed by callers and the variable name
+    /// the moment surfaces as in the resulting xarray DataTree (e.g.
+    /// `"DBZH"`, `"VRADH"`).
     pub(crate) odim_name: &'static str,
+    /// Unit string emitted as the `units` attribute on the moment's
+    /// `xarray.DataArray`. Mirrors xradar's per-format reader exactly,
+    /// including idiosyncrasies like the trailing-`s` `"meters per seconds"`
+    /// for velocity moments — engine-swap parity depends on byte-for-byte
+    /// equality here.
     pub(crate) units: &'static str,
+    /// CF `standard_name` attribute. Conventionally lower-snake-case and
+    /// matched against the CF standard-name table where applicable.
     pub(crate) standard_name: &'static str,
+    /// Human-readable description emitted as the `long_name` attribute.
+    /// Mixed-case prose; not a CF-controlled vocabulary.
     pub(crate) long_name: &'static str,
 }
 
