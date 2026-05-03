@@ -12,7 +12,7 @@ this folder is for content that's too detailed to fit there.
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Data model, backend trait, design rationale, Mermaid diagrams |
 | [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md) | Phased roadmap and current implementation status |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog format) |
-| [`RELEASING.md`](RELEASING.md) | Release walkthrough — added by the `ci/release-pipeline` PR |
+| `RELEASING.md` | Release walkthrough — added by the `ci/release-pipeline` PR (link wired up once that lands) |
 
 ## Conventions
 
