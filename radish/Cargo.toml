@@ -18,6 +18,8 @@ hdf5 = { workspace = true }
 netcdf = { workspace = true }
 nexrad = { workspace = true }
 nexrad-model = { workspace = true }
+byteorder = { workspace = true }
+bytemuck = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
