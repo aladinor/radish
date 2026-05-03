@@ -6,9 +6,11 @@ use std::path::Path;
 pub mod cfradial1;
 pub(crate) mod common;
 pub mod nexrad;
+pub mod sigmet;
 
 pub use cfradial1::CfRadial1Backend;
 pub use nexrad::NexradBackend;
+pub use sigmet::SigmetBackend;
 
 /// Trait for radar file format backends
 ///
@@ -81,6 +83,7 @@ pub fn available_backends() -> Vec<Box<dyn RadarBackend>> {
     vec![
         Box::new(CfRadial1Backend::new()),
         Box::new(NexradBackend::new()),
+        Box::new(SigmetBackend::new()),
     ]
 }
 
