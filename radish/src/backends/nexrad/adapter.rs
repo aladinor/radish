@@ -102,10 +102,22 @@ pub(super) fn build_volume_metadata(
     metadata.institution = "NOAA/NWS".to_string();
     metadata.platform_type = Some(PlatformType::Fixed);
     metadata.generate_sweep_names(num_sweeps);
+    // Per the comment on `convert_sweep`'s `fixed_angle` below, prefer
+    // the MSG_5 commanded angle (`ElevationCut`) over the median of
+    // per-ray MSG_31 angles. Keeps the root-level
+    // `sweep_fixed_angle(sweep)` array byte-identical to xradar's and
+    // aligned with the VCP reference.
+    let cuts = scan.coverage_pattern().elevation_cuts();
     metadata.sweep_fixed_angles = scan
         .sweeps()
         .iter()
-        .map(|s| s.elevation_angle_degrees().unwrap_or(f32::NAN) as f64)
+        .enumerate()
+        .map(|(idx, s)| {
+            cuts.get(idx)
+                .map(|c| c.elevation_angle_degrees())
+                .or_else(|| s.elevation_angle_degrees().map(|a| a as f64))
+                .unwrap_or(f64::NAN)
+        })
         .collect();
 
     // VCP attributes match xradar's `VCP-NNN` form (e.g. `VCP-212`) so
@@ -183,9 +195,20 @@ pub(super) fn convert_sweep(
         },
     );
 
-    let fixed_angle = sweep
-        .elevation_angle_degrees()
-        .map(|a| a as f64)
+    // Use the MSG_5 commanded elevation (`ElevationCut::elevation_angle_degrees`)
+    // when available — that matches xradar's `open_nexradlevel2_datatree`
+    // and the VCP reference angle a user expects ("VCP-32 sweep 1 = 0.5°").
+    //
+    // `nexrad-model`'s `Sweep::elevation_angle_degrees` returns the
+    // *median of MSG_31 per-radial elevation angles* — the achieved
+    // beam angle, not the commanded one. Both are spec-compliant, but
+    // they differ by up to ~0.18° (MSG_5 LSB × small servo error)
+    // which trips downstream tests that compare against the VCP
+    // reference. Fall back to the median-of-radials when the cut is
+    // missing (truncated VCP, malformed file).
+    let fixed_angle = cut
+        .map(|c| c.elevation_angle_degrees())
+        .or_else(|| sweep.elevation_angle_degrees().map(|a| a as f64))
         .unwrap_or_else(|| median_elevation(&coordinates.elevation));
     let sweep_number = sweep.elevation_number() as u32;
     // PRT, Nyquist, PRF and polarization mode aren't surfaced by
