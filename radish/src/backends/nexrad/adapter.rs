@@ -131,6 +131,7 @@ pub(super) fn build_volume_metadata(
     metadata.nexrad = Some(volume_attrs(
         scan.coverage_pattern(),
         msg2,
+        scan.sweeps(),
         num_sweeps as u32,
     ));
 

@@ -287,6 +287,34 @@ impl PyNexradVolumeAttrs {
     fn actual_elevation_cuts(&self) -> u32 {
         self.inner.actual_elevation_cuts
     }
+
+    /// Per-sweep MSG_5 attrs in sweep-index order. `len()` matches
+    /// `VolumeMetadata.sweep_fixed_angles`. Reachable from
+    /// `radish.scan_nexrad(path).nexrad_attrs.sweep_attrs[i]` so
+    /// callers can classify SAILS×N / MRLE / MPDA / base-tilt slices
+    /// without a full per-ray decode — preserves the metadata-only
+    /// speedup of `scan_nexrad` vs xradar's per-ray path while exposing
+    /// the per-cut data the classifier needs.
+    #[getter]
+    fn sweep_attrs(&self) -> Vec<PyNexradSweepAttrs> {
+        self.inner
+            .sweep_attrs
+            .iter()
+            .cloned()
+            .map(|inner| PyNexradSweepAttrs { inner })
+            .collect()
+    }
+
+    /// Per-sweep `(time_start, time_end)` ranges as Unix seconds since
+    /// 1970-01-01 UTC (float). Matches the `Coordinates::time` axis
+    /// convention used by every backend, so consumers can convert with
+    /// `pandas.to_datetime(t, unit="s")` or
+    /// `np.array(t, dtype="datetime64[s]")`. `None` for sweeps whose
+    /// radials don't carry timestamps. Length matches `sweep_attrs`.
+    #[getter]
+    fn sweep_time_ranges(&self) -> Vec<Option<(f64, f64)>> {
+        self.inner.sweep_time_ranges.clone()
+    }
 }
 
 /// Per-sweep NEXRAD attrs from MSG_5 elevation cuts. Field names match
