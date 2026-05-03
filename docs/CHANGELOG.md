@@ -51,8 +51,8 @@ First public release on PyPI as
   PyPI, manylinux_2_28 wheels for Linux x86_64 + macOS x86_64 +
   macOS arm64.
 - **Documentation**: `docs/ARCHITECTURE.md`, `docs/GETTING_STARTED.md`,
-  `docs/PROJECT_SUMMARY.md`, `RELEASING.md`, plus crate-level rustdoc
-  and PyO3 docstrings.
+  `docs/PROJECT_SUMMARY.md`, `docs/RELEASING.md`, plus crate-level
+  rustdoc and PyO3 docstrings.
 
 ### Known limitations
 
