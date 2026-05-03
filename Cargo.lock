@@ -1552,7 +1552,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "radish"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "radish-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ndarray",
  "numpy",
@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "radish-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",

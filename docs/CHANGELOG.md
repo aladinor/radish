@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing here yet — open a PR to start populating._
+
+## [0.2.0] - 2026-05-03
+
 ### Added
 
 - **NEXRAD: per-sweep MSG_5 attrs and time ranges on `scan_nexrad`** —
@@ -129,5 +133,6 @@ First public release on PyPI as
 - CfRadial2 native reader and ODIM H5 backend are planned for
   Phase 2 (see `docs/PROJECT_SUMMARY.md`).
 
-[Unreleased]: https://github.com/aladinor/radish/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/aladinor/radish/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/aladinor/radish/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/aladinor/radish/releases/tag/v0.1.0
