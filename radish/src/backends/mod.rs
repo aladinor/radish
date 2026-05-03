@@ -4,6 +4,7 @@ use crate::{Result, SweepData, VolumeData, VolumeMetadata};
 use std::path::Path;
 
 pub mod cfradial1;
+pub(crate) mod common;
 pub mod nexrad;
 
 pub use cfradial1::CfRadial1Backend;
