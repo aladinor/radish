@@ -45,25 +45,41 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux (manylinux 2_28 / AlmaLinux 8; covers RHEL 8+, Ubuntu 20.04+).
-          # The older 2_17 (CentOS 7) container ships an `nc-config` whose
-          # `--version` output panics `netcdf-sys 0.9.0`'s build.rs version
-          # parser ("unexpected character '.' after patch version number").
-          # 2_28's netcdf is new enough that the parser succeeds.
+          # Linux x86_64 only. manylinux 2_28 (AlmaLinux 8 base) covers
+          # RHEL 8+, Ubuntu 20.04+, Debian 11+. The older 2_17 (CentOS
+          # 7) container ships an `nc-config` whose `--version` output
+          # panics `netcdf-sys 0.9.0`'s build.rs version parser; 2_28's
+          # netcdf is new enough to dodge that.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             manylinux: '2_28'
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            manylinux: '2_28'
-          # macOS (Intel + Apple Silicon)
+          # macOS — both Intel and Apple Silicon. Both build cleanly
+          # via Homebrew's hdf5/netcdf and PyO3/maturin-action's host
+          # build.
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          # Windows (x86_64 only — aarch64 Windows wheels are still uncommon)
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # Linux aarch64 + Windows x86_64 are intentionally NOT in
+          # the wheel matrix:
+          #
+          # * Linux aarch64 — the `before-script-linux` yum-installs
+          #   libhdf5/libnetcdf in the host x86_64 container, then
+          #   `cargo` cross-compiles to aarch64. Linker can't find
+          #   aarch64-flavored libs. Fixing this needs proper QEMU
+          #   emulation or a `cross`-rs setup, not a one-line tweak.
+          #
+          # * Windows x86_64 — `hdf5-metno-sys 0.11.3` build.rs panics
+          #   looking for files vcpkg's `x64-windows-static-md`
+          #   triplet doesn't expose. Real fix is half-day-plus of
+          #   triplet/feature debugging that's well-known-painful for
+          #   any crate depending on libhdf5+libnetcdf (see h5py /
+          #   netCDF4-python's CI history).
+          #
+          # Users on those platforms install from the sdist below;
+          # works as long as they have Rust + libhdf5-dev +
+          # libnetcdf-dev locally. Add a real wheel in a future PR
+          # once the cross-compilation toolchain is sorted.
 
     steps:
       - uses: actions/checkout@v4
@@ -84,16 +100,6 @@ jobs:
           echo "HDF5_DIR=$(brew --prefix hdf5)" >> $GITHUB_ENV
           echo "NETCDF_DIR=$(brew --prefix netcdf)" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=$(brew --prefix hdf5)/lib/pkgconfig:$(brew --prefix netcdf)/lib/pkgconfig" >> $GITHUB_ENV
-
-      - name: Install system deps (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          # vcpkg ships pre-built static libs for hdf5 + netcdf.
-          # `vcpkg install` is slow (~5 min) but cached after the first run.
-          vcpkg install hdf5:x64-windows-static-md netcdf-c:x64-windows-static-md
-          echo "HDF5_DIR=$Env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static-md" >> $Env:GITHUB_ENV
-          echo "NETCDF_DIR=$Env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static-md" >> $Env:GITHUB_ENV
-        shell: pwsh
 
       - name: Build wheel(s) — Linux (manylinux container)
         if: runner.os == 'Linux'
