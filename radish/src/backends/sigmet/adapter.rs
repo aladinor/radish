@@ -92,6 +92,14 @@ pub(super) fn build_volume_metadata(
     metadata.institution = "Vaisala / SIGMET".to_string();
     metadata.platform_type = Some(radish_types::PlatformType::Fixed);
     metadata.generate_sweep_names(decoded.sweeps.len());
+    // Read the per-sweep INGEST_DATA_HEADER.fixed_angle (BIN2-encoded
+    // achieved beam angle). Differs from xradar's value by sub-
+    // milli-degree quantization noise (~0.002°): xradar reads the
+    // commanded angle from a mode-dependent block in TASK_SCAN_INFO
+    // (TASK_PPI_SCAN_INFO for PPI vs TASK_RHI_SCAN_INFO for RHI),
+    // which we don't fully wire through yet. The diff is below the
+    // antenna's pointing accuracy and well below any meaningful VCP
+    // step — tracked as a follow-up.
     metadata.sweep_fixed_angles = decoded
         .sweeps
         .iter()
