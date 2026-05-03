@@ -10,16 +10,24 @@ fn main() {
         Ok(v) => {
             println!("OK:");
             println!("  instrument: {}", v.metadata.instrument_name);
-            println!("  lat/lon:    {:.4}, {:.4}", v.metadata.latitude, v.metadata.longitude);
+            println!(
+                "  lat/lon:    {:.4}, {:.4}",
+                v.metadata.latitude, v.metadata.longitude
+            );
             println!("  num sweeps: {}", v.num_sweeps());
             for (i, s) in v.sweeps.iter().enumerate().take(3) {
-                println!("  sweep {}: {} rays, {} gates, {} moments, fixed_angle={:.2}",
-                    i, s.coordinates.azimuth.len(), s.coordinates.range.len(),
-                    s.moments.len(), s.metadata.fixed_angle);
+                println!(
+                    "  sweep {}: {} rays, {} gates, {} moments, fixed_angle={:.2}",
+                    i,
+                    s.coordinates.azimuth.len(),
+                    s.coordinates.range.len(),
+                    s.moments.len(),
+                    s.metadata.fixed_angle
+                );
                 let names: Vec<&str> = s.moments.keys().map(|s| s.as_str()).collect();
                 println!("        moments: {:?}", names);
             }
-        },
+        }
         Err(e) => println!("ERR: {e:?}"),
     }
 }

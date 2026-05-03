@@ -13,12 +13,10 @@ use ndarray::Array2;
 use radish_types::SweepMode;
 use rayon::prelude::*;
 
-use crate::backends::common::{
-    assemble_ppi_coordinates, decode_into_array, sort_indices_by_key,
-};
+use crate::backends::common::{assemble_ppi_coordinates, decode_into_array, sort_indices_by_key};
 use crate::{
-    MomentData, RadishError, Result, SigmetSweepAttrs, SigmetVolumeAttrs, SweepData,
-    SweepMetadata, VolumeData, VolumeMetadata,
+    MomentData, RadishError, Result, SigmetSweepAttrs, SigmetVolumeAttrs, SweepData, SweepMetadata,
+    VolumeData, VolumeMetadata,
 };
 
 use super::decode::{DecodedRay, DecodedSweep, DecodedVolume};
@@ -47,7 +45,15 @@ pub(super) fn convert_volume(decoded: DecodedVolume, source: &Path) -> Result<Vo
         .sweeps
         .par_iter()
         .enumerate()
-        .map(|(idx, sweep)| convert_sweep(sweep, idx, decoded.scan_mode, &decoded.range_axis_m, &active_ids))
+        .map(|(idx, sweep)| {
+            convert_sweep(
+                sweep,
+                idx,
+                decoded.scan_mode,
+                &decoded.range_axis_m,
+                &active_ids,
+            )
+        })
         .collect::<Result<_>>()?;
 
     Ok(VolumeData::new(metadata, sweeps))
@@ -90,13 +96,13 @@ pub(super) fn build_volume_metadata(
     metadata
         .attributes
         .insert("scan_name".to_string(), decoded.task_name.clone());
+    metadata.attributes.insert(
+        "scan_mode".to_string(),
+        decoded.scan_mode.label().to_string(),
+    );
     metadata
         .attributes
-        .insert("scan_mode".to_string(), decoded.scan_mode.label().to_string());
-    metadata.attributes.insert(
-        "iris_version".to_string(),
-        decoded.iris_version.clone(),
-    );
+        .insert("iris_version".to_string(), decoded.iris_version.clone());
     metadata.sigmet = Some(SigmetVolumeAttrs {
         task_name: decoded.task_name.clone(),
         iris_version: decoded.iris_version.clone(),
@@ -109,10 +115,7 @@ pub(super) fn build_volume_metadata(
     Ok(metadata)
 }
 
-pub(super) fn convert_sweep_at(
-    decoded: &DecodedVolume,
-    idx: usize,
-) -> Option<Result<SweepData>> {
+pub(super) fn convert_sweep_at(decoded: &DecodedVolume, idx: usize) -> Option<Result<SweepData>> {
     let sweep = decoded.sweeps.get(idx)?;
     let active_ids: Vec<u8> = SUPPORTED_MOMENTS
         .iter()
@@ -176,16 +179,11 @@ fn convert_sweep(
         }
 
         let arr = build_moment_array(rays, &order, data_type_id, nrays, max_gates)?;
-        let meta = cf_metadata_for(m).ok_or_else(|| RadishError::Conversion(format!(
-            "no CF metadata for ODIM moment {:?}",
-            m.odim_name
-        )))?;
+        let meta = cf_metadata_for(m).ok_or_else(|| {
+            RadishError::Conversion(format!("no CF metadata for ODIM moment {:?}", m.odim_name))
+        })?;
 
-        let mut moment = MomentData::new(
-            meta.odim_name.to_string(),
-            meta.units.to_string(),
-            arr,
-        );
+        let mut moment = MomentData::new(meta.odim_name.to_string(), meta.units.to_string(), arr);
         moment.standard_name = Some(meta.standard_name.to_string());
         moment.long_name = Some(meta.long_name.to_string());
         moment.fill_value = Some(f32::NAN);

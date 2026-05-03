@@ -12,12 +12,23 @@
 
 use crate::backends::common::{meta_for, OdimMomentMeta};
 
-use super::calibration::{Decoder, DECODE_DBZ_2BYTE, DECODE_DBZ_8BIT, DECODE_NONE, DECODE_PHIDP_2BYTE, DECODE_PHIDP_8BIT, DECODE_RHOHV_2BYTE, DECODE_RHOHV_8BIT, DECODE_VEL_2BYTE, DECODE_VEL_8BIT, DECODE_WIDTH_2BYTE, DECODE_WIDTH_8BIT, DECODE_ZDR_2BYTE, DECODE_ZDR_8BIT};
+use super::calibration::{
+    Decoder, DECODE_DBZ_2BYTE, DECODE_DBZ_8BIT, DECODE_NONE, DECODE_PHIDP_2BYTE, DECODE_PHIDP_8BIT,
+    DECODE_RHOHV_2BYTE, DECODE_RHOHV_8BIT, DECODE_VEL_2BYTE, DECODE_VEL_8BIT, DECODE_WIDTH_2BYTE,
+    DECODE_WIDTH_8BIT, DECODE_ZDR_2BYTE, DECODE_ZDR_8BIT,
+};
 
 /// One entry in the IRIS data-type table. The `data_type_id` is the
 /// position bit in `dsp_data_mask` and the byte the per-ray header
 /// records. `bytes_per_bin` is 1 (most legacy types) or 2 (modern
 /// double-precision variants suffixed `2`).
+///
+/// `iris_name` and `bytes_per_bin` are kept on the struct for future use
+/// (e.g. `bytes_per_bin` will become authoritative for the RLE buffer
+/// width once we stop reading it from the per-ray INGEST_DATA_HEADER).
+/// They're allowed-dead for now to avoid clippy churn while the table
+/// stabilises.
+#[allow(dead_code)]
 pub(super) struct SigmetMoment {
     /// IRIS data-type id (e.g. 2 = DB_DBZ, 9 = DB_DBZ2).
     pub(super) data_type_id: u8,
@@ -37,25 +48,133 @@ pub(super) struct SigmetMoment {
 /// xradar's `SIGMET_DATA_TYPES` ordering.
 pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
     // 8-bit legacy variants ------------------------------------------------
-    SigmetMoment { data_type_id: 1,  iris_name: "DB_DBT",    odim_name: "DBTH",  bytes_per_bin: 1, decoder: DECODE_DBZ_8BIT },
-    SigmetMoment { data_type_id: 2,  iris_name: "DB_DBZ",    odim_name: "DBZH",  bytes_per_bin: 1, decoder: DECODE_DBZ_8BIT },
-    SigmetMoment { data_type_id: 3,  iris_name: "DB_VEL",    odim_name: "VRADH", bytes_per_bin: 1, decoder: DECODE_VEL_8BIT },
-    SigmetMoment { data_type_id: 4,  iris_name: "DB_WIDTH",  odim_name: "WRADH", bytes_per_bin: 1, decoder: DECODE_WIDTH_8BIT },
-    SigmetMoment { data_type_id: 5,  iris_name: "DB_ZDR",    odim_name: "ZDR",   bytes_per_bin: 1, decoder: DECODE_ZDR_8BIT },
-    SigmetMoment { data_type_id: 14, iris_name: "DB_KDP",    odim_name: "KDP",   bytes_per_bin: 1, decoder: DECODE_NONE },
-    SigmetMoment { data_type_id: 16, iris_name: "DB_PHIDP",  odim_name: "PHIDP", bytes_per_bin: 1, decoder: DECODE_PHIDP_8BIT },
-    SigmetMoment { data_type_id: 19, iris_name: "DB_SQI",    odim_name: "SQIH",  bytes_per_bin: 1, decoder: DECODE_NONE },
-    SigmetMoment { data_type_id: 20, iris_name: "DB_RHOHV",  odim_name: "RHOHV", bytes_per_bin: 1, decoder: DECODE_RHOHV_8BIT },
+    SigmetMoment {
+        data_type_id: 1,
+        iris_name: "DB_DBT",
+        odim_name: "DBTH",
+        bytes_per_bin: 1,
+        decoder: DECODE_DBZ_8BIT,
+    },
+    SigmetMoment {
+        data_type_id: 2,
+        iris_name: "DB_DBZ",
+        odim_name: "DBZH",
+        bytes_per_bin: 1,
+        decoder: DECODE_DBZ_8BIT,
+    },
+    SigmetMoment {
+        data_type_id: 3,
+        iris_name: "DB_VEL",
+        odim_name: "VRADH",
+        bytes_per_bin: 1,
+        decoder: DECODE_VEL_8BIT,
+    },
+    SigmetMoment {
+        data_type_id: 4,
+        iris_name: "DB_WIDTH",
+        odim_name: "WRADH",
+        bytes_per_bin: 1,
+        decoder: DECODE_WIDTH_8BIT,
+    },
+    SigmetMoment {
+        data_type_id: 5,
+        iris_name: "DB_ZDR",
+        odim_name: "ZDR",
+        bytes_per_bin: 1,
+        decoder: DECODE_ZDR_8BIT,
+    },
+    SigmetMoment {
+        data_type_id: 14,
+        iris_name: "DB_KDP",
+        odim_name: "KDP",
+        bytes_per_bin: 1,
+        decoder: DECODE_NONE,
+    },
+    SigmetMoment {
+        data_type_id: 16,
+        iris_name: "DB_PHIDP",
+        odim_name: "PHIDP",
+        bytes_per_bin: 1,
+        decoder: DECODE_PHIDP_8BIT,
+    },
+    SigmetMoment {
+        data_type_id: 19,
+        iris_name: "DB_SQI",
+        odim_name: "SQIH",
+        bytes_per_bin: 1,
+        decoder: DECODE_NONE,
+    },
+    SigmetMoment {
+        data_type_id: 20,
+        iris_name: "DB_RHOHV",
+        odim_name: "RHOHV",
+        bytes_per_bin: 1,
+        decoder: DECODE_RHOHV_8BIT,
+    },
     // 16-bit modern variants -----------------------------------------------
-    SigmetMoment { data_type_id: 8,  iris_name: "DB_DBT2",   odim_name: "DBTH",  bytes_per_bin: 2, decoder: DECODE_DBZ_2BYTE },
-    SigmetMoment { data_type_id: 9,  iris_name: "DB_DBZ2",   odim_name: "DBZH",  bytes_per_bin: 2, decoder: DECODE_DBZ_2BYTE },
-    SigmetMoment { data_type_id: 10, iris_name: "DB_VEL2",   odim_name: "VRADH", bytes_per_bin: 2, decoder: DECODE_VEL_2BYTE },
-    SigmetMoment { data_type_id: 11, iris_name: "DB_WIDTH2", odim_name: "WRADH", bytes_per_bin: 2, decoder: DECODE_WIDTH_2BYTE },
-    SigmetMoment { data_type_id: 12, iris_name: "DB_ZDR2",   odim_name: "ZDR",   bytes_per_bin: 2, decoder: DECODE_ZDR_2BYTE },
-    SigmetMoment { data_type_id: 15, iris_name: "DB_KDP2",   odim_name: "KDP",   bytes_per_bin: 2, decoder: DECODE_NONE },
-    SigmetMoment { data_type_id: 17, iris_name: "DB_PHIDP2", odim_name: "PHIDP", bytes_per_bin: 2, decoder: DECODE_PHIDP_2BYTE },
-    SigmetMoment { data_type_id: 21, iris_name: "DB_SNR16",  odim_name: "SNRH",  bytes_per_bin: 2, decoder: DECODE_NONE },
-    SigmetMoment { data_type_id: 22, iris_name: "DB_RHOHV2", odim_name: "RHOHV", bytes_per_bin: 2, decoder: DECODE_RHOHV_2BYTE },
+    SigmetMoment {
+        data_type_id: 8,
+        iris_name: "DB_DBT2",
+        odim_name: "DBTH",
+        bytes_per_bin: 2,
+        decoder: DECODE_DBZ_2BYTE,
+    },
+    SigmetMoment {
+        data_type_id: 9,
+        iris_name: "DB_DBZ2",
+        odim_name: "DBZH",
+        bytes_per_bin: 2,
+        decoder: DECODE_DBZ_2BYTE,
+    },
+    SigmetMoment {
+        data_type_id: 10,
+        iris_name: "DB_VEL2",
+        odim_name: "VRADH",
+        bytes_per_bin: 2,
+        decoder: DECODE_VEL_2BYTE,
+    },
+    SigmetMoment {
+        data_type_id: 11,
+        iris_name: "DB_WIDTH2",
+        odim_name: "WRADH",
+        bytes_per_bin: 2,
+        decoder: DECODE_WIDTH_2BYTE,
+    },
+    SigmetMoment {
+        data_type_id: 12,
+        iris_name: "DB_ZDR2",
+        odim_name: "ZDR",
+        bytes_per_bin: 2,
+        decoder: DECODE_ZDR_2BYTE,
+    },
+    SigmetMoment {
+        data_type_id: 15,
+        iris_name: "DB_KDP2",
+        odim_name: "KDP",
+        bytes_per_bin: 2,
+        decoder: DECODE_NONE,
+    },
+    SigmetMoment {
+        data_type_id: 17,
+        iris_name: "DB_PHIDP2",
+        odim_name: "PHIDP",
+        bytes_per_bin: 2,
+        decoder: DECODE_PHIDP_2BYTE,
+    },
+    SigmetMoment {
+        data_type_id: 21,
+        iris_name: "DB_SNR16",
+        odim_name: "SNRH",
+        bytes_per_bin: 2,
+        decoder: DECODE_NONE,
+    },
+    SigmetMoment {
+        data_type_id: 22,
+        iris_name: "DB_RHOHV2",
+        odim_name: "RHOHV",
+        bytes_per_bin: 2,
+        decoder: DECODE_RHOHV_2BYTE,
+    },
 ];
 
 /// Look up a moment definition by its IRIS data-type id. Returns `None`

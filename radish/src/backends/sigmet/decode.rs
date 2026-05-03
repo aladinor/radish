@@ -38,13 +38,12 @@
 
 use std::collections::HashMap;
 
-use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Utc};
 
 use crate::{RadishError, Result};
 
 use super::calibration::Decoder;
-use super::mapping::{moment_for_id, SigmetMoment};
+use super::mapping::moment_for_id;
 use super::structs::{
     bin2_to_degrees, IngestConfiguration, IngestDataHeader, RawProdBhdr, ScanMode, StructureHeader,
     TaskConfiguration, INGEST_CONFIGURATION_BYTES, RECORD_BYTES, STRUCTURE_HEADER_BYTES,
@@ -67,6 +66,9 @@ pub(super) struct DecodedVolume {
     pub unambiguous_range_m: f32,
     /// Per-gate range axis in metres.
     pub range_axis_m: Vec<f32>,
+    /// Output gate count (kept for callers that want it without
+    /// re-deriving from `range_axis_m.len()`).
+    #[allow(dead_code)]
     pub gate_count: usize,
     pub sweeps: Vec<DecodedSweep>,
 }
@@ -199,9 +201,8 @@ pub(super) fn parse_volume(data: &[u8]) -> Result<DecodedVolume> {
         task_name: task.task_name,
         latitude_deg: cfg.latitude_deg,
         longitude_deg: cfg.longitude_deg,
-        altitude_m: (cfg.altitude_radar_cm as f64 / 100.0).max(
-            (cfg.height_site_m + cfg.height_radar_m) as f64,
-        ),
+        altitude_m: (cfg.altitude_radar_cm as f64 / 100.0)
+            .max((cfg.height_site_m + cfg.height_radar_m) as f64),
         volume_start_time: cfg.volume_scan_start_time,
         scan_mode: task.scan_mode,
         nyquist_velocity_ms: task.nyquist_velocity_ms,
@@ -247,7 +248,7 @@ impl<'a> RecordReader<'a> {
     /// If `self.pos` is at the start of a record, skip the 12-byte
     /// `RAW_PROD_BHDR`. Idempotent — only the head of a record gets skipped.
     fn skip_record_header_if_at_boundary(&mut self) {
-        if self.pos < self.end && self.pos % RECORD_BYTES == 0 {
+        if self.pos < self.end && self.pos.is_multiple_of(RECORD_BYTES) {
             self.pos += 12; // RAW_PROD_BHDR
         }
     }
@@ -350,10 +351,7 @@ fn parse_sweeps(
             .map(|h| h.number_rays_per_sweep as usize)
             .unwrap_or(360);
         let fixed_angle = idhs.first().map(|h| h.fixed_angle_deg).unwrap_or(0.0);
-        let start_time = idhs
-            .first()
-            .map(|h| h.sweep_start_time)
-            .unwrap_or_else(DateTime::<Utc>::default);
+        let start_time = idhs.first().map(|h| h.sweep_start_time).unwrap_or_default();
 
         let sweep_end = data.len();
         let mut reader = RecordReader::new(data, idh_off, sweep_end);
@@ -367,7 +365,7 @@ fn parse_sweeps(
             })
             .collect();
 
-        for ray_idx in 0..nrays {
+        for ray in rays.iter_mut().take(nrays) {
             for (moment_pos, idh) in idhs.iter().enumerate() {
                 if reader.is_done() {
                     break;
@@ -385,16 +383,15 @@ fn parse_sweeps(
                     decode_one_ray(&mut reader, gate_count, bytes_per_bin, decoder, nyquist_ms)?
                 {
                     if moment_pos == 0 {
-                        rays[ray_idx].azimuth_deg = az;
-                        rays[ray_idx].elevation_deg = el;
-                        rays[ray_idx].time_offset_s = t_off;
+                        ray.azimuth_deg = az;
+                        ray.elevation_deg = el;
+                        ray.time_offset_s = t_off;
                     }
                     if let Some(m) = supported {
-                        rays[ray_idx].moments.insert(m.data_type_id, decoded);
+                        ray.moments.insert(m.data_type_id, decoded);
                     }
                 } else if let Some(m) = supported {
-                    rays[ray_idx]
-                        .moments
+                    ray.moments
                         .insert(m.data_type_id, vec![f32::NAN; gate_count]);
                 }
             }
@@ -410,7 +407,7 @@ fn parse_sweeps(
         // Advance cursor to the next record-aligned position past where
         // the reader stopped. The next sweep's RAW_PROD_BHDR is at the
         // start of the next record we haven't yet visited.
-        let next = ((reader.pos + RECORD_BYTES - 1) / RECORD_BYTES) * RECORD_BYTES;
+        let next = reader.pos.div_ceil(RECORD_BYTES) * RECORD_BYTES;
         cursor = next;
     }
 
@@ -433,13 +430,18 @@ fn parse_sweeps(
 /// interpret the first 6 words as the header.
 ///
 /// Returns `Ok(None)` if the very first code is the missing-ray sentinel.
+///
+/// Tuple in the success arm is `(azimuth_deg, elevation_deg,
+/// time_offset_s, decoded_gates)`.
+type RayDecode = (f32, f32, f32, Vec<f32>);
+
 fn decode_one_ray(
     reader: &mut RecordReader<'_>,
     gate_count: usize,
     bytes_per_bin: usize,
     decoder: Decoder,
     nyquist_ms: f32,
-) -> Result<Option<(f32, f32, f32, Vec<f32>)>> {
+) -> Result<Option<RayDecode>> {
     if reader.is_done() {
         return Ok(None);
     }
@@ -499,9 +501,9 @@ fn decode_one_ray(
     if bytes_per_bin == 1 {
         // Two 8-bit gates per 16-bit word: low byte = gate 2k, high byte = gate 2k+1.
         for w in bin_words.iter().take(gate_count.div_ceil(2)) {
-            decoded.push(decoder((w & 0xFF) as u16, nyquist_ms));
+            decoded.push(decoder(w & 0xFF, nyquist_ms));
             if decoded.len() < gate_count {
-                decoded.push(decoder((w >> 8) as u16, nyquist_ms));
+                decoded.push(decoder(w >> 8, nyquist_ms));
             }
         }
     } else {

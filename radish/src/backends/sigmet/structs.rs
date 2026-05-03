@@ -48,13 +48,12 @@ pub(super) const STRUCT_ID_PRODUCT_HDR: i16 = 27;
 
 /// `STRUCTURE_HEADER` (12 B). Every IRIS sub-structure begins with one.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub(super) struct StructureHeader {
     pub structure_identifier: i16,
     pub format_version: i16,
     pub bytes_in_structure: i32,
-    #[allow(dead_code)]
     pub reserved: i16,
-    #[allow(dead_code)]
     pub flag: i16,
 }
 
@@ -81,6 +80,7 @@ impl StructureHeader {
 
 /// Decoded subset of `INGEST_CONFIGURATION` used by the adapter.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(super) struct IngestConfiguration {
     pub iris_version: String,
     pub site_name: String,
@@ -167,6 +167,7 @@ impl IngestConfiguration {
 
 /// Decoded subset of `TASK_CONFIGURATION` used by the adapter.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(super) struct TaskConfiguration {
     pub task_name: String,
     pub scan_mode: ScanMode,
@@ -257,10 +258,8 @@ impl TaskConfiguration {
         let mask_word_1 = c.read_u32::<LittleEndian>()? as u128;
         let mask_word_2 = c.read_u32::<LittleEndian>()? as u128;
         let mask_word_3 = c.read_u32::<LittleEndian>()? as u128;
-        let dsp_data_mask = mask_word_0
-            | (mask_word_1 << 32)
-            | (mask_word_2 << 64)
-            | (mask_word_3 << 96);
+        let dsp_data_mask =
+            mask_word_0 | (mask_word_1 << 32) | (mask_word_2 << 64) | (mask_word_3 << 96);
 
         // PRF (UINT4 Hz) lives somewhere in TASK_DSP_INFO. Exact offset is
         // version-dependent; xradar's iris.py reads it via
@@ -333,8 +332,7 @@ impl TaskConfiguration {
         //   off 4   task_configuration_file_name (string_dict(12))
         //   off 16  task_description (string_dict(80))
         //   …
-        let task_name =
-            read_fixed_string_at(buf, TASK_END_INFO_OFF as usize + 4, 12)?;
+        let task_name = read_fixed_string_at(buf, TASK_END_INFO_OFF as usize + 4, 12)?;
 
         Ok(Self {
             task_name,
@@ -490,11 +488,7 @@ fn read_fixed_string_at(buf: &[u8], offset: usize, len: usize) -> Result<String>
 }
 
 fn decode_fixed_string(buf: &[u8]) -> String {
-    let trimmed: Vec<u8> = buf
-        .iter()
-        .take_while(|&&b| b != 0)
-        .copied()
-        .collect();
+    let trimmed: Vec<u8> = buf.iter().take_while(|&&b| b != 0).copied().collect();
     String::from_utf8_lossy(&trimmed).trim_end().to_string()
 }
 
