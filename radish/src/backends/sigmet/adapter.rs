@@ -298,8 +298,10 @@ mod tests {
             result.moments.keys().collect::<Vec<_>>()
         );
         let m = result.moments.get("DB_DBTE8").unwrap();
-        // Units come from the table row's `MomentMapping::Iris.units`.
-        assert_eq!(m.units, "dBZ");
+        // Units string is empty for IRIS-passthrough types — xradar
+        // doesn't set a units attr for moments outside its
+        // `iris_mapping` table, so we don't either.
+        assert_eq!(m.units, "");
         // Iris-passthrough types skip the central CF metadata lookup,
         // so standard_name and long_name must remain unset.
         assert_eq!(m.standard_name, None);

@@ -78,6 +78,14 @@ impl PyVolumeMetadata {
         self.inner.sweep_fixed_angles.clone()
     }
 
+    /// Per-sweep group names (`["sweep_0", "sweep_1", ...]`). Used by
+    /// the xarray backend to emit the root-level `sweep_group_name(sweep)`
+    /// data variable that xradar's IRIS reader exposes.
+    #[getter]
+    fn sweep_group_names(&self) -> Vec<String> {
+        self.inner.sweep_group_names.clone()
+    }
+
     #[getter]
     fn num_sweeps(&self) -> usize {
         self.inner.sweep_group_names.len()

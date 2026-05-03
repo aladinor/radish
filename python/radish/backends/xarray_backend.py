@@ -167,11 +167,24 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             "altitude": metadata.altitude,
         }
         data_vars: Dict[str, Any] = {}
-        # NEXRAD and Sigmet/IRIS both follow the FM301 layout where the
-        # per-sweep group carries its own 0-d `sweep_fixed_angle`, so the
-        # root-level array would just duplicate that and leak an extra
-        # `sweep` dim into sweep_0. CfRadial1 keeps the legacy array.
-        if fmt not in ("nexrad", "sigmet"):
+        if fmt == "sigmet":
+            # xradar's `open_iris_datatree` emits `sweep_fixed_angle(sweep)`
+            # AND `sweep_group_name(sweep)` at the root, in addition to the
+            # FM301 0-d scalars inside each sweep group. Match that shape
+            # so xarray-radar tooling (which is built around xradar's
+            # output) sees the same `sweep` dim broadcast it expects.
+            data_vars["sweep_fixed_angle"] = (
+                ["sweep"],
+                np.array(metadata.sweep_fixed_angles),
+            )
+            data_vars["sweep_group_name"] = (
+                ["sweep"],
+                np.array(metadata.sweep_group_names),
+            )
+        elif fmt != "nexrad":
+            # Pre-existing CfRadial1 shape; xradar's NEXRAD reader doesn't
+            # advertise a root-level sweep_fixed_angle array, so we skip it
+            # for NEXRAD to avoid an extra `sweep` dim leaking into sweep_0.
             data_vars["sweep_fixed_angle"] = (
                 ["sweep"],
                 np.array(metadata.sweep_fixed_angles),
@@ -237,10 +250,11 @@ class RadishBackendEntrypoint(BackendEntrypoint):
                 }
             )
         elif fmt == "sigmet":
-            # Mirror xradar's `open_iris_datatree` root attrs. xradar emits
-            # the same FM301-shaped scalars (`Conventions = "None"` plus
-            # `comment`, `scan_name`) and the IRIS-specific PRF / Nyquist
-            # values via `sigmet_attrs`.
+            # Mirror xradar's `open_iris_datatree` root attrs verbatim:
+            # only the standard CF-style strings, no IRIS-specific PRF /
+            # Nyquist / task fields. xradar drops those from the
+            # DataTree entirely; users who want them typed reach for
+            # `radish.read_sigmet(path).metadata.sigmet_attrs`.
             extra = dict(metadata.attributes) if getattr(metadata, "attributes", None) else {}
             attrs.update(
                 {
@@ -255,19 +269,6 @@ class RadishBackendEntrypoint(BackendEntrypoint):
                     "scan_name": extra.get("scan_name", ""),
                 }
             )
-            sattrs = getattr(metadata, "sigmet_attrs", None)
-            if sattrs is not None:
-                attrs.update(
-                    {
-                        "task_name": sattrs.task_name,
-                        "iris_version": sattrs.iris_version,
-                        "prf_hz": float(sattrs.prf_hz),
-                        "prf_low_hz": float(sattrs.prf_low_hz),
-                        "nyquist_velocity_ms": float(sattrs.nyquist_velocity_ms),
-                        "unambiguous_range_m": float(sattrs.unambiguous_range_m),
-                        "scan_mode": sattrs.scan_mode,
-                    }
-                )
             data_vars.update(
                 {
                     "volume_number": ((), int(metadata.volume_number)),

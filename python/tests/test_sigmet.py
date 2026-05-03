@@ -39,10 +39,15 @@ def test_xarray_engine_radish_dispatches_to_sigmet(sigmet_fixture):
     assert "azimuth" in s0.coords
     assert "elevation" in s0.coords
     assert "range" in s0.coords
-    # IRIS-shaped root attrs (xradar's open_iris_datatree contract).
+    # IRIS-shaped root attrs (xradar's open_iris_datatree contract):
+    # only standard CF strings, no IRIS-specific PRF/Nyquist/task fields
+    # (those are reachable via `vol.metadata.sigmet_attrs` instead).
     assert dt.attrs.get("Conventions") == "None"
-    assert "task_name" in dt.attrs
-    assert "iris_version" in dt.attrs
+    assert dt.attrs.get("scan_name") == "VOL_A"
+    # IRIS-specific metadata lives in the typed `sigmet_attrs` accessor,
+    # not as Dataset.attrs keys (that would diverge from xradar).
+    assert "task_name" not in dt.attrs
+    assert "iris_version" not in dt.attrs
     # Per-sweep `sweep_mode` and `sweep_fixed_angle` are FM301 0-d
     # data_vars (matching xradar's IRIS shape), not Dataset.attrs —
     # `.attrs` stays empty for sigmet sweeps for parity.
@@ -56,7 +61,13 @@ def test_radish_open_datatree_path(sigmet_fixture):
     pytest.importorskip("xarray")
     dt = radish.open_datatree(sigmet_fixture)
     assert any(k.startswith("sweep_") for k in dt.children)
-    assert dt.attrs.get("scan_mode") in ("PPI", "RHI", "OTHER")
+    # Sigmet auto-detects through magic-byte sniff; verify the resulting
+    # tree carries the IRIS-shaped `scan_name` (radish copies it from
+    # the volume's `scan_name` attribute), and `scan_mode` is reachable
+    # through the typed `sigmet_attrs` rather than Dataset.attrs.
+    assert dt.attrs.get("scan_name")  # non-empty
+    vol = radish.read_sigmet(sigmet_fixture)
+    assert vol.metadata.sigmet_attrs.scan_mode in ("PPI", "RHI", "OTHER")
 
 
 def test_radish_open_datatree_bytes(sigmet_fixture):

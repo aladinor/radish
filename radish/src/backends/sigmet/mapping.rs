@@ -249,15 +249,18 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         mapping: MomentMapping::Odim,
     },
     // Iris-passthrough (no ODIM short name in xradar's `iris_mapping`)
-    // — emit under the IRIS short name. Calibration matches xradar's
-    // `SIGMET_DATA_TYPES` decode_array fkw entries.
+    // — emit under the IRIS short name. xradar leaves `units` blank
+    // for these (it has no canonical units mapping outside
+    // `iris_mapping`); we follow the same convention so per-moment
+    // attrs match. The calibration formula still matches xradar's
+    // `SIGMET_DATA_TYPES` decode_array fkw entries, so values agree.
     SigmetMoment {
         data_type_id: 55,
         iris_name: "DB_HCLASS",
         output_name: "DB_HCLASS",
         bytes_per_bin: 1,
         decoder: DECODE_NONE,
-        mapping: MomentMapping::Iris { units: "1" },
+        mapping: MomentMapping::Iris { units: "" },
     },
     SigmetMoment {
         data_type_id: 71,
@@ -265,7 +268,7 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         output_name: "DB_DBTE8",
         bytes_per_bin: 1,
         decoder: DECODE_DBZ_8BIT,
-        mapping: MomentMapping::Iris { units: "dBZ" },
+        mapping: MomentMapping::Iris { units: "" },
     },
     SigmetMoment {
         data_type_id: 73,
@@ -273,7 +276,7 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         output_name: "DB_DBZE8",
         bytes_per_bin: 1,
         decoder: DECODE_DBZ_8BIT,
-        mapping: MomentMapping::Iris { units: "dBZ" },
+        mapping: MomentMapping::Iris { units: "" },
     },
 ];
 
@@ -335,13 +338,15 @@ mod tests {
     ];
 
     /// IRIS-passthrough types (xradar surfaces them under their IRIS
-    /// short name without ODIM translation). Pinned explicitly so a
-    /// future ODIM expansion that renames any of them fails loudly.
+    /// short name without ODIM translation). xradar leaves `units`
+    /// blank for these; we match. Pinned explicitly so a future ODIM
+    /// expansion that renames any of them or sets a units string
+    /// fails loudly.
     const IRIS_PASSTHROUGH_REFERENCE: &[(u8, &str, &str)] = &[
-        // (id, iris_name == output_name, units)
-        (55, "DB_HCLASS", "1"),
-        (71, "DB_DBTE8", "dBZ"),
-        (73, "DB_DBZE8", "dBZ"),
+        // (id, iris_name == output_name, units — empty for parity)
+        (55, "DB_HCLASS", ""),
+        (71, "DB_DBTE8", ""),
+        (73, "DB_DBZE8", ""),
     ];
 
     #[test]
