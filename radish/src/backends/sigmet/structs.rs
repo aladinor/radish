@@ -40,6 +40,20 @@ pub(super) const RECORD_BYTES: usize = 6144;
 pub(super) const STRUCTURE_HEADER_BYTES: usize = 12;
 /// Size of `INGEST_CONFIGURATION` in bytes.
 pub(super) const INGEST_CONFIGURATION_BYTES: usize = 480;
+/// Size of `INGEST_DATA_HEADER` in bytes (one per (sweep, moment) pair).
+pub(super) const INGEST_DATA_HEADER_BYTES: usize = 76;
+/// Size of `RAW_PROD_BHDR` in bytes (skipped at every record boundary).
+pub(super) const RAW_PROD_BHDR_BYTES: usize = 12;
+
+/// Minimum acceptable size of a `TASK_CONFIGURATION` block. Anything
+/// shorter and we know the file is truncated before the SCAN_INFO sweep
+/// fixed-angle table — `parse` returns `MalformedRecord`.
+pub(super) const TASK_CONFIGURATION_MIN_BYTES: usize = 1892;
+/// Size of a fully-padded `TASK_CONFIGURATION` block; some IRIS encoders
+/// pad up to this length even though the core fields end at
+/// [`TASK_CONFIGURATION_MIN_BYTES`]. We accept anything in between and
+/// cap reads at the larger value to avoid stepping into the next record.
+pub(super) const TASK_CONFIGURATION_MAX_BYTES: usize = 2612;
 
 /// `structure_identifier` value indicating an `INGEST_HEADER`.
 pub(super) const STRUCT_ID_INGEST_HEADER: i16 = 23;
@@ -229,10 +243,13 @@ impl TaskConfiguration {
         //   off 1252  TASK_MISC_INFO   (320)
         //   off 1572  TASK_END_INFO    (320)
         //   off 1892  comments(720)
-        if buf.len() < 1892 {
+        if buf.len() < TASK_CONFIGURATION_MIN_BYTES {
             return Err(RadishError::MalformedRecord {
                 offset: 0,
-                msg: format!("TASK_CONFIGURATION too short: {} bytes", buf.len()),
+                msg: format!(
+                    "TASK_CONFIGURATION too short: {} < {TASK_CONFIGURATION_MIN_BYTES}",
+                    buf.len()
+                ),
             });
         }
         const TASK_DSP_INFO_OFF: u64 = 132;

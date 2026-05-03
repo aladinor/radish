@@ -1,6 +1,9 @@
 //! Integration test for the Sigmet/IRIS RAW backend on a real fixture.
 //!
 //! Skipped unless `RADISH_SIGMET_FIXTURE` points at an IRIS RAW file.
+//! The skip is implemented as an early `return` rather than `#[ignore]`
+//! so CI (which sets the env var) sees these as a passing test rather
+//! than a silently-ignored one — same convention as `test_nexrad.rs`.
 
 use std::path::Path;
 

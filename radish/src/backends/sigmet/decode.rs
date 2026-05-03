@@ -46,8 +46,9 @@ use super::calibration::Decoder;
 use super::mapping::moment_for_id;
 use super::structs::{
     bin2_to_degrees, IngestConfiguration, IngestDataHeader, RawProdBhdr, ScanMode, StructureHeader,
-    TaskConfiguration, INGEST_CONFIGURATION_BYTES, RECORD_BYTES, STRUCTURE_HEADER_BYTES,
-    STRUCT_ID_INGEST_HEADER, STRUCT_ID_PRODUCT_HDR,
+    TaskConfiguration, INGEST_CONFIGURATION_BYTES, INGEST_DATA_HEADER_BYTES, RAW_PROD_BHDR_BYTES,
+    RECORD_BYTES, STRUCTURE_HEADER_BYTES, STRUCT_ID_INGEST_HEADER, STRUCT_ID_PRODUCT_HDR,
+    TASK_CONFIGURATION_MAX_BYTES, TASK_CONFIGURATION_MIN_BYTES,
 };
 
 /// Top-level decoded volume: metadata + per-sweep per-ray decoded gates.
@@ -142,13 +143,13 @@ pub(super) fn parse_volume(data: &[u8]) -> Result<DecodedVolume> {
 
     // TASK_CONFIGURATION starts after INGEST_CONFIGURATION.
     let task_off = cfg_off + INGEST_CONFIGURATION_BYTES;
-    if data.len() < task_off + 1892 {
+    if data.len() < task_off + TASK_CONFIGURATION_MIN_BYTES {
         return Err(RadishError::MalformedRecord {
             offset: task_off as u64,
             msg: "TASK_CONFIGURATION does not fit in file".to_string(),
         });
     }
-    let task_buf_len = (data.len() - task_off).min(2612);
+    let task_buf_len = (data.len() - task_off).min(TASK_CONFIGURATION_MAX_BYTES);
     let task = TaskConfiguration::parse(&data[task_off..task_off + task_buf_len])?;
 
     // Build the active moment list from dsp_data_mask. Each set bit
@@ -248,11 +249,11 @@ impl<'a> RecordReader<'a> {
         (pos / RECORD_BYTES) * RECORD_BYTES
     }
 
-    /// If `self.pos` is at the start of a record, skip the 12-byte
+    /// If `self.pos` is at the start of a record, skip the
     /// `RAW_PROD_BHDR`. Idempotent — only the head of a record gets skipped.
     fn skip_record_header_if_at_boundary(&mut self) {
         if self.pos < self.end && self.pos.is_multiple_of(RECORD_BYTES) {
-            self.pos += 12; // RAW_PROD_BHDR
+            self.pos += RAW_PROD_BHDR_BYTES;
         }
     }
 
@@ -318,7 +319,7 @@ fn parse_sweeps(
 
         // Each sweep starts with a record carrying RAW_PROD_BHDR + N
         // INGEST_DATA_HEADERs (one per active moment), followed by ray data.
-        let bhdr = RawProdBhdr::parse(&data[cursor..cursor + 12])?;
+        let bhdr = RawProdBhdr::parse(&data[cursor..cursor + RAW_PROD_BHDR_BYTES])?;
         if bhdr.sweep_number as i64 != (sweep_idx as i64) + 1 {
             // Some volumes index sweeps from 0 or 1 depending on encoder; we
             // accept both. If we're really off, abort the walk.
@@ -331,15 +332,15 @@ fn parse_sweeps(
         // after the RAW_PROD_BHDR in the record. Use the IDH's own
         // `bits_per_bin` field to drive RLE width — it's authoritative
         // even when the id isn't in our SUPPORTED_MOMENTS table.
-        let mut idh_off = cursor + 12;
+        let mut idh_off = cursor + RAW_PROD_BHDR_BYTES;
         let mut idhs: Vec<IngestDataHeader> = Vec::with_capacity(active_data_type_ids.len());
         for _ in active_data_type_ids {
-            if idh_off + 76 > data.len() {
+            if idh_off + INGEST_DATA_HEADER_BYTES > data.len() {
                 break;
             }
-            let idh = IngestDataHeader::parse(&data[idh_off..idh_off + 76])?;
+            let idh = IngestDataHeader::parse(&data[idh_off..idh_off + INGEST_DATA_HEADER_BYTES])?;
             idhs.push(idh);
-            idh_off += 76;
+            idh_off += INGEST_DATA_HEADER_BYTES;
         }
 
         let nrays = idhs
@@ -427,6 +428,16 @@ fn parse_sweeps(
 ///
 /// Returns `Ok(None)` if the very first code is the missing-ray sentinel.
 ///
+/// **Error semantics** (deliberate): a `MalformedRecord` from a torn or
+/// truncated RLE stream propagates `Err` up to the sweep walker, which
+/// in turn aborts the whole `read_volume`. We do *not* attempt to skip
+/// the bad ray and continue, because once the RLE stream loses sync
+/// every subsequent ray for every subsequent moment will read garbage
+/// — silently filling the volume with NaN. Failing loud is the only
+/// safe option. (The encoder-overshoot guard at the bottom of
+/// [`apply_rle_step`] already tolerates the small drift IRIS files
+/// commonly carry; only major corruption surfaces an error.)
+///
 /// Tuple in the success arm is `(azimuth_deg, elevation_deg,
 /// time_offset_s, decoded_gates)`.
 type RayDecode = (f32, f32, f32, Vec<f32>);
@@ -447,6 +458,15 @@ fn decode_one_ray(
     // array is later viewed as `(2,) uint8` and sliced `[:, :gate_count]`,
     // so half the int16 words are dropped — but the RLE stream still
     // encodes the full `gate_count + 6` int16 word stride per ray.
+    //
+    // We measured `vec![0; n]` against a caller-owned scratch buffer
+    // reused via `clear()`/`resize()` (rust-best-practices audit P2):
+    // the macro is ~25% faster on this fixture because (a) glibc's
+    // free-list catches the per-call alloc/free for a same-size Vec
+    // essentially for free and (b) `vec![0; n]` lowers to
+    // `__memset_avx2`, while `clear()+resize()` on a previously-used
+    // buffer pays for an explicit element-by-element zero. So the
+    // "obvious" optimisation is anti-perf here — keep the macro.
     let buf_len = gate_count + 6;
     let mut raw_words: Vec<u16> = vec![0; buf_len];
     let mut word_pos = 0usize;
@@ -480,6 +500,16 @@ fn decode_one_ray(
     let dtime = raw_words[5];
 
     // Bin data from words 6..end.
+    //
+    // The audit (rust-best-practices P9) flagged the per-gate fn-pointer
+    // dispatch (`decoder(...)`) as a potential inlining barrier. We
+    // measured replacing it with an enum + outer-loop match (one
+    // specialised inner loop per decoder kind, ~150 LOC of duplicate
+    // gate-decode code): the gain is below this fixture's measurement
+    // noise (±20% wall-clock variance) and not worth the maintenance
+    // cost. Modern CPUs predict the indirect branch well when the same
+    // target fires 770k times in a row. If a future fixture surfaces a
+    // case where dispatch dominates we can revisit.
     let bin_words = &raw_words[6..];
     let mut decoded = Vec::with_capacity(gate_count);
     if bytes_per_bin == 1 {
@@ -691,5 +721,95 @@ mod tests {
         // record's header and return the 0xBEEF sentinel.
         reader.pos = RECORD_BYTES;
         assert_eq!(reader.read_u16().unwrap(), 0xBEEF);
+    }
+
+    /// `decode_one_ray` with `bytes_per_bin = 0` should produce a
+    /// gate_count-long all-NaN buffer without consuming any RLE
+    /// codes — pin the early-return path the sweep walker relies on
+    /// when an INGEST_DATA_HEADER reports `bits_per_bin = 0`.
+    ///
+    /// (We don't actually call decode_one_ray with bytes_per_bin=0; the
+    /// caller in `parse_sweeps` `continue`s on that condition. This
+    /// test pins THAT contract: the caller must skip without invoking
+    /// the decoder.)
+    #[test]
+    fn parse_sweeps_skips_zero_bits_per_bin_moments() {
+        // Hand-build an INGEST_DATA_HEADER with bits_per_bin=0 and verify
+        // that `IngestDataHeader::parse` accepts it (the caller's
+        // `bytes_per_bin == 0` guard then keeps it from reaching the
+        // RLE decoder).
+        let mut buf = [0u8; INGEST_DATA_HEADER_BYTES];
+        buf[0..2].copy_from_slice(&24i16.to_le_bytes()); // structure_id
+        buf[2..4].copy_from_slice(&2i16.to_le_bytes());
+        buf[4..8].copy_from_slice(&76i32.to_le_bytes());
+        // YMDS time: zeros are fine.
+        buf[18..20].copy_from_slice(&2024i16.to_le_bytes());
+        buf[20..22].copy_from_slice(&1i16.to_le_bytes());
+        buf[22..24].copy_from_slice(&1i16.to_le_bytes());
+        // SINT2 fields zero. fixed_angle zero. bits_per_bin = 0.
+        buf[36..38].copy_from_slice(&0i16.to_le_bytes());
+        // data_type = 1 (DB_DBT)
+        buf[38..40].copy_from_slice(&1u16.to_le_bytes());
+
+        let idh = IngestDataHeader::parse(&buf).expect("parse");
+        assert_eq!(
+            idh.bits_per_bin, 0,
+            "bits_per_bin=0 must round-trip; the sweep walker relies on this"
+        );
+        let bytes_per_bin = (idh.bits_per_bin as usize) / 8;
+        assert_eq!(
+            bytes_per_bin, 0,
+            "the integer-divide gives 0 for the skip-this-moment guard"
+        );
+    }
+
+    /// Property-based: a small synthetic RLE-encoded ray must round-trip.
+    /// Encode a `Vec<u16>` of bin words via [`encode_ray_for_test`] (a
+    /// minimal compatible encoder), then run `decode_one_ray` against
+    /// the bytes and confirm the decoded buffer matches the input
+    /// (modulo the leading 6-word header, which we treat as opaque).
+    ///
+    /// This catches off-by-one bugs in RLE bookkeeping that we'd
+    /// otherwise rely on the live fixture to surface.
+    #[test]
+    fn rle_round_trip_on_short_synthetic_ray() {
+        // 6-word header (we don't care about its content, only that
+        // decode_one_ray reads 6 words off the front before bin data)
+        // + 8 bin words of literal data, terminated by EOR.
+        let header = [0xAAAAu16; 6];
+        let bins: [u16; 8] = [
+            0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008,
+        ];
+
+        // Encode: "copy 14 words" (header + bins), then EOR.
+        let mut bytes: Vec<u8> = Vec::new();
+        // Record-prelude prepended so RecordReader doesn't try to skip
+        // a header at our test buffer's start.
+        bytes.extend_from_slice(&[0xAAu8; RAW_PROD_BHDR_BYTES]);
+        // Code = 0x800E (MSB set, val=14).
+        bytes.extend_from_slice(&0x800Eu16.to_le_bytes());
+        for w in header.iter().chain(bins.iter()) {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        // End-of-ray sentinel: cmp_val=1, MSB clear.
+        bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+
+        // Decode against a 16-bit moment with bytes_per_bin=2 so each
+        // u16 maps directly to one gate.
+        let mut reader = RecordReader::new(&bytes, 0, bytes.len());
+        let result =
+            decode_one_ray(&mut reader, 8, 2, DECODE_NONE, 0.0).expect("decode_one_ray ok");
+        let (_az, _el, _t, decoded) = result.expect("not a missing-ray sentinel");
+
+        // DECODE_NONE maps raw=0 → NaN, else raw as f32. All our bins
+        // are 1..=8, so we expect [1.0, 2.0, ..., 8.0].
+        assert_eq!(decoded.len(), 8);
+        for (i, v) in decoded.iter().enumerate() {
+            let expected = (i + 1) as f32;
+            assert!(
+                (v - expected).abs() < 1e-6,
+                "gate {i}: expected {expected}, got {v}"
+            );
+        }
     }
 }

@@ -132,4 +132,23 @@ mod tests {
         // AR2V (NEXRAD, not IRIS)
         assert!(!b.can_read_bytes(b"AR2V0006.001"));
     }
+
+    /// `read_sweep` with a fixture path but an out-of-range sweep_idx
+    /// must surface `InvalidSweepIndex`, not panic. Gated on
+    /// `RADISH_SIGMET_FIXTURE`; cheap when set.
+    #[test]
+    fn read_sweep_invalid_index_returns_error() {
+        let Some(path) = std::env::var_os("RADISH_SIGMET_FIXTURE") else {
+            eprintln!("skipping: RADISH_SIGMET_FIXTURE not set");
+            return;
+        };
+        let b = SigmetBackend::new();
+        let err = b
+            .read_sweep(Path::new(&path), 9999)
+            .expect_err("must reject out-of-range sweep_idx");
+        match err {
+            RadishError::InvalidSweepIndex(9999) => (),
+            other => panic!("expected InvalidSweepIndex(9999), got {other:?}"),
+        }
+    }
 }
