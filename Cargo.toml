@@ -56,7 +56,7 @@ bytemuck = { version = "1.20", features = ["derive"] }
 # explicitly so the import is grep-able and the version is pinned.
 rayon = "1.10"
 
-# Python bindings
+# Python bindings.
 pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 
