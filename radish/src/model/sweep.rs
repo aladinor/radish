@@ -4,7 +4,7 @@ use radish_types::{FollowMode, PrtMode, SweepMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{Coordinates, MomentData, NexradSweepAttrs};
+use super::{Coordinates, MomentData, NexradSweepAttrs, SigmetSweepAttrs};
 
 /// Sweep data containing moments and coordinates
 #[derive(Debug, Clone)]
@@ -104,6 +104,9 @@ pub struct SweepMetadata {
 
     /// NEXRAD-specific sweep attrs (MSG_5 elevation cut). `None` for non-NEXRAD sweeps.
     pub nexrad: Option<NexradSweepAttrs>,
+
+    /// Sigmet/IRIS-specific sweep attrs. `None` for non-Sigmet sweeps.
+    pub sigmet: Option<SigmetSweepAttrs>,
 }
 
 impl SweepMetadata {
@@ -123,6 +126,7 @@ impl SweepMetadata {
             nyquist_velocity: None,
             unambiguous_range: None,
             nexrad: None,
+            sigmet: None,
         }
     }
 }

@@ -17,7 +17,8 @@ use crate::backends::common::{
     assemble_ppi_coordinates, decode_into_array, sort_indices_by_key,
 };
 use crate::{
-    MomentData, RadishError, Result, SweepData, SweepMetadata, VolumeData, VolumeMetadata,
+    MomentData, RadishError, Result, SigmetSweepAttrs, SigmetVolumeAttrs, SweepData,
+    SweepMetadata, VolumeData, VolumeMetadata,
 };
 
 use super::decode::{DecodedRay, DecodedSweep, DecodedVolume};
@@ -96,6 +97,15 @@ pub(super) fn build_volume_metadata(
         "iris_version".to_string(),
         decoded.iris_version.clone(),
     );
+    metadata.sigmet = Some(SigmetVolumeAttrs {
+        task_name: decoded.task_name.clone(),
+        iris_version: decoded.iris_version.clone(),
+        prf_hz: decoded.prf_hz,
+        prf_low_hz: 0.0,
+        nyquist_velocity_ms: decoded.nyquist_velocity_ms,
+        unambiguous_range_m: decoded.unambiguous_range_m,
+        scan_mode: decoded.scan_mode.label().to_string(),
+    });
     Ok(metadata)
 }
 
@@ -195,6 +205,13 @@ fn convert_sweep(
     );
     meta.follow_mode = None;
     meta.prt_mode = None;
+    meta.sigmet = Some(SigmetSweepAttrs {
+        sweep_mode: match scan_mode {
+            ScanMode::Rhi => "rhi".to_string(),
+            _ => "azimuth_surveillance".to_string(),
+        },
+        fixed_angle_deg: sweep.fixed_angle_deg,
+    });
     Ok(SweepData::new(meta, moments, coordinates))
 }
 
