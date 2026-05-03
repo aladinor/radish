@@ -34,3 +34,7 @@ proptest = { version = "1.5", default-features = false, features = ["std"] }
 [[bench]]
 name = "nexrad"
 harness = false
+
+[[bench]]
+name = "sigmet"
+harness = false
