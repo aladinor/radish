@@ -49,7 +49,7 @@ git push origin v0.1.1     # ← triggers PyPI publish
 ```
 
 The tag push triggers
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which:
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), which:
 
 1. Creates a GitHub Release with auto-generated notes.
 2. Builds wheels for **5 targets × 4 Python versions = 20 wheels**:
