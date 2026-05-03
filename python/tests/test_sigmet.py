@@ -92,3 +92,38 @@ def test_sigmet_sweep_attrs_populated(sigmet_fixture):
     assert sweep_attrs.sweep_mode in ("azimuth_surveillance", "rhi")
     # Fixed angles are degrees in [0, 360).
     assert 0.0 <= sweep_attrs.fixed_angle_deg < 360.0
+
+
+def test_sigmet_moment_set_matches_xradar(sigmet_fixture):
+    """End-to-end parity: every 2-D moment xradar emits, radish emits too,
+    and vice versa.
+
+    Promotes the notebook spot-check (`smoke_test_sigmet.ipynb` cell on
+    the `radish-only` / `xradar-only` set diff) into a CI-runnable
+    regression. Skipped if `xradar` isn't installed.
+    """
+    xr = pytest.importorskip("xarray")
+    xradar = pytest.importorskip("xradar")
+
+    rd = xr.open_datatree(sigmet_fixture, engine="radish")
+    # xradar's IRIS reader needs a str path (PosixPath fails on its
+    # `_check_iris_file` memmap helper).
+    xd = xradar.io.open_iris_datatree(str(sigmet_fixture))
+
+    sweep_keys = sorted(k for k in rd.children if k.startswith("sweep_"))
+    assert sweep_keys, "radish produced no sweeps"
+    common_sweeps = [k for k in sweep_keys if k in xd.children]
+    assert common_sweeps, "no overlapping sweep groups between readers"
+
+    for skey in common_sweeps:
+        rd_vars = {v for v in rd[skey].data_vars if rd[skey][v].ndim == 2}
+        xd_vars = {v for v in xd[skey].data_vars if xd[skey][v].ndim == 2}
+        radish_only = rd_vars - xd_vars
+        xradar_only = xd_vars - rd_vars
+        assert not radish_only, (
+            f"{skey}: radish emits moments xradar doesn't: {sorted(radish_only)}"
+        )
+        assert not xradar_only, (
+            f"{skey}: xradar emits moments radish doesn't: {sorted(xradar_only)} — "
+            "likely a missing entry in `SUPPORTED_MOMENTS` or `iris_mapping_ids_match_xradar_table`"
+        )

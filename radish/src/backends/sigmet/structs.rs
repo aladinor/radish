@@ -592,6 +592,31 @@ mod tests {
         assert_eq!(decode_fixed_string(b""), "");
     }
 
+    /// Parametrised mask-word coverage helper. Sets one bit in one
+    /// mask word and asserts only that bit is set in the packed u128.
+    /// The four mask words live at TASK_DSP_INFO + {4, 12, 16, 20}
+    /// (with `extended_header_type` between word_0 and word_1); a
+    /// regression that swaps any of those offsets — or zeroes one
+    /// word out — fails this test.
+    fn assert_mask_word_bit_round_trips(word_offset: usize, bit_in_word: u32, packed_bit: u32) {
+        let mut buf = vec![0u8; TASK_CONFIGURATION_MIN_BYTES];
+        // Place a single set bit in the chosen mask word.
+        buf[word_offset..word_offset + 4].copy_from_slice(&(1u32 << bit_in_word).to_le_bytes());
+        // Required minimum field setup for parse() to succeed.
+        buf[772 + 10..772 + 12].copy_from_slice(&4u16.to_le_bytes()); // bins_output
+        buf[932..934].copy_from_slice(&1u16.to_le_bytes()); // scan_mode = PPI
+        buf[932 + 6..932 + 8].copy_from_slice(&1i16.to_le_bytes()); // sweep_number_total
+
+        let task = TaskConfiguration::parse(&buf).expect("parse");
+        let expected = 1u128 << packed_bit;
+        assert_eq!(
+            task.dsp_data_mask, expected,
+            "word offset {word_offset}, bit {bit_in_word}: \
+             expected only bit {packed_bit} set, got {:#x}",
+            task.dsp_data_mask
+        );
+    }
+
     /// `TaskConfiguration::parse` must read all four DSP_DATA_MASK words
     /// and pack them into the u128 covering bits 0..127 — without this
     /// the walker silently misses moments with ID > 31 (DB_HCLASS=55,
@@ -628,6 +653,29 @@ mod tests {
         // Bits in mask_word_0/1/3 should still be zero.
         assert_eq!(task.dsp_data_mask & ((1u128 << 64) - 1), 0);
         assert_eq!(task.dsp_data_mask & (((1u128 << 32) - 1) << 96), 0);
+    }
+
+    /// Each of the four mask words must round-trip correctly through
+    /// `TaskConfiguration::parse`. This catches off-by-one bugs in the
+    /// per-word offset constants (the original draft had only `mask_word_0`
+    /// wired up, dropping bits 32..127 silently). Covers mask_word_0,
+    /// mask_word_1, mask_word_2, and mask_word_3 with one set bit each.
+    #[test]
+    fn task_configuration_dsp_mask_covers_all_four_words() {
+        // (word offset within TASK_DSP_INFO, bit within word, packed bit)
+        // word_0 lives at TASK_DSP_INFO + 4; the +4 / +12 / +16 / +20
+        // offsets match the `DSP_DATA_MASK` layout in xradar's
+        // `iris.py:1370` (mask_word_0, extended_header_type,
+        // mask_word_1, mask_word_2, mask_word_3).
+        let cases: &[(usize, u32, u32)] = &[
+            (132 + 4, 5, 5),    // mask_word_0  bit  5 → packed bit  5
+            (132 + 12, 3, 35),  // mask_word_1  bit  3 → packed bit 35
+            (132 + 16, 7, 71),  // mask_word_2  bit  7 → packed bit 71 (DB_DBTE8)
+            (132 + 20, 4, 100), // mask_word_3  bit  4 → packed bit 100
+        ];
+        for &(word_off, bit, packed) in cases {
+            assert_mask_word_bit_round_trips(word_off, bit, packed);
+        }
     }
 
     /// `IngestDataHeader::parse` must read all five SINT2 fields between

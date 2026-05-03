@@ -20,25 +20,29 @@ use crate::{
 };
 
 use super::decode::{DecodedRay, DecodedSweep, DecodedVolume};
-use super::mapping::{cf_metadata_for, moment_for_id, SUPPORTED_MOMENTS};
+use super::mapping::{cf_metadata_for, moment_for_id, MomentMapping, SUPPORTED_MOMENTS};
 use super::structs::ScanMode;
 
 pub(super) fn convert_volume(decoded: DecodedVolume, source: &Path) -> Result<VolumeData> {
     let metadata = build_volume_metadata(&decoded, source)?;
-    // Build a stable index list of (data_type_id, ODIM name) pairs in the
-    // order SUPPORTED_MOMENTS dictates so DataTree variable order is
-    // deterministic across runs. We only emit moments that any ray
-    // actually carries — a missing-from-mask moment never appears.
+    // One pass over every ray collects the set of data_type_ids actually
+    // present in the volume; then filter SUPPORTED_MOMENTS by that set
+    // to preserve the table's stable emission order. The previous
+    // approach was triple-nested (`for each known id { for each ray
+    // { contains_key }}`), O(N_ids × N_sweeps × N_rays); this is
+    // O(N_rays + N_ids).
+    let mut seen: std::collections::HashSet<u8> = std::collections::HashSet::new();
+    for sweep in &decoded.sweeps {
+        for ray in &sweep.rays {
+            for &id in ray.moments.keys() {
+                seen.insert(id);
+            }
+        }
+    }
     let active_ids: Vec<u8> = SUPPORTED_MOMENTS
         .iter()
         .map(|m| m.data_type_id)
-        .filter(|id| {
-            decoded
-                .sweeps
-                .iter()
-                .flat_map(|s| s.rays.iter())
-                .any(|r| r.moments.contains_key(id))
-        })
+        .filter(|id| seen.contains(id))
         .collect();
 
     let sweeps: Vec<SweepData> = decoded
@@ -172,9 +176,8 @@ fn convert_sweep(
     // ()>` paid.
     let mut emitted: HashSet<&'static str> = HashSet::with_capacity(active_ids.len());
     for &data_type_id in active_ids {
-        let m = match moment_for_id(data_type_id) {
-            Some(m) => m,
-            None => continue,
+        let Some(m) = moment_for_id(data_type_id) else {
+            continue;
         };
         if !emitted.insert(m.output_name) {
             continue;
@@ -182,22 +185,32 @@ fn convert_sweep(
 
         let arr = build_moment_array(rays, &order, data_type_id, nrays, max_gates)?;
 
-        // Two paths: ODIM-mapped types pull full CF metadata from
-        // `common::metadata::TABLE`; unmapped types (DB_HCLASS,
-        // DB_DBTE8, DB_DBZE8) emit minimal attrs (units only, from the
-        // table row) — same convention xradar uses for the same set.
-        let mut moment = if let Some(meta) = cf_metadata_for(m) {
-            let mut x = MomentData::new(meta.odim_name.to_string(), meta.units.to_string(), arr);
-            x.standard_name = Some(meta.standard_name.to_string());
-            x.long_name = Some(meta.long_name.to_string());
-            x
-        } else {
-            MomentData::new(m.output_name.to_string(), m.units.to_string(), arr)
+        // Two paths: `MomentMapping::Odim` types pull full CF metadata
+        // from `common::metadata::TABLE`; `MomentMapping::Iris` types
+        // (DB_HCLASS, DB_DBTE8, DB_DBZE8) emit only the inline `units`
+        // string. The exhaustive match keeps the two paths
+        // type-distinct so a typo in `output_name` can't silently
+        // route an ODIM moment through the no-metadata path.
+        let key = m.output_name.to_string();
+        let mut moment = match m.mapping {
+            MomentMapping::Odim => {
+                let meta = cf_metadata_for(m).ok_or_else(|| {
+                    RadishError::Conversion(format!(
+                        "no CF metadata for ODIM moment {:?} (IRIS {})",
+                        m.output_name, m.iris_name
+                    ))
+                })?;
+                let mut x = MomentData::new(key.clone(), meta.units.to_string(), arr);
+                x.standard_name = Some(meta.standard_name.to_string());
+                x.long_name = Some(meta.long_name.to_string());
+                x
+            }
+            MomentMapping::Iris { units } => MomentData::new(key.clone(), units.to_string(), arr),
         };
         moment.fill_value = Some(f32::NAN);
         moment.scale_factor = Some(1.0);
         moment.add_offset = Some(0.0);
-        moments.insert(m.output_name.to_string(), moment);
+        moments.insert(key, moment);
     }
 
     let mut meta = SweepMetadata::new(
@@ -235,4 +248,112 @@ fn build_moment_array(
             dst[..n].copy_from_slice(&gates[..n]);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    /// Build a synthetic single-ray sweep that carries one `data_type_id`
+    /// of `gate_count` gates filled with `value`. Lets us exercise
+    /// `convert_sweep` without going through the full IRIS decode path.
+    fn one_ray_sweep(data_type_id: u8, gate_count: usize, value: f32) -> DecodedSweep {
+        let mut moments = HashMap::new();
+        moments.insert(data_type_id, vec![value; gate_count]);
+        let ray = DecodedRay {
+            azimuth_deg: 0.0,
+            elevation_deg: 0.5,
+            time_offset_s: 0.0,
+            moments,
+        };
+        DecodedSweep {
+            sweep_number: 1,
+            fixed_angle_deg: 0.5,
+            start_time: Utc::now(),
+            rays: vec![ray],
+        }
+    }
+
+    /// Pin the IRIS-passthrough adapter path: `MomentMapping::Iris` rows
+    /// produce a `MomentData` keyed by the IRIS short name, with the
+    /// inline `units` string and **no** `standard_name`/`long_name`.
+    /// A regression that routed Iris rows through the ODIM branch
+    /// would either panic on the missing CF metadata lookup or emit
+    /// the moment under the wrong name; this catches both.
+    #[test]
+    fn iris_passthrough_moment_emits_under_iris_short_name() {
+        // DB_DBTE8 = id 71, MomentMapping::Iris { units: "dBZ" }.
+        let sweep = one_ray_sweep(71, 4, 42.0);
+        let range_axis: Vec<f32> = (0..4).map(|i| 1000.0 + i as f32 * 100.0).collect();
+
+        let result =
+            convert_sweep(&sweep, 0, ScanMode::Ppi, &range_axis, &[71]).expect("convert_sweep ok");
+
+        // Variable name is the IRIS short name, not an ODIM translation.
+        assert!(
+            result.moments.contains_key("DB_DBTE8"),
+            "expected DB_DBTE8 in moments, got {:?}",
+            result.moments.keys().collect::<Vec<_>>()
+        );
+        let m = result.moments.get("DB_DBTE8").unwrap();
+        // Units come from the table row's `MomentMapping::Iris.units`.
+        assert_eq!(m.units, "dBZ");
+        // Iris-passthrough types skip the central CF metadata lookup,
+        // so standard_name and long_name must remain unset.
+        assert_eq!(m.standard_name, None);
+        assert_eq!(m.long_name, None);
+        // Sentinel attrs the adapter sets for every moment. NaN ≠ NaN
+        // by IEEE-754 rules so we can't assert_eq directly.
+        assert!(m.fill_value.expect("fill_value set").is_nan());
+        assert_eq!(m.scale_factor, Some(1.0));
+        assert_eq!(m.add_offset, Some(0.0));
+    }
+
+    /// Mirror test for the ODIM-mapped path: the variable lands under
+    /// the ODIM short name with full CF metadata (units +
+    /// standard_name + long_name) sourced from the central table.
+    #[test]
+    fn odim_mapped_moment_emits_under_odim_name_with_full_cf_metadata() {
+        // DB_DBT = id 1, MomentMapping::Odim → output_name "DBTH".
+        let sweep = one_ray_sweep(1, 4, 25.5);
+        let range_axis: Vec<f32> = (0..4).map(|i| 1000.0 + i as f32 * 100.0).collect();
+
+        let result =
+            convert_sweep(&sweep, 0, ScanMode::Ppi, &range_axis, &[1]).expect("convert_sweep ok");
+
+        let m = result
+            .moments
+            .get("DBTH")
+            .unwrap_or_else(|| panic!("expected DBTH; got {:?}", result.moments.keys()));
+        assert!(!m.units.is_empty(), "ODIM moment should carry units");
+        assert!(
+            m.standard_name.is_some(),
+            "ODIM moment should carry standard_name from the CF metadata table"
+        );
+        assert!(
+            m.long_name.is_some(),
+            "ODIM moment should carry long_name from the CF metadata table"
+        );
+    }
+
+    /// `ScanMode::Rhi` must produce `sweep_mode = "rhi"` in the
+    /// per-sweep SigmetSweepAttrs and `SweepMode::Elevation` in the
+    /// FM301 metadata. Other modes default to PPI / azimuth.
+    #[test]
+    fn rhi_scan_mode_propagates_to_sweep_attrs() {
+        let sweep = one_ray_sweep(1, 4, 0.0);
+        let range_axis = vec![100.0_f32; 4];
+
+        let rhi = convert_sweep(&sweep, 0, ScanMode::Rhi, &range_axis, &[1]).unwrap();
+        let rhi_attrs = rhi.metadata.sigmet.as_ref().unwrap();
+        assert_eq!(rhi_attrs.sweep_mode, "rhi");
+        assert_eq!(rhi.metadata.sweep_mode, radish_types::SweepMode::Elevation);
+
+        let ppi = convert_sweep(&sweep, 0, ScanMode::Ppi, &range_axis, &[1]).unwrap();
+        let ppi_attrs = ppi.metadata.sigmet.as_ref().unwrap();
+        assert_eq!(ppi_attrs.sweep_mode, "azimuth_surveillance");
+        assert_eq!(ppi.metadata.sweep_mode, radish_types::SweepMode::Azimuth);
+    }
 }
