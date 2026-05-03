@@ -43,9 +43,12 @@ def test_xarray_engine_radish_dispatches_to_sigmet(sigmet_fixture):
     assert dt.attrs.get("Conventions") == "None"
     assert "task_name" in dt.attrs
     assert "iris_version" in dt.attrs
-    # Per-sweep sigmet attrs from SigmetSweepAttrs.
-    assert s0.attrs.get("sweep_mode") in ("azimuth_surveillance", "rhi")
-    assert isinstance(s0.attrs.get("fixed_angle_deg"), float)
+    # Per-sweep `sweep_mode` and `sweep_fixed_angle` are FM301 0-d
+    # data_vars (matching xradar's IRIS shape), not Dataset.attrs —
+    # `.attrs` stays empty for sigmet sweeps for parity.
+    assert s0.attrs == {}, f"sigmet per-sweep attrs should be empty, got {dict(s0.attrs)}"
+    assert str(s0["sweep_mode"].values) in ("azimuth_surveillance", "rhi")
+    assert float(s0["sweep_fixed_angle"].values) >= 0.0
 
 
 def test_radish_open_datatree_path(sigmet_fixture):

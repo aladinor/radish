@@ -395,7 +395,12 @@ fn parse_sweeps(
         }
 
         sweeps.push(DecodedSweep {
-            sweep_number: (sweep_idx + 1) as u32,
+            // 0-indexed to match xradar's `open_iris_datatree` and FM301
+            // (xradar exposes `sweep_number = 0` for the first sweep
+            // even though the IRIS RAW file's INGEST_DATA_HEADER stores
+            // it 1-indexed). Keeping the same convention means
+            // `dt['/sweep_0'].sweep_number == 0` on both readers.
+            sweep_number: sweep_idx as u32,
             fixed_angle_deg: fixed_angle,
             start_time,
             rays,

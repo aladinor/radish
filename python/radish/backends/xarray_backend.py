@@ -382,14 +382,13 @@ class RadishBackendEntrypoint(BackendEntrypoint):
                 "mpda_cut": bool(nattrs.mpda_cut),
                 "base_tilt_cut": bool(nattrs.base_tilt_cut),
             }
-        sattrs = getattr(sweep, "sigmet_attrs", None)
-        if sattrs is not None:
-            sweep_attrs.update(
-                {
-                    "sweep_mode": sattrs.sweep_mode,
-                    "fixed_angle_deg": float(sattrs.fixed_angle_deg),
-                }
-            )
+        # Sigmet has no per-sweep extras to surface as `Dataset.attrs`:
+        # `sweep_mode` and `sweep_fixed_angle` already live in `data_vars`
+        # via the FM301 scalar convention above, so duplicating them
+        # into `.attrs` would diverge from `xradar.io.open_iris_datatree`
+        # (which leaves the per-sweep `.attrs` empty for IRIS files).
+        # The typed `sweep.sigmet_attrs` accessor is still reachable for
+        # callers that want lower-level access without xarray.
         return xr.Dataset(data_vars=data_vars, coords=coords, attrs=sweep_attrs)
 
     @classmethod
