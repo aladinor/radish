@@ -195,7 +195,6 @@ Longer-form docs in the repo root (read these when more context is needed than t
 - `ARCHITECTURE.md` — deeper dive on the data model, backend trait, and design rationale
 - `GETTING_STARTED.md` — end-to-end install + first-read walkthrough
 - `PROJECT_SUMMARY.md` — phased roadmap and status
-- `plans/0001-nexrad-level2-backend.md` — design and Phase 0/1/2 retro for the NEXRAD backend (achieved **16.96×** faster than xradar on a typical KLOT volume)
 
 ## Performance gotcha — `nexrad/parallel` feature
 
