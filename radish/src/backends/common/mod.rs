@@ -29,4 +29,6 @@
 pub(crate) mod buffer;
 pub(crate) mod coords;
 pub(crate) mod geometry;
+pub(crate) mod metadata;
+pub(crate) mod sniff;
 pub(crate) mod sort;

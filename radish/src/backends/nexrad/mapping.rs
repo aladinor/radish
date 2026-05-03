@@ -1,76 +1,51 @@
 //! Mapping from NEXRAD `Product`s to radish/ODIM moment names and CF metadata.
 //!
-//! ODIM short names come from `radish_types::moments` so the same canonical
-//! constants are used across backends. The longer per-moment strings
-//! (`standard_name`, `long_name`, `units`) match xradar's NEXRAD reader byte
-//! for byte so an `xr.DataTree` produced by either engine has the same
-//! per-DataArray attribute set.
+//! This module owns only the **format-specific** half — translating a
+//! NEXRAD `Product` enum into a canonical ODIM short name. The CF strings
+//! (`units`, `standard_name`, `long_name`) come from
+//! [`crate::backends::common::metadata`], which is the single source of
+//! truth shared with future backends so an `xr.DataTree` produced by any
+//! backend has byte-identical per-DataArray attribute strings.
 
 use nexrad_model::data::Product;
 use radish_types::moments;
 
-/// Per-moment metadata used when translating a NEXRAD `Product` into a radish `MomentData`.
-pub(super) struct MomentMeta {
-    pub odim_name: &'static str,
-    pub units: &'static str,
-    pub standard_name: &'static str,
-    pub long_name: &'static str,
-}
+use crate::backends::common::metadata::{meta_for, OdimMomentMeta};
 
 /// `CCORH` isn't in `radish_types::moments` (which mirrors the CfRadial2 short
 /// names, where this product is undefined). Keep it as a local constant for the
 /// NEXRAD-specific `Product::ClutterFilterPower` mapping.
 const CCORH: &str = "CCORH";
 
-/// Map a NEXRAD `Product` to its ODIM moment name and CF metadata. Strings are
-/// chosen to match xradar's `nexrad_mapping` table verbatim — keep this in
-/// sync with `xradar/io/backends/nexrad_level2.py` so engine-swap users see
-/// identical per-DataArray attrs.
-pub(super) fn moment_meta(product: Product) -> MomentMeta {
+/// Map a NEXRAD `Product` to its ODIM moment name. The result feeds into
+/// [`crate::backends::common::metadata::meta_for`] for the CF strings, so
+/// adding a new product means adding one match arm here plus (if needed)
+/// a row in the central metadata table.
+pub(super) fn product_to_odim_name(product: Product) -> &'static str {
     match product {
-        Product::Reflectivity => MomentMeta {
-            odim_name: moments::DBZH,
-            units: "dBZ",
-            standard_name: "radar_equivalent_reflectivity_factor_h",
-            long_name: "Equivalent reflectivity factor H",
-        },
-        Product::Velocity => MomentMeta {
-            odim_name: moments::VRADH,
-            units: "meters per seconds",
-            standard_name: "radial_velocity_of_scatterers_away_from_instrument_h",
-            long_name: "Radial velocity of scatterers away from instrument H",
-        },
-        Product::SpectrumWidth => MomentMeta {
-            odim_name: moments::WRADH,
-            units: "meters per seconds",
-            standard_name: "radar_doppler_spectrum_width_h",
-            long_name: "Doppler spectrum width H",
-        },
-        Product::DifferentialReflectivity => MomentMeta {
-            odim_name: moments::ZDR,
-            units: "dB",
-            standard_name: "radar_differential_reflectivity_hv",
-            long_name: "Log differential reflectivity H/V",
-        },
-        Product::DifferentialPhase => MomentMeta {
-            odim_name: moments::PHIDP,
-            units: "degrees",
-            standard_name: "radar_differential_phase_hv",
-            long_name: "Differential phase HV",
-        },
-        Product::CorrelationCoefficient => MomentMeta {
-            odim_name: moments::RHOHV,
-            units: "unitless",
-            standard_name: "radar_correlation_coefficient_hv",
-            long_name: "Correlation coefficient HV",
-        },
-        Product::ClutterFilterPower => MomentMeta {
-            odim_name: CCORH,
-            units: "unitless",
-            standard_name: "clutter_correction_h",
-            long_name: "Clutter Correction H",
-        },
+        Product::Reflectivity => moments::DBZH,
+        Product::Velocity => moments::VRADH,
+        Product::SpectrumWidth => moments::WRADH,
+        Product::DifferentialReflectivity => moments::ZDR,
+        Product::DifferentialPhase => moments::PHIDP,
+        Product::CorrelationCoefficient => moments::RHOHV,
+        Product::ClutterFilterPower => CCORH,
     }
+}
+
+/// Map a NEXRAD `Product` to its full ODIM moment metadata (name + CF
+/// strings). Adapter callers reach for this directly. Panics if the
+/// metadata table doesn't have an entry for the resolved ODIM name —
+/// that's a programming error, caught by the
+/// `every_supported_product_has_metadata` test below.
+pub(super) fn moment_meta(product: Product) -> &'static OdimMomentMeta {
+    let odim = product_to_odim_name(product);
+    meta_for(odim).unwrap_or_else(|| {
+        panic!(
+            "BUG: ODIM moment {odim:?} for NEXRAD product {product:?} \
+             has no entry in backends::common::metadata::TABLE"
+        )
+    })
 }
 
 /// Products radish surfaces from a NEXRAD sweep, in a stable order so DataTree
@@ -101,8 +76,6 @@ mod tests {
 
     #[test]
     fn velocity_uses_xradar_units_string() {
-        // xradar uses the unusual "meters per seconds" (with trailing s);
-        // we mirror it verbatim so engine-swap parity holds.
         assert_eq!(moment_meta(Product::Velocity).units, "meters per seconds");
         assert_eq!(
             moment_meta(Product::SpectrumWidth).units,
@@ -112,7 +85,6 @@ mod tests {
 
     #[test]
     fn rho_uses_unitless_not_empty_string() {
-        // xradar emits the literal "unitless" rather than "" for unit-free moments.
         assert_eq!(
             moment_meta(Product::CorrelationCoefficient).units,
             "unitless"
@@ -133,5 +105,18 @@ mod tests {
             moment_meta(Product::CorrelationCoefficient).odim_name,
             moments::RHOHV
         );
+    }
+
+    /// Guardrail: `moment_meta` panics if the central metadata table is
+    /// missing a row for any supported NEXRAD product. Catches the case
+    /// where a future contributor adds a new `Product` arm to
+    /// `product_to_odim_name` but forgets to extend
+    /// `common::metadata::TABLE`.
+    #[test]
+    fn every_supported_product_has_metadata() {
+        for &p in SUPPORTED_PRODUCTS {
+            let m = moment_meta(p); // would panic on a missing entry
+            assert!(!m.units.is_empty(), "{p:?} has empty units");
+        }
     }
 }
