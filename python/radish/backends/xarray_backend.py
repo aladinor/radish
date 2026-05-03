@@ -167,11 +167,24 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             "altitude": metadata.altitude,
         }
         data_vars: Dict[str, Any] = {}
-        if fmt != "nexrad":
+        if fmt == "sigmet":
+            # xradar's `open_iris_datatree` emits `sweep_fixed_angle(sweep)`
+            # AND `sweep_group_name(sweep)` at the root, in addition to the
+            # FM301 0-d scalars inside each sweep group. Match that shape
+            # so xarray-radar tooling (which is built around xradar's
+            # output) sees the same `sweep` dim broadcast it expects.
+            data_vars["sweep_fixed_angle"] = (
+                ["sweep"],
+                np.array(metadata.sweep_fixed_angles),
+            )
+            data_vars["sweep_group_name"] = (
+                ["sweep"],
+                np.array(metadata.sweep_group_names),
+            )
+        elif fmt != "nexrad":
             # Pre-existing CfRadial1 shape; xradar's NEXRAD reader doesn't
-            # advertise a root-level sweep_fixed_angle array (each sweep
-            # group has its own 0-d copy via FM301), so we skip it for
-            # NEXRAD to avoid an extra `sweep` dim leaking into sweep_0.
+            # advertise a root-level sweep_fixed_angle array, so we skip it
+            # for NEXRAD to avoid an extra `sweep` dim leaking into sweep_0.
             data_vars["sweep_fixed_angle"] = (
                 ["sweep"],
                 np.array(metadata.sweep_fixed_angles),
@@ -227,6 +240,35 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             # longitude/altitude coords. NEXRAD is always a fixed ground
             # radar, so `instrument_type = 'radar'` is hard-coded; the
             # rest come from `VolumeMetadata`.
+            data_vars.update(
+                {
+                    "volume_number": ((), int(metadata.volume_number)),
+                    "platform_type": ((), str(metadata.platform_type)),
+                    "instrument_type": ((), "radar"),
+                    "time_coverage_start": ((), str(metadata.time_coverage_start)),
+                    "time_coverage_end": ((), str(metadata.time_coverage_end)),
+                }
+            )
+        elif fmt == "sigmet":
+            # Mirror xradar's `open_iris_datatree` root attrs verbatim:
+            # only the standard CF-style strings, no IRIS-specific PRF /
+            # Nyquist / task fields. xradar drops those from the
+            # DataTree entirely; users who want them typed reach for
+            # `radish.read_sigmet(path).metadata.sigmet_attrs`.
+            extra = dict(metadata.attributes) if getattr(metadata, "attributes", None) else {}
+            attrs.update(
+                {
+                    "Conventions": "None",
+                    "version": "None",
+                    "title": "None",
+                    "institution": "None",
+                    "references": "None",
+                    "source": "None",
+                    "history": "None",
+                    "comment": "im/exported using radish",
+                    "scan_name": extra.get("scan_name", ""),
+                }
+            )
             data_vars.update(
                 {
                     "volume_number": ((), int(metadata.volume_number)),
@@ -341,6 +383,13 @@ class RadishBackendEntrypoint(BackendEntrypoint):
                 "mpda_cut": bool(nattrs.mpda_cut),
                 "base_tilt_cut": bool(nattrs.base_tilt_cut),
             }
+        # Sigmet has no per-sweep extras to surface as `Dataset.attrs`:
+        # `sweep_mode` and `sweep_fixed_angle` already live in `data_vars`
+        # via the FM301 scalar convention above, so duplicating them
+        # into `.attrs` would diverge from `xradar.io.open_iris_datatree`
+        # (which leaves the per-sweep `.attrs` empty for IRIS files).
+        # The typed `sweep.sigmet_attrs` accessor is still reachable for
+        # callers that want lower-level access without xarray.
         return xr.Dataset(data_vars=data_vars, coords=coords, attrs=sweep_attrs)
 
     @classmethod

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use radish_types::PlatformType;
 use serde::{Deserialize, Serialize};
 
-use super::{NexradVolumeAttrs, SweepData};
+use super::{NexradVolumeAttrs, SigmetVolumeAttrs, SweepData};
 
 /// Complete radar volume data
 #[derive(Debug, Clone)]
@@ -95,6 +95,10 @@ pub struct VolumeMetadata {
 
     /// NEXRAD-specific volume attrs (MSG_2 / MSG_5). `None` for non-NEXRAD volumes.
     pub nexrad: Option<NexradVolumeAttrs>,
+
+    /// Sigmet/IRIS-specific volume attrs (TASK_CONFIGURATION + INGEST_HEADER).
+    /// `None` for non-Sigmet volumes.
+    pub sigmet: Option<SigmetVolumeAttrs>,
 }
 
 impl VolumeMetadata {
@@ -124,6 +128,7 @@ impl VolumeMetadata {
             frequency: None,
             attributes: std::collections::HashMap::new(),
             nexrad: None,
+            sigmet: None,
         }
     }
 

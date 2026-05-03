@@ -13,8 +13,8 @@ pub mod transforms;
 pub use backends::RadarBackend;
 pub use error::{RadishError, Result};
 pub use model::{
-    Coordinates, MomentData, NexradSweepAttrs, NexradVolumeAttrs, SweepData, SweepMetadata,
-    VolumeData, VolumeMetadata,
+    Coordinates, MomentData, NexradSweepAttrs, NexradVolumeAttrs, SigmetSweepAttrs,
+    SigmetVolumeAttrs, SweepData, SweepMetadata, VolumeData, VolumeMetadata,
 };
 
 #[cfg(test)]
