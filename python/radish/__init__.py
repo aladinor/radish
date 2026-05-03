@@ -15,14 +15,18 @@ from radish._radish import (
     MomentData,
     NexradSweepAttrs,
     NexradVolumeAttrs,
+    SigmetSweepAttrs,
+    SigmetVolumeAttrs,
     SweepData,
     VolumeData,
     VolumeMetadata,
     read_cfradial1,
     read_nexrad,
     read_nexrad_chunks,
+    read_sigmet,
     scan_cfradial1,
     scan_nexrad,
+    scan_sigmet,
 )
 
 # Canonical entry points: format-agnostic, input-shape-agnostic.
@@ -38,6 +42,8 @@ __all__ = [
     "MomentData",
     "NexradVolumeAttrs",
     "NexradSweepAttrs",
+    "SigmetVolumeAttrs",
+    "SigmetSweepAttrs",
     # Canonical entry points
     "open_datatree",
     "open_dataset",
@@ -48,4 +54,6 @@ __all__ = [
     "read_nexrad",
     "scan_nexrad",
     "read_nexrad_chunks",
+    "read_sigmet",
+    "scan_sigmet",
 ]

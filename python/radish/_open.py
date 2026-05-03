@@ -26,6 +26,8 @@ from radish._radish import (
     read_nexrad,
     read_nexrad_bytes,
     read_nexrad_chunks,
+    read_sigmet,
+    read_sigmet_bytes,
 )
 
 # Type aliases for input shapes the dispatcher recognises.
@@ -179,6 +181,9 @@ _DISPATCH: Dict[Tuple[str, InputShape], Callable[[Any], Any]] = {
     ("nexrad_level2", SHAPE_FILELIKE): lambda obj: read_nexrad_bytes(obj.read()),
     ("nexrad_level2", SHAPE_CHUNKS): lambda obj: read_nexrad_chunks(_materialize_chunks(obj)),
     ("cfradial1", SHAPE_PATH): lambda obj: read_cfradial1(os.fspath(obj)),
+    ("sigmet", SHAPE_PATH): lambda obj: read_sigmet(os.fspath(obj)),
+    ("sigmet", SHAPE_BYTES): lambda obj: read_sigmet_bytes(bytes(obj)),
+    ("sigmet", SHAPE_FILELIKE): lambda obj: read_sigmet_bytes(obj.read()),
 }
 
 
@@ -276,6 +281,8 @@ _BACKEND_ALIASES: Dict[str, str] = {
     "nexrad": "nexrad_level2",
     "nexrad_level2": "nexrad_level2",
     "cfradial1": "cfradial1",
+    "sigmet": "sigmet",
+    "iris": "sigmet",
 }
 
 
@@ -291,12 +298,14 @@ def _normalize_backend(backend: Optional[str]) -> Optional[str]:
 
 def _format_for_root(backend_name: Optional[str]) -> str:
     """Translate a backend name to the format key used by
-    `_create_root_dataset`. The xarray backend currently switches on the
-    string `"nexrad"` for NEXRAD-specific root attrs."""
+    `_create_root_dataset`. The xarray backend switches on the
+    short format string for per-format root attrs."""
     if backend_name is None:
         return "cfradial1"  # safe default — produces minimal root
     if backend_name == "nexrad_level2":
         return "nexrad"
+    if backend_name == "sigmet":
+        return "sigmet"
     return backend_name
 
 
@@ -307,6 +316,8 @@ def _infer_backend_from_volume(volume: Any) -> str:
     """
     if getattr(volume.metadata, "nexrad_attrs", None) is not None:
         return "nexrad_level2"
+    if getattr(volume.metadata, "sigmet_attrs", None) is not None:
+        return "sigmet"
     return "cfradial1"
 
 

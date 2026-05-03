@@ -37,9 +37,11 @@ use pyo3::prelude::*;
 use radish::{
     backends::{
         auto_backend, auto_backend_for_bytes, CfRadial1Backend, NexradBackend, RadarBackend,
+        SigmetBackend,
     },
     Coordinates, MomentData as RustMomentData, NexradSweepAttrs as RustNexradSweepAttrs,
-    NexradVolumeAttrs as RustNexradVolumeAttrs, SweepData as RustSweepData, SweepMetadata,
+    NexradVolumeAttrs as RustNexradVolumeAttrs, SigmetSweepAttrs as RustSigmetSweepAttrs,
+    SigmetVolumeAttrs as RustSigmetVolumeAttrs, SweepData as RustSweepData, SweepMetadata,
     VolumeData as RustVolumeData, VolumeMetadata as RustVolumeMetadata,
 };
 
@@ -149,6 +151,16 @@ impl PyVolumeMetadata {
             .as_ref()
             .cloned()
             .map(|inner| PyNexradVolumeAttrs { inner })
+    }
+
+    /// Sigmet/IRIS-specific volume attrs. `None` for non-Sigmet volumes.
+    #[getter]
+    fn sigmet_attrs(&self) -> Option<PySigmetVolumeAttrs> {
+        self.inner
+            .sigmet
+            .as_ref()
+            .cloned()
+            .map(|inner| PySigmetVolumeAttrs { inner })
     }
 }
 
@@ -269,6 +281,66 @@ impl PyNexradSweepAttrs {
     #[getter]
     fn base_tilt_cut(&self) -> bool {
         self.inner.base_tilt_cut
+    }
+}
+
+/// Volume-level Sigmet/IRIS attrs (`TaskConfiguration` + `IngestHeader`).
+/// Field names match xradar's `Dataset.attrs` keys for drop-in compatibility
+/// with `xradar.io.open_iris_datatree`.
+#[pyclass(name = "SigmetVolumeAttrs")]
+#[derive(Clone)]
+pub struct PySigmetVolumeAttrs {
+    inner: RustSigmetVolumeAttrs,
+}
+
+#[pymethods]
+impl PySigmetVolumeAttrs {
+    #[getter]
+    fn task_name(&self) -> &str {
+        &self.inner.task_name
+    }
+    #[getter]
+    fn iris_version(&self) -> &str {
+        &self.inner.iris_version
+    }
+    #[getter]
+    fn prf_hz(&self) -> f32 {
+        self.inner.prf_hz
+    }
+    #[getter]
+    fn prf_low_hz(&self) -> f32 {
+        self.inner.prf_low_hz
+    }
+    #[getter]
+    fn nyquist_velocity_ms(&self) -> f32 {
+        self.inner.nyquist_velocity_ms
+    }
+    #[getter]
+    fn unambiguous_range_m(&self) -> f32 {
+        self.inner.unambiguous_range_m
+    }
+    #[getter]
+    fn scan_mode(&self) -> &str {
+        &self.inner.scan_mode
+    }
+}
+
+/// Per-sweep Sigmet/IRIS attrs.
+#[pyclass(name = "SigmetSweepAttrs")]
+#[derive(Clone)]
+pub struct PySigmetSweepAttrs {
+    inner: RustSigmetSweepAttrs,
+}
+
+#[pymethods]
+impl PySigmetSweepAttrs {
+    #[getter]
+    fn sweep_mode(&self) -> &str {
+        &self.inner.sweep_mode
+    }
+    #[getter]
+    fn fixed_angle_deg(&self) -> f32 {
+        self.inner.fixed_angle_deg
     }
 }
 
@@ -485,6 +557,16 @@ impl PySweepData {
             .cloned()
             .map(|inner| PyNexradSweepAttrs { inner })
     }
+
+    /// Sigmet/IRIS-specific sweep attrs. `None` for non-Sigmet sweeps.
+    #[getter]
+    fn sigmet_attrs(&self) -> Option<PySigmetSweepAttrs> {
+        self.metadata
+            .sigmet
+            .as_ref()
+            .cloned()
+            .map(|inner| PySigmetSweepAttrs { inner })
+    }
 }
 
 /// Python wrapper for `VolumeData`.
@@ -615,6 +697,33 @@ fn read_nexrad_bytes(data: Vec<u8>) -> PyResult<PyVolumeData> {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD bytes: {e}")))
 }
 
+/// Read a Sigmet/IRIS RAW file.
+#[pyfunction]
+fn read_sigmet(path: &str) -> PyResult<PyVolumeData> {
+    SigmetBackend::new()
+        .read_volume(Path::new(path))
+        .map(PyVolumeData::from_inner)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to read Sigmet file: {e}")))
+}
+
+/// Scan a Sigmet/IRIS RAW file for metadata only.
+#[pyfunction]
+fn scan_sigmet(path: &str) -> PyResult<PyVolumeMetadata> {
+    SigmetBackend::new()
+        .scan_file(Path::new(path))
+        .map(|inner| PyVolumeMetadata { inner })
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to scan Sigmet file: {e}")))
+}
+
+/// Read a Sigmet/IRIS RAW volume from a single in-memory byte buffer.
+#[pyfunction]
+fn read_sigmet_bytes(data: Vec<u8>) -> PyResult<PyVolumeData> {
+    SigmetBackend::new()
+        .read_bytes_volume(data)
+        .map(PyVolumeData::from_inner)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to read Sigmet bytes: {e}")))
+}
+
 /// Identify which radish backend (`"nexrad_level2"`, `"cfradial1"`, …)
 /// owns a file path. Wraps `radish::backends::auto_backend(path).name()`.
 ///
@@ -649,12 +758,17 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMomentData>()?;
     m.add_class::<PyNexradVolumeAttrs>()?;
     m.add_class::<PyNexradSweepAttrs>()?;
+    m.add_class::<PySigmetVolumeAttrs>()?;
+    m.add_class::<PySigmetSweepAttrs>()?;
     m.add_function(wrap_pyfunction!(read_cfradial1, m)?)?;
     m.add_function(wrap_pyfunction!(scan_cfradial1, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad, m)?)?;
     m.add_function(wrap_pyfunction!(scan_nexrad, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sigmet, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_sigmet, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sigmet_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(auto_backend_name, m)?)?;
     m.add_function(wrap_pyfunction!(auto_backend_name_for_bytes, m)?)?;
     Ok(())
