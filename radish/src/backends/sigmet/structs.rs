@@ -195,8 +195,11 @@ pub(super) struct TaskConfiguration {
 }
 
 /// Distilled scan mode. The ICD has more values; we collapse them into
-/// the shapes the adapter actually treats differently.
+/// the shapes the adapter actually treats differently. `#[non_exhaustive]`
+/// because the adapter and the Python wrapper match on this — adding a
+/// future variant (e.g. `Sector` for sector-PPI) shouldn't break callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub(super) enum ScanMode {
     Ppi,
     Rhi,
@@ -570,5 +573,94 @@ mod tests {
         assert_eq!(decode_fixed_string(b"hello\0\0\0"), "hello");
         assert_eq!(decode_fixed_string(b"hi   "), "hi");
         assert_eq!(decode_fixed_string(b""), "");
+    }
+
+    /// `TaskConfiguration::parse` must read all four DSP_DATA_MASK words
+    /// and pack them into the u128 covering bits 0..127 — without this
+    /// the walker silently misses moments with ID > 31 (DB_HCLASS=55,
+    /// DB_DBTE8=71, DB_DBZE8=73 — common in real CHI fixtures).
+    #[test]
+    fn task_configuration_parses_dsp_mask_above_bit_31() {
+        // Build a minimal 1892-byte TASK_CONFIGURATION buffer with:
+        //   - mask_word_0 (offset 132+4)  = 0
+        //   - extended_header_type        = 0
+        //   - mask_word_1 (offset 132+12) = 0
+        //   - mask_word_2 (offset 132+16) = 1<<7    (id 64+7 = 71, DB_DBTE8)
+        //   - mask_word_3 (offset 132+20) = 0
+        //   - bins_output (offset 772+10) = 4       (small value to avoid range_axis explosion)
+        //   - antenna_scan_mode (off 932) = 1       (PPI)
+        //   - sweep_number_total (off 932+6) = 1
+        let mut buf = vec![0u8; 1892];
+        let task_dsp_off = 132usize;
+        // mask_word_2 at off TASK_DSP_INFO+16 → byte slice [..16+4]
+        let mw2_off = task_dsp_off + 16;
+        buf[mw2_off..mw2_off + 4].copy_from_slice(&(1u32 << 7).to_le_bytes());
+        // bins_output as a non-zero u16 (RANGE_INFO offset 10).
+        let bins_off = 772 + 10;
+        buf[bins_off..bins_off + 2].copy_from_slice(&4u16.to_le_bytes());
+        // scan_mode = 1 (PPI), sweep_number_total = 1
+        buf[932..934].copy_from_slice(&1u16.to_le_bytes());
+        buf[932 + 6..932 + 8].copy_from_slice(&1i16.to_le_bytes());
+
+        let task = TaskConfiguration::parse(&buf).expect("parse");
+        assert!(
+            task.dsp_data_mask & (1u128 << 71) != 0,
+            "bit 71 (DB_DBTE8) must be set in dsp_data_mask, got {:#x}",
+            task.dsp_data_mask
+        );
+        // Bits in mask_word_0/1/3 should still be zero.
+        assert_eq!(task.dsp_data_mask & ((1u128 << 64) - 1), 0);
+        assert_eq!(task.dsp_data_mask & (((1u128 << 32) - 1) << 96), 0);
+    }
+
+    /// `IngestDataHeader::parse` must read all five SINT2 fields between
+    /// `sweep_start_time` and `fixed_angle`. A previous version was off
+    /// by one (missing `number_rays_file_written`) and would land
+    /// `fixed_angle` two bytes too early.
+    #[test]
+    fn ingest_data_header_parses_all_sint2_fields() {
+        // Hand-roll a 76-byte INGEST_DATA_HEADER:
+        //   off 0:  STRUCTURE_HEADER (id=24 = INGEST_DATA_HEADER), 12 B
+        //   off 12: YMDS_TIME = secs(0), millis(0), 2024, 6, 15
+        //   off 24: sweep_number = 3
+        //   off 26: number_rays_per_sweep = 360
+        //   off 28: first_ray_index = 0
+        //   off 30: number_rays_file_expected = 360
+        //   off 32: number_rays_file_written = 359   ← this field is the one
+        //                                              that was missing in v0
+        //   off 34: fixed_angle (BIN2) = 8192        (= 45°)
+        //   off 36: bits_per_bin = 8
+        //   off 38: data_type = 2 (DB_DBZ)
+        let mut buf = [0u8; 76];
+        // STRUCTURE_HEADER: id=24, ver=2, len=76
+        buf[0..2].copy_from_slice(&24i16.to_le_bytes());
+        buf[2..4].copy_from_slice(&2i16.to_le_bytes());
+        buf[4..8].copy_from_slice(&76i32.to_le_bytes());
+        // YMDS_TIME at off 12
+        buf[12..16].copy_from_slice(&0i32.to_le_bytes());
+        buf[16..18].copy_from_slice(&0u16.to_le_bytes());
+        buf[18..20].copy_from_slice(&2024i16.to_le_bytes());
+        buf[20..22].copy_from_slice(&6i16.to_le_bytes());
+        buf[22..24].copy_from_slice(&15i16.to_le_bytes());
+        // SINT2 fields
+        buf[24..26].copy_from_slice(&3i16.to_le_bytes());
+        buf[26..28].copy_from_slice(&360i16.to_le_bytes());
+        buf[28..30].copy_from_slice(&0i16.to_le_bytes());
+        buf[30..32].copy_from_slice(&360i16.to_le_bytes());
+        buf[32..34].copy_from_slice(&359i16.to_le_bytes());
+        buf[34..36].copy_from_slice(&8192u16.to_le_bytes());
+        buf[36..38].copy_from_slice(&8i16.to_le_bytes());
+        buf[38..40].copy_from_slice(&2u16.to_le_bytes()); // data_type UINT2
+
+        let idh = IngestDataHeader::parse(&buf).expect("parse");
+        assert_eq!(idh.sweep_number, 3);
+        assert_eq!(idh.number_rays_per_sweep, 360);
+        assert_eq!(idh.first_ray_index, 0);
+        assert_eq!(idh.number_rays_file_expected, 360);
+        assert_eq!(idh.number_rays_file_written, 359);
+        // 8192 BIN2 → 8192 * 360 / 65536 = 45.0
+        assert!((idh.fixed_angle_deg - 45.0).abs() < 1e-3);
+        assert_eq!(idh.bits_per_bin, 8);
+        assert_eq!(idh.data_type, 2);
     }
 }

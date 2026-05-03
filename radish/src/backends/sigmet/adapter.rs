@@ -6,7 +6,7 @@
 //! buffer-management logic lives in `backends::common::*` so this file
 //! is mostly format-specific glue.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use ndarray::Array2;
@@ -165,16 +165,17 @@ fn convert_sweep(
     let nrays = rays.len();
     let max_gates = range_axis_m.len();
     let mut moments: HashMap<String, MomentData> = HashMap::with_capacity(active_ids.len());
-    let mut emitted: HashMap<String, ()> = HashMap::new();
+    // Track which ODIM names we've already emitted so 8-bit and 16-bit
+    // variants of the same moment (e.g. DB_DBZ + DB_DBZ2 → DBZH) don't
+    // both produce a DataArray. `&'static str` keys avoid the per-insert
+    // `String` allocation the previous `HashMap<String, ()>` paid.
+    let mut emitted: HashSet<&'static str> = HashSet::with_capacity(active_ids.len());
     for &data_type_id in active_ids {
         let m = match moment_for_id(data_type_id) {
             Some(m) => m,
             None => continue,
         };
-        // Skip duplicate ODIM emissions: 8-bit and 16-bit variants both
-        // map to e.g. DBZH; we keep the first one we encounter (the
-        // SUPPORTED_MOMENTS ordering puts 8-bit before 16-bit).
-        if emitted.contains_key(m.odim_name) {
+        if !emitted.insert(m.odim_name) {
             continue;
         }
 
@@ -190,7 +191,6 @@ fn convert_sweep(
         moment.scale_factor = Some(1.0);
         moment.add_offset = Some(0.0);
         moments.insert(meta.odim_name.to_string(), moment);
-        emitted.insert(meta.odim_name.to_string(), ());
     }
 
     let mut meta = SweepMetadata::new(

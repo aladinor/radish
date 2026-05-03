@@ -10,7 +10,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Volume-level Sigmet attrs (TASK_CONFIGURATION + INGEST_HEADER).
+///
+/// `#[non_exhaustive]` because we expect to add fields as more
+/// TASK_* sub-blocks get parsed (TASK_CALIB_INFO wavelength is the
+/// next planned addition); downstream `match { .. }` callers shouldn't
+/// be broken by that.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SigmetVolumeAttrs {
     /// Free-text task name from `TASK_END_INFO.task_configuration_file_name`.
     pub task_name: String,
@@ -32,8 +38,10 @@ pub struct SigmetVolumeAttrs {
 /// Per-sweep Sigmet attrs. Index-aligned with the volume's sweep list.
 ///
 /// Kept minimal in PR-B; we expand if/when xradar surfaces sweep-level
-/// IRIS-specific attrs we want to mirror.
+/// IRIS-specific attrs we want to mirror. Marked `#[non_exhaustive]`
+/// for the same reason as [`SigmetVolumeAttrs`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SigmetSweepAttrs {
     /// `"azimuth_surveillance"` for PPI, `"rhi"` for RHI.
     pub sweep_mode: String,

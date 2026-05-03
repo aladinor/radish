@@ -201,8 +201,11 @@ pub(super) fn parse_volume(data: &[u8]) -> Result<DecodedVolume> {
         task_name: task.task_name,
         latitude_deg: cfg.latitude_deg,
         longitude_deg: cfg.longitude_deg,
+        // Widen i16 fields to i32 BEFORE adding so an adversarial INGEST
+        // header can't cause a silent overflow in release builds. Real
+        // values are typically small (≤10 km) but we don't trust input.
         altitude_m: (cfg.altitude_radar_cm as f64 / 100.0)
-            .max((cfg.height_site_m + cfg.height_radar_m) as f64),
+            .max(cfg.height_site_m as f64 + cfg.height_radar_m as f64),
         volume_start_time: cfg.volume_scan_start_time,
         scan_mode: task.scan_mode,
         nyquist_velocity_ms: task.nyquist_velocity_ms,
@@ -254,6 +257,7 @@ impl<'a> RecordReader<'a> {
     }
 
     /// Read one little-endian u16 word, skipping record headers as needed.
+    /// This is the per-gate hot path — keep it tight.
     fn read_u16(&mut self) -> Result<u16> {
         self.skip_record_header_if_at_boundary();
         if self.pos + 2 > self.end {
@@ -262,24 +266,16 @@ impl<'a> RecordReader<'a> {
                 msg: "unexpected EOF reading u16".to_string(),
             });
         }
-        let lo = self.data[self.pos] as u16;
-        let hi = self.data[self.pos + 1] as u16;
+        let bytes = [self.data[self.pos], self.data[self.pos + 1]];
         self.pos += 2;
         // If our 2-byte read straddled a record boundary, advance past
         // the next record's header so the *next* read sees data, not
         // RAW_PROD_BHDR. (In practice the IRIS encoder aligns codes on
         // record boundaries so straddling shouldn't happen, but defensive.)
         if self.record_offset_of(self.pos - 2) != self.record_offset_of(self.pos) {
-            // Already crossed; skip header at our new record's start.
-            // (No-op if `pos` is already past the header.)
             self.skip_record_header_if_at_boundary();
         }
-        Ok(lo | (hi << 8))
-    }
-
-    /// Read a signed i16 (sign of the compression code matters).
-    fn read_i16(&mut self) -> Result<i16> {
-        self.read_u16().map(|v| v as i16)
+        Ok(u16::from_le_bytes(bytes))
     }
 
     /// Skip `n` bytes (only used for ray-header skip when explicitly
@@ -458,13 +454,7 @@ fn decode_one_ray(
     // Peek the first compression code. If it's `cmp_val=1, MSB=0` we're
     // looking at a missing-ray sentinel — return None so the caller fills
     // an all-NaN row.
-    let first_code = reader.read_i16()?;
-    let first_msb = first_code < 0;
-    let first_val = if first_msb {
-        (first_code as i32 + 32768) as usize
-    } else {
-        first_code as usize
-    };
+    let (first_msb, first_val) = decompose_code(reader.read_u16()?);
     if !first_msb && first_val == 1 {
         return Ok(None);
     }
@@ -474,13 +464,7 @@ fn decode_one_ray(
 
     // Continue until the end-of-ray sentinel.
     loop {
-        let code = reader.read_i16()?;
-        let cmp_msb = code < 0;
-        let cmp_val = if cmp_msb {
-            (code as i32 + 32768) as usize
-        } else {
-            code as usize
-        };
+        let (cmp_msb, cmp_val) = decompose_code(reader.read_u16()?);
         if !cmp_msb && cmp_val == 1 {
             break;
         }
@@ -554,15 +538,35 @@ fn apply_rle_step(
     Ok(())
 }
 
+/// Split a raw 16-bit RLE compression code into `(is_copy, count)`.
+/// MSB set ⇒ copy mode (literal data words follow); MSB clear ⇒ skip
+/// mode (zeros). Working in `u16` avoids the i16→i32→usize round-trip
+/// and the overflow risk of treating the MSB as a sign bit.
+#[inline]
+fn decompose_code(code: u16) -> (bool, usize) {
+    let cmp_msb = code & 0x8000 != 0;
+    let cmp_val = (code & 0x7FFF) as usize;
+    (cmp_msb, cmp_val)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::backends::sigmet::calibration::DECODE_NONE;
+
     /// A buffer that's not even big enough for STRUCTURE_HEADER.
     #[test]
     fn parse_volume_rejects_short_buffer() {
-        let result = parse_volume(&[0u8; 4]);
-        assert!(result.is_err());
+        let err = parse_volume(&[0u8; 4]).expect_err("should reject");
+        // Pin the variant + the message anchor so a regression that
+        // changed *which* error fires doesn't silently still pass.
+        match err {
+            RadishError::MalformedRecord { msg, .. } => {
+                assert!(msg.contains("STRUCTURE_HEADER"), "got msg={msg:?}");
+            }
+            other => panic!("expected MalformedRecord, got {other:?}"),
+        }
     }
 
     /// A buffer with a non-IRIS structure_identifier should be rejected
@@ -578,5 +582,114 @@ mod tests {
             Err(RadishError::InvalidFormat(_)) => (),
             other => panic!("expected InvalidFormat, got {other:?}"),
         }
+    }
+
+    /// `decompose_code` mirrors xradar's `get_compression_code` MSB/LSB
+    /// split. Pin the boundary cases.
+    #[test]
+    fn decompose_code_msb_split() {
+        // MSB clear, value 1 → end-of-ray sentinel
+        assert_eq!(decompose_code(0x0001), (false, 1));
+        // MSB clear, value 5 → skip 5 words
+        assert_eq!(decompose_code(0x0005), (false, 5));
+        // MSB set, value 5 → copy 5 words
+        assert_eq!(decompose_code(0x8005), (true, 5));
+        // MSB set, value 32767 (max) → copy 32767 words
+        assert_eq!(decompose_code(0xFFFF), (true, 0x7FFF));
+    }
+
+    /// Helper: build a buffer that starts with the 12-byte `RAW_PROD_BHDR`
+    /// the `RecordReader` skips at every record boundary, followed by
+    /// `payload`. Returns the buffer; tests should set `reader.pos = 0`
+    /// (the reader will skip the 12 bytes and land at the payload).
+    fn with_record_prelude(payload: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0xAAu8; 12];
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// First compression code = `0x0001` (MSB clear, val=1) is the
+    /// missing-ray sentinel — `decode_one_ray` must return `Ok(None)`
+    /// without consuming a buffer's worth of data.
+    #[test]
+    fn decode_one_ray_returns_none_for_missing_ray_sentinel() {
+        let buf = with_record_prelude(&[0x01, 0x00]);
+        let mut reader = RecordReader::new(&buf, 0, buf.len());
+        let result = decode_one_ray(&mut reader, 10, 1, DECODE_NONE, 0.0).expect("Ok");
+        assert!(
+            result.is_none(),
+            "missing-ray sentinel must surface as None"
+        );
+    }
+
+    /// `apply_rle_step` must drain (consume) data words past `raw_words.len()`
+    /// when an encoder over-shoots by ≤ 64 words — the trailing reads
+    /// must advance the reader (so the next code lands at the right
+    /// offset) but `word_pos` only advances for actual writes.
+    #[test]
+    fn apply_rle_step_drains_minor_encoder_overshoot() {
+        // Payload = 4 u16 words (8 bytes) of literal copy data.
+        let buf = with_record_prelude(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        let mut reader = RecordReader::new(&buf, 0, buf.len());
+        let mut raw = vec![0u16; 2]; // smaller than the 4-word copy
+        let mut pos = 0usize;
+        apply_rle_step(&mut reader, &mut raw, &mut pos, true, 4).expect("Ok");
+        // word_pos advanced only for the two writes that fit.
+        assert_eq!(pos, 2);
+        assert_eq!(raw[0], 0x2211);
+        assert_eq!(raw[1], 0x4433);
+        // Reader pos = 12-byte prelude + 4 u16 reads (2 written, 2 drained).
+        assert_eq!(reader.pos, 12 + 8);
+    }
+
+    /// `apply_rle_step` must error (not silently corrupt) when an
+    /// encoder over-shoots by more than 64 words — defensive guard
+    /// against a malformed file flooding our buffer-end check.
+    #[test]
+    fn apply_rle_step_errors_on_major_overshoot() {
+        let buf = with_record_prelude(&vec![0u8; 4096]);
+        let mut reader = RecordReader::new(&buf, 0, buf.len());
+        let mut raw = vec![0u16; 2];
+        let mut pos = 0usize;
+        // Skip step of 200 words pushes pos to 200 — past 2 + 64 = 66.
+        let err =
+            apply_rle_step(&mut reader, &mut raw, &mut pos, false, 200).expect_err("must error");
+        match err {
+            RadishError::MalformedRecord { msg, .. } => {
+                assert!(msg.contains("past end"), "got msg={msg:?}");
+            }
+            other => panic!("expected MalformedRecord, got {other:?}"),
+        }
+    }
+
+    /// The cross-record straddle path inside `RecordReader::read_u16`:
+    /// when `pos` lands on a record boundary, the next read must skip
+    /// the 12-byte `RAW_PROD_BHDR` and return data from byte 12 onward.
+    #[test]
+    fn record_reader_skips_raw_prod_bhdr_at_record_boundary() {
+        // Two records of RECORD_BYTES = 6144 each.
+        let mut buf = vec![0u8; RECORD_BYTES * 2];
+        // First record starts with a fake RAW_PROD_BHDR (12 bytes of
+        // garbage 0xAA) + a known sentinel u16 at offset 12.
+        for b in &mut buf[0..12] {
+            *b = 0xAA;
+        }
+        buf[12] = 0xCD;
+        buf[13] = 0xAB; // u16 LE = 0xABCD
+                        // Second record: fake header + sentinel 0xBEEF at offset 12.
+        for b in &mut buf[RECORD_BYTES..RECORD_BYTES + 12] {
+            *b = 0xAA;
+        }
+        buf[RECORD_BYTES + 12] = 0xEF;
+        buf[RECORD_BYTES + 13] = 0xBE;
+
+        let mut reader = RecordReader::new(&buf, 0, buf.len());
+        // First read at the boundary must skip header → 0xABCD.
+        assert_eq!(reader.read_u16().unwrap(), 0xABCD);
+        // Now position is at 14. Skip ahead to the next record boundary
+        // (byte 6144). A read there must again skip the second
+        // record's header and return the 0xBEEF sentinel.
+        reader.pos = RECORD_BYTES;
+        assert_eq!(reader.read_u16().unwrap(), 0xBEEF);
     }
 }
