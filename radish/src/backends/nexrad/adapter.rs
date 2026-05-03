@@ -102,22 +102,16 @@ pub(super) fn build_volume_metadata(
     metadata.institution = "NOAA/NWS".to_string();
     metadata.platform_type = Some(PlatformType::Fixed);
     metadata.generate_sweep_names(num_sweeps);
-    // Per the comment on `convert_sweep`'s `fixed_angle` below, prefer
-    // the MSG_5 commanded angle (`ElevationCut`) over the median of
-    // per-ray MSG_31 angles. Keeps the root-level
-    // `sweep_fixed_angle(sweep)` array byte-identical to xradar's and
-    // aligned with the VCP reference.
+    // Prefer the MSG_5 commanded angle (`ElevationCut`) over the median
+    // of per-ray MSG_31 angles — see [`fixed_angle_for`] for why. Keeps
+    // the root-level `sweep_fixed_angle(sweep)` array byte-identical to
+    // xradar's and aligned with the VCP reference.
     let cuts = scan.coverage_pattern().elevation_cuts();
     metadata.sweep_fixed_angles = scan
         .sweeps()
         .iter()
         .enumerate()
-        .map(|(idx, s)| {
-            cuts.get(idx)
-                .map(|c| c.elevation_angle_degrees())
-                .or_else(|| s.elevation_angle_degrees().map(|a| a as f64))
-                .unwrap_or(f64::NAN)
-        })
+        .map(|(idx, s)| fixed_angle_for(cuts.get(idx), s).unwrap_or(f64::NAN))
         .collect();
 
     // VCP attributes match xradar's `VCP-NNN` form (e.g. `VCP-212`) so
@@ -195,21 +189,8 @@ pub(super) fn convert_sweep(
         },
     );
 
-    // Use the MSG_5 commanded elevation (`ElevationCut::elevation_angle_degrees`)
-    // when available — that matches xradar's `open_nexradlevel2_datatree`
-    // and the VCP reference angle a user expects ("VCP-32 sweep 1 = 0.5°").
-    //
-    // `nexrad-model`'s `Sweep::elevation_angle_degrees` returns the
-    // *median of MSG_31 per-radial elevation angles* — the achieved
-    // beam angle, not the commanded one. Both are spec-compliant, but
-    // they differ by up to ~0.18° (MSG_5 LSB × small servo error)
-    // which trips downstream tests that compare against the VCP
-    // reference. Fall back to the median-of-radials when the cut is
-    // missing (truncated VCP, malformed file).
-    let fixed_angle = cut
-        .map(|c| c.elevation_angle_degrees())
-        .or_else(|| sweep.elevation_angle_degrees().map(|a| a as f64))
-        .unwrap_or_else(|| median_elevation(&coordinates.elevation));
+    let fixed_angle =
+        fixed_angle_for(cut, sweep).unwrap_or_else(|| median_elevation(&coordinates.elevation));
     let sweep_number = sweep.elevation_number() as u32;
     // PRT, Nyquist, PRF and polarization mode aren't surfaced by
     // `nexrad-model` 1.0.0-rc.2; they live in the RAD block at the
@@ -345,6 +326,36 @@ fn median_elevation(elevations: &[f32]) -> f64 {
     *m as f64
 }
 
+/// Pick the right elevation angle for a sweep, preferring the
+/// MSG_5 *commanded* angle over the MSG_31 *achieved* (median-of-radials)
+/// angle.
+///
+/// `nexrad-model 1.0.0-rc.2` exposes two getters that both return
+/// "elevation in degrees" but mean different things:
+///
+/// * [`ElevationCut::elevation_angle_degrees`] — the commanded angle
+///   from MSG_5 (the VCP definition; what the radar was *told* to point
+///   at). xradar's `open_nexradlevel2_datatree` reads this. Matches the
+///   VCP reference table users compare against (e.g. "VCP-32 sweep 1
+///   = 0.5°").
+/// * [`Sweep::elevation_angle_degrees`] — the median of MSG_31 per-ray
+///   elevation angles (the *achieved* beam angle, averaged over the
+///   sweep). The antenna's servo doesn't track the commanded angle
+///   exactly, so this differs from the commanded angle by up to
+///   ~0.18° on a typical scan.
+///
+/// Both readings are spec-compliant; we ship the commanded one for
+/// xradar parity. Fallback chain: commanded → median-of-radials → None
+/// (caller decides what to do — `f64::NAN` for the volume-level array,
+/// `median_elevation(coordinates.elevation)` for the per-sweep value).
+///
+/// `f64::from(f32)` is used over `as f64` because the conversion is
+/// lossless and `as` is a clippy::cast_lossless lint hit.
+fn fixed_angle_for(cut: Option<&ElevationCut>, sweep: &Sweep) -> Option<f64> {
+    cut.map(|c| c.elevation_angle_degrees())
+        .or_else(|| sweep.elevation_angle_degrees().map(f64::from))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +488,125 @@ mod tests {
         // raw=10 → (10-66)/2 = -28; raw=20 → (20-66)/2 = -23
         assert!((dbzh.data[(0, 0)] - (-28.0)).abs() < 1e-6);
         assert!((dbzh.data[(0, 1)] - (-23.0)).abs() < 1e-6);
+    }
+
+    /// Build an `ElevationCut` with a given commanded angle. Other
+    /// fields are arbitrary defaults — none of them affect
+    /// [`fixed_angle_for`].
+    fn cut_with_angle(angle_deg: f64) -> ElevationCut {
+        use nexrad_model::data::{ChannelConfiguration, WaveformType};
+        ElevationCut::new(
+            angle_deg,
+            ChannelConfiguration::ConstantPhase,
+            WaveformType::CS,
+            18.0,
+            false,
+            false,
+            false,
+            false,
+            1,
+            17,
+            16.0,
+            -20.0,
+            12.0,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            0,
+            false,
+            0,
+            false,
+            false,
+        )
+    }
+
+    /// Build a single MSG_31 radial whose elevation field is `elev_deg`.
+    /// Differs from [`ref_only_radial`] only in the elevation value;
+    /// used to construct sweeps where the radials' median elevation is
+    /// distinguishable from the cut's commanded value.
+    fn radial_at(azimuth_deg: f32, elev_deg: f32) -> Radial {
+        use nexrad_model::data::{MomentData, RadialStatus};
+        let reflectivity = MomentData::from_fixed_point(1, 2_000, 250, 8, 2.0, 66.0, vec![10]);
+        Radial::new(
+            0,
+            0,
+            azimuth_deg,
+            0.5,
+            RadialStatus::ScanStart,
+            1,
+            elev_deg,
+            Some(reflectivity),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// HIGH-priority regression: pin "we use MSG_5 commanded, not
+    /// MSG_31 median." A future contributor swapping back to
+    /// `sweep.elevation_angle_degrees()` would break this test.
+    #[test]
+    fn fixed_angle_for_prefers_msg5_commanded_over_msg31_median() {
+        // Cut commands 0.5°. Three radials whose elevations average to
+        // 0.4395° — exactly the divergence the downstream parity bug
+        // surfaced (8 × MSG_5 LSB ≈ 0.044° below commanded).
+        let cut = cut_with_angle(0.5);
+        let sweep = Sweep::new(
+            1,
+            vec![
+                radial_at(0.0, 0.4395),
+                radial_at(120.0, 0.4395),
+                radial_at(240.0, 0.4395),
+            ],
+        );
+
+        let got = fixed_angle_for(Some(&cut), &sweep).expect("Some");
+        assert!((got - 0.5).abs() < 1e-6, "expected 0.5° (MSG_5), got {got}");
+    }
+
+    /// HIGH-priority fallback: when the cut is missing (truncated VCP,
+    /// malformed file), drop to the median-of-radials path. Pinned so a
+    /// regression that returns NaN here is caught.
+    #[test]
+    fn fixed_angle_for_falls_back_to_sweep_median_when_cut_is_none() {
+        let sweep = Sweep::new(
+            1,
+            vec![
+                radial_at(0.0, 1.5),
+                radial_at(120.0, 1.5),
+                radial_at(240.0, 1.5),
+            ],
+        );
+        let got = fixed_angle_for(None, &sweep).expect("Some");
+        assert!(
+            (got - 1.5).abs() < 1e-6,
+            "expected 1.5° (median), got {got}"
+        );
+    }
+
+    /// HIGH-priority: when both the cut and the sweep are unusable
+    /// (no radials, no cut), `fixed_angle_for` must return None so the
+    /// caller can route to its own fallback (NaN at volume scope,
+    /// `median_elevation(coordinates.elevation)` at sweep scope).
+    #[test]
+    fn fixed_angle_for_returns_none_for_empty_sweep_and_no_cut() {
+        assert!(fixed_angle_for(None, &empty_sweep(1)).is_none());
+    }
+
+    /// MEDIUM: the lossless `f64::from(f32)` path in the sweep-only
+    /// fallback must not introduce float drift. Sweep's getter returns
+    /// f32; cut returns f64. Without `f64::from`, an `as` cast would
+    /// pass clippy::cast_lossless but is less idiomatic.
+    #[test]
+    fn fixed_angle_for_promotes_f32_to_f64_losslessly() {
+        // 1.5_f32 is exactly representable; the f32 → f64 promotion
+        // must preserve the bits.
+        let sweep = Sweep::new(1, vec![radial_at(0.0, 1.5_f32)]);
+        let got = fixed_angle_for(None, &sweep).expect("Some");
+        assert_eq!(got, f64::from(1.5_f32));
     }
 }
