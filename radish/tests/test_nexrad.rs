@@ -30,6 +30,31 @@ fn read_volume_on_real_fixture() {
     );
     assert_eq!(m.sweep_group_names.len(), volume.num_sweeps());
     assert_eq!(m.sweep_fixed_angles.len(), volume.num_sweeps());
+    // Every sweep_fixed_angle should be a finite, plausible elevation
+    // (range covers WSR-88D's full 0..20° envelope plus headroom). A
+    // NaN here means the cut→median→NaN fallback chain in
+    // `fixed_angle_for` short-circuited; a value outside [-1, 25] means
+    // we read the wrong MSG_5 field. Both regression-prone after the
+    // commanded-vs-achieved fix.
+    for (i, &angle) in m.sweep_fixed_angles.iter().enumerate() {
+        assert!(angle.is_finite(), "sweep_fixed_angles[{i}] is NaN");
+        assert!(
+            (-1.0..=25.0).contains(&angle),
+            "sweep_fixed_angles[{i}] = {angle} out of plausible WSR-88D range"
+        );
+    }
+    // Volume-level sweep_fixed_angles must agree with the per-sweep
+    // SweepMetadata.fixed_angle. The two come from different code
+    // paths (build_volume_metadata vs convert_sweep) and a future
+    // refactor could let them drift; this catches it.
+    for (i, sweep) in volume.sweeps.iter().enumerate() {
+        let vol_angle = m.sweep_fixed_angles[i];
+        let sweep_angle = sweep.metadata.fixed_angle;
+        assert!(
+            (vol_angle - sweep_angle).abs() < 1e-6,
+            "sweep {i}: volume={vol_angle} but per-sweep={sweep_angle} — fixed_angle_for path drift"
+        );
+    }
     assert!((-90.0..=90.0).contains(&m.latitude), "latitude in range");
     assert!(
         (-180.0..=180.0).contains(&m.longitude),

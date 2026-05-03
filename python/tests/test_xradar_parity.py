@@ -109,9 +109,20 @@ def test_sweep_group_names_contiguous_from_zero(parity_pair):
     about it explicitly but every weather-radar tool in the wild
     expects the contiguous-from-zero pattern."""
     backend_id, rd, _xd = parity_pair
-    sweeps = sorted(k for k in rd.children if k.startswith("sweep_"))
-    expected = [f"sweep_{i}" for i in range(len(sweeps))]
-    assert sweeps == expected, f"{backend_id}: non-contiguous sweep names: {sweeps}"
+    # Compare as a *set* against the expected `sweep_<idx>` set —
+    # avoids the lex-vs-numeric sort pitfall (`sweep_10` < `sweep_2`
+    # lexicographically) that was breaking this test on volumes with
+    # ≥ 10 sweeps. The contract is "every index in 0..n is present
+    # exactly once," not "names sort lexicographically."
+    sweep_names = {k for k in rd.children if k.startswith("sweep_")}
+    n = len(sweep_names)
+    expected = {f"sweep_{i}" for i in range(n)}
+    missing = expected - sweep_names
+    extra = sweep_names - expected
+    assert not missing and not extra, (
+        f"{backend_id}: sweep names not contiguous-from-zero. "
+        f"missing={sorted(missing)} extra={sorted(extra)}"
+    )
 
 
 def test_canonical_coord_names_present_on_every_sweep(parity_pair):
@@ -261,3 +272,58 @@ def test_root_data_vars_match_xradar(parity_pair):
     only_xd = xd_vars - rd_vars
     assert not only_rd, f"{backend_id}: radish-only root data_vars: {sorted(only_rd)}"
     assert not only_xd, f"{backend_id}: xradar-only root data_vars: {sorted(only_xd)}"
+
+
+def test_sweep_fixed_angle_matches_xradar(parity_pair):
+    """Per-sweep `sweep_fixed_angle` must match xradar to within the
+    backend's natural quantization.
+
+    Backgrounds:
+
+    * **NEXRAD**: tightened to 1e-4° after the MSG_5 commanded-vs-
+      MSG_31-median fix (`radish/src/backends/nexrad/adapter.rs::fixed_angle_for`).
+      The previous divergence was ~0.044° — enough to break downstream
+      code comparing against the VCP elevation table (e.g. raw2zarr's
+      `check_dynamic_scan` with a 0.05° tolerance).
+
+    * **Sigmet**: tolerated to 0.01°. radish reads the per-sweep
+      `IngestDataHeader.fixed_angle` (BIN2-encoded, achieved beam
+      angle); xradar reads the operator-commanded angle from a mode-
+      dependent task block (`TASK_PPI_SCAN_INFO` for PPI,
+      `TASK_RHI_SCAN_INFO` for RHI) we don't fully wire through yet.
+      The diff is sub-milli-degree (~0.002°), well below any antenna's
+      pointing accuracy and any meaningful VCP step. Wiring the
+      mode-dependent commanded angle is a tracked follow-up.
+    """
+    import numpy as np
+
+    backend_id, rd, xd = parity_pair
+    rd_sweeps = sorted(k for k in rd.children if k.startswith("sweep_"))
+    xd_sweeps = sorted(k for k in xd.children if k.startswith("sweep_"))
+    common = [k for k in rd_sweeps if k in xd_sweeps]
+    if not common:
+        pytest.skip(f"{backend_id}: no overlapping sweeps")
+
+    # Per-backend tolerance: NEXRAD reads identical values from MSG_5;
+    # sigmet's BIN2 quantization noise is ~0.002°.
+    atol = {"nexrad": 1e-4, "sigmet": 1e-2}[backend_id]
+
+    mismatches = []
+    for skey in common:
+        if "sweep_fixed_angle" not in rd[skey].data_vars:
+            continue
+        if "sweep_fixed_angle" not in xd[skey].data_vars:
+            continue
+        rd_a = float(rd[skey]["sweep_fixed_angle"].values)
+        xd_a = float(xd[skey]["sweep_fixed_angle"].values)
+        if not np.isclose(rd_a, xd_a, atol=atol):
+            mismatches.append((skey, rd_a, xd_a))
+
+    assert not mismatches, (
+        f"{backend_id}: per-sweep `sweep_fixed_angle` differs from xradar "
+        f"by more than the backend's tolerance ({atol}°):\n  "
+        + "\n  ".join(
+            f"{s}: radish={r:.6f}  xradar={x:.6f}  diff={r - x:+.6f}"
+            for s, r, x in mismatches
+        )
+    )
