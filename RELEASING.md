@@ -29,21 +29,23 @@ stays unchanged regardless — that's a different namespace.
 ## Cutting a release
 
 ```bash
-# 1. Bump version in python/pyproject.toml + radish/Cargo.toml
-$EDITOR python/pyproject.toml radish/Cargo.toml
+# 1. Bump version in lockstep across Cargo.toml + python/pyproject.toml.
+#    The bump script validates semver, sed-replaces both files, and
+#    refreshes Cargo.lock so a single commit captures the change.
+./scripts/bump-version.sh 0.1.1
 
 # 2. Run the full test matrix locally
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release -p radish
-cd python && uv run --extra dev pytest tests/ && cd ..
+cd python && ../.venv/bin/python -m pytest tests/ && cd ..
 
-# 3. Commit + tag
-git add python/pyproject.toml radish/Cargo.toml
-git commit -m "release: v0.1.0"
-git tag v0.1.0
+# 3. Commit + tag (push the tag last — it's what fires the workflow)
+git add Cargo.toml Cargo.lock python/pyproject.toml
+git commit -m "release: v0.1.1"
+git tag v0.1.1
 git push origin main
-git push origin v0.1.0
+git push origin v0.1.1     # ← triggers PyPI publish
 ```
 
 The tag push triggers
