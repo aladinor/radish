@@ -165,32 +165,39 @@ fn convert_sweep(
     let nrays = rays.len();
     let max_gates = range_axis_m.len();
     let mut moments: HashMap<String, MomentData> = HashMap::with_capacity(active_ids.len());
-    // Track which ODIM names we've already emitted so 8-bit and 16-bit
-    // variants of the same moment (e.g. DB_DBZ + DB_DBZ2 → DBZH) don't
-    // both produce a DataArray. `&'static str` keys avoid the per-insert
-    // `String` allocation the previous `HashMap<String, ()>` paid.
+    // Track which output variable names we've already emitted so 8-bit
+    // and 16-bit variants of the same moment (e.g. DB_DBZ + DB_DBZ2 →
+    // DBZH) don't both produce a DataArray. `&'static str` keys avoid
+    // the per-insert `String` allocation the previous `HashMap<String,
+    // ()>` paid.
     let mut emitted: HashSet<&'static str> = HashSet::with_capacity(active_ids.len());
     for &data_type_id in active_ids {
         let m = match moment_for_id(data_type_id) {
             Some(m) => m,
             None => continue,
         };
-        if !emitted.insert(m.odim_name) {
+        if !emitted.insert(m.output_name) {
             continue;
         }
 
         let arr = build_moment_array(rays, &order, data_type_id, nrays, max_gates)?;
-        let meta = cf_metadata_for(m).ok_or_else(|| {
-            RadishError::Conversion(format!("no CF metadata for ODIM moment {:?}", m.odim_name))
-        })?;
 
-        let mut moment = MomentData::new(meta.odim_name.to_string(), meta.units.to_string(), arr);
-        moment.standard_name = Some(meta.standard_name.to_string());
-        moment.long_name = Some(meta.long_name.to_string());
+        // Two paths: ODIM-mapped types pull full CF metadata from
+        // `common::metadata::TABLE`; unmapped types (DB_HCLASS,
+        // DB_DBTE8, DB_DBZE8) emit minimal attrs (units only, from the
+        // table row) — same convention xradar uses for the same set.
+        let mut moment = if let Some(meta) = cf_metadata_for(m) {
+            let mut x = MomentData::new(meta.odim_name.to_string(), meta.units.to_string(), arr);
+            x.standard_name = Some(meta.standard_name.to_string());
+            x.long_name = Some(meta.long_name.to_string());
+            x
+        } else {
+            MomentData::new(m.output_name.to_string(), m.units.to_string(), arr)
+        };
         moment.fill_value = Some(f32::NAN);
         moment.scale_factor = Some(1.0);
         moment.add_offset = Some(0.0);
-        moments.insert(meta.odim_name.to_string(), moment);
+        moments.insert(m.output_name.to_string(), moment);
     }
 
     let mut meta = SweepMetadata::new(
