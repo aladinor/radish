@@ -1,16 +1,14 @@
 //! Format detection for NEXRAD Level 2 (Archive II / AR2V) files.
 //!
-//! NEXRAD files are commonly distributed with no extension at all
-//! (e.g. `KLOT20260310_231412_V06`), so this module provides three
-//! signals callers can OR together:
-//!
-//! 1. an extension match (`ar2`, `ar2v`),
-//! 2. a magic-byte check (`AR2V` at byte 0),
-//! 3. a filename pattern check (`AAAA########_######` with optional `_V##`).
+//! Three signals callers can OR together (extension, magic, canonical
+//! filename pattern) — same shape as every other backend, so the actual
+//! pipeline lives in `crate::backends::common::sniff`. This module just
+//! declares the NEXRAD-specific config and the strict ICAO extractor that
+//! `adapter.rs` reuses outside the sniff path.
 
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
+
+use crate::backends::common::{looks_like, looks_like_bytes, SniffConfig};
 
 /// Length of the canonical filename core: 4 ICAO + 8 date + `_` + 6 time.
 const NEXRAD_NAME_CORE_LEN: usize = 19;
@@ -29,29 +27,18 @@ pub(crate) const AR2V_MAGIC: &[u8; 4] = b"AR2V";
 /// the upstream `File::decompress()` transparently inflates gzip-wrapped data.
 pub(crate) const GZIP_MAGIC: &[u8; 2] = &[0x1f, 0x8b];
 
-/// Returns `true` if the first four bytes of the file are the NEXRAD volume
-/// header magic `AR2V`. Returns `false` on any I/O error.
-pub(crate) fn is_ar2v(path: &Path) -> bool {
-    let mut buf = [0u8; 4];
-    match File::open(path).and_then(|mut f| f.read_exact(&mut buf)) {
-        Ok(()) => &buf == AR2V_MAGIC,
-        Err(_) => false,
-    }
-}
-
-/// Returns `true` if `head` starts with the AR2V magic or the gzip-wrap magic
-/// (older `*.gz` archive volumes). Cheap byte-prefix check; safe on any
-/// length of buffer (returns `false` on `head.len() < 4` for AR2V and `< 2`
-/// for gzip).
-pub(crate) fn looks_like_ar2v_bytes(head: &[u8]) -> bool {
-    if head.len() >= 4 && &head[..4] == AR2V_MAGIC {
-        return true;
-    }
-    if head.len() >= 2 && &head[..2] == GZIP_MAGIC {
-        return true;
-    }
-    false
-}
+/// Centralised sniff config consumed by the common dispatcher. Adding a new
+/// signal (more extensions, a different magic) is a one-line edit here.
+///
+/// `const` rather than `static` because `SniffConfig` is `Copy` and the
+/// literal contains only `&'static` references plus a function pointer —
+/// the compile-time form makes it explicit that no addressable storage
+/// lives at runtime.
+pub(crate) const NEXRAD_SNIFF: SniffConfig = SniffConfig {
+    extensions: EXTENSIONS,
+    magic_prefixes: &[AR2V_MAGIC, GZIP_MAGIC],
+    filename_pattern: Some(matches_nexrad_filename),
+};
 
 /// Returns `true` if the path's file name matches the canonical NEXRAD naming
 /// convention (e.g. `KLOT20260310_231412_V06`).
@@ -94,14 +81,17 @@ fn nexrad_icao_from_name(path: &Path) -> Option<&str> {
     Some(&name[..4])
 }
 
-/// Combined check: extension OR magic OR filename pattern.
+/// Combined check: extension OR magic OR filename pattern. One-line delegate
+/// to the shared `common::sniff::looks_like` driver.
 pub(crate) fn looks_like_nexrad(path: &Path) -> bool {
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
-            return true;
-        }
-    }
-    matches_nexrad_filename(path) || is_ar2v(path)
+    looks_like(path, &NEXRAD_SNIFF)
+}
+
+/// In-memory magic-byte check (raw `AR2V` or gzip-wrapped). Delegates to the
+/// shared driver; kept as its own function so other modules in the NEXRAD
+/// backend can call it without going through `NEXRAD_SNIFF` indirection.
+pub(crate) fn looks_like_ar2v_bytes(head: &[u8]) -> bool {
+    looks_like_bytes(head, &NEXRAD_SNIFF)
 }
 
 #[cfg(test)]
@@ -150,8 +140,10 @@ mod tests {
     }
 
     #[test]
-    fn magic_check_returns_false_for_missing_file() {
-        assert!(!is_ar2v(&PathBuf::from("/no/such/file/here.ar2v")));
+    fn looks_like_returns_false_for_missing_unknown_file() {
+        // Path doesn't exist and has no NEXRAD-like name; the shared
+        // dispatcher's three signals all fall through cleanly.
+        assert!(!looks_like_nexrad(&PathBuf::from("/no/such/file/here.txt")));
     }
 
     #[test]

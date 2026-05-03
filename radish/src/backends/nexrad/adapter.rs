@@ -32,23 +32,16 @@ use radish_types::{PlatformType, SweepMode};
 use rayon::prelude::*;
 
 use crate::{
-    Coordinates, MomentData, RadishError, Result, SweepData, SweepMetadata, VolumeData,
-    VolumeMetadata,
+    MomentData, RadishError, Result, SweepData, SweepMetadata, VolumeData, VolumeMetadata,
 };
 
 use super::attrs::{sweep_attrs_from_cut, volume_attrs};
 use super::mapping::{moment_meta, SUPPORTED_PRODUCTS};
 use super::sniff;
-
-/// Geometry of one moment within a sweep, harvested from the first radial that
-/// carries it. Used to size buffers and to pick the canonical range axis.
-#[derive(Clone, Copy)]
-struct MomentGeometry {
-    product: Product,
-    first_gate_km: f64,
-    gate_interval_km: f64,
-    gate_count: usize,
-}
+use crate::backends::common::{
+    assemble_ppi_coordinates, build_range_axis, decode_into_array, sort_indices_by_key,
+    MomentGeometry,
+};
 
 /// Convert a fully-decoded NEXRAD `Scan` into a radish `VolumeData`.
 ///
@@ -157,13 +150,16 @@ pub(super) fn convert_sweep(
     // 1. Probe each supported product to see whether it appears in this sweep
     //    and capture its (first_gate, gate_interval, gate_count). Cheap: we
     //    only need to find the first radial with each product, no decoding.
-    let geometries: Vec<MomentGeometry> = SUPPORTED_PRODUCTS
+    //    `geometries` is a parallel `(Product, MomentGeometry)` Vec because
+    //    the shared `MomentGeometry` is intentionally backend-agnostic and
+    //    doesn't carry the upstream product enum.
+    let geometries: Vec<(Product, MomentGeometry)> = SUPPORTED_PRODUCTS
         .iter()
-        .filter_map(|&p| probe_geometry(radials, p))
+        .filter_map(|&p| probe_geometry(radials, p).map(|g| (p, g)))
         .collect();
-    let canonical = geometries
+    let (_, canonical) = geometries
         .iter()
-        .max_by_key(|g| g.gate_count)
+        .max_by_key(|(_, g)| g.gate_count)
         .ok_or_else(|| RadishError::MalformedRecord {
             offset: 0,
             msg: format!("sweep {sweep_idx} has no supported moments"),
@@ -171,38 +167,21 @@ pub(super) fn convert_sweep(
     let max_gates = canonical.gate_count;
 
     // 2. Sort radials by azimuth *once* and reuse for every axis + moment.
-    let mut order: Vec<usize> = (0..radials.len()).collect();
-    order.sort_by(|&a, &b| {
-        radials[a]
-            .azimuth_angle_degrees()
-            .partial_cmp(&radials[b].azimuth_angle_degrees())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let order = sort_indices_by_key(radials, |r| r.azimuth_angle_degrees());
 
     // 3. Build coordinates from the sorted permutation.
-    let first_gate_m = canonical.first_gate_km as f32 * 1000.0;
-    let step_m = canonical.gate_interval_km as f32 * 1000.0;
-    let range: Vec<f32> = (0..max_gates)
-        .map(|i| first_gate_m + (i as f32) * step_m)
-        .collect();
-    let azimuth: Vec<f32> = order
-        .iter()
-        .map(|&i| radials[i].azimuth_angle_degrees())
-        .collect();
-    let elevation: Vec<f32> = order
-        .iter()
-        .map(|&i| radials[i].elevation_angle_degrees())
-        .collect();
-    let time: Vec<f64> = order
-        .iter()
-        .map(|&i| {
-            radials[i]
-                .collection_time()
+    let coordinates = assemble_ppi_coordinates(
+        radials,
+        &order,
+        build_range_axis(canonical),
+        |r| r.azimuth_angle_degrees(),
+        |r| r.elevation_angle_degrees(),
+        |r| {
+            r.collection_time()
                 .map(|dt| dt.timestamp_micros() as f64 / 1.0e6)
                 .unwrap_or(f64::NAN)
-        })
-        .collect();
-    let coordinates = Coordinates::new(time, range, azimuth, elevation);
+        },
+    );
 
     let fixed_angle = sweep
         .elevation_angle_degrees()
@@ -220,9 +199,9 @@ pub(super) fn convert_sweep(
     //    no second sort.
     let nrays = radials.len();
     let mut moments: HashMap<String, MomentData> = HashMap::with_capacity(geometries.len());
-    for geometry in &geometries {
-        let arr = decode_product(radials, &order, geometry, nrays, max_gates)?;
-        let meta = moment_meta(geometry.product);
+    for (product, geometry) in &geometries {
+        let arr = decode_product(radials, &order, *product, geometry, nrays, max_gates)?;
+        let meta = moment_meta(*product);
         let mut moment = MomentData::new(meta.odim_name.to_string(), meta.units.to_string(), arr);
         moment.standard_name = Some(meta.standard_name.to_string());
         moment.long_name = Some(meta.long_name.to_string());
@@ -246,7 +225,6 @@ fn probe_geometry(radials: &[Radial], product: Product) -> Option<MomentGeometry
     radials.iter().find_map(|r| {
         if let Some(m) = product.moment_data(r) {
             return Some(MomentGeometry {
-                product,
                 first_gate_km: m.first_gate_range_km(),
                 gate_interval_km: m.gate_interval_km(),
                 gate_count: m.gate_count() as usize,
@@ -254,7 +232,6 @@ fn probe_geometry(radials: &[Radial], product: Product) -> Option<MomentGeometry
         }
         if let Some(c) = product.cfp_moment_data(r) {
             return Some(MomentGeometry {
-                product,
                 first_gate_km: c.first_gate_range_km(),
                 gate_interval_km: c.gate_interval_km(),
                 gate_count: c.gate_count() as usize,
@@ -284,12 +261,13 @@ fn probe_geometry(radials: &[Radial], product: Product) -> Option<MomentGeometry
 fn decode_product(
     radials: &[Radial],
     order: &[usize],
+    product: Product,
     geometry: &MomentGeometry,
     nrays: usize,
     max_gates: usize,
 ) -> Result<Array2<f32>> {
     let ngates = geometry.gate_count;
-    if geometry.product == Product::ClutterFilterPower {
+    if product == Product::ClutterFilterPower {
         decode_into_array(radials, order, nrays, ngates, max_gates, |r, dst| {
             if let Some(cfp) = r.clutter_filter_power() {
                 let n = dst.len();
@@ -301,7 +279,6 @@ fn decode_product(
             // dst) keep their pre-NaN value.
         })
     } else {
-        let product = geometry.product;
         decode_into_array(radials, order, nrays, ngates, max_gates, |r, dst| {
             if let Some(md) = product.moment_data(r) {
                 let n = dst.len();
@@ -311,35 +288,6 @@ fn decode_product(
             }
         })
     }
-}
-
-/// Shared buffer-management scaffold for both regular and CFP decode paths.
-///
-/// The buffer is pre-filled with NaN exactly once. The `fill_row` closure
-/// gets a `&mut [f32]` of length `ngates` per radial and is expected to
-/// overwrite cells where data is available. Cells the closure doesn't
-/// touch (because the radial lacks the product, or the moment yielded
-/// fewer items than `ngates`, or the row tail beyond `ngates` is padding)
-/// keep the NaN.
-fn decode_into_array<F>(
-    radials: &[Radial],
-    order: &[usize],
-    nrays: usize,
-    ngates: usize,
-    max_gates: usize,
-    fill_row: F,
-) -> Result<Array2<f32>>
-where
-    F: Fn(&Radial, &mut [f32]),
-{
-    let mut buf: Vec<f32> = vec![f32::NAN; nrays * max_gates];
-    for (row, &radial_idx) in order.iter().enumerate() {
-        let dst_off = row * max_gates;
-        let dst = &mut buf[dst_off..dst_off + ngates];
-        fill_row(&radials[radial_idx], dst);
-    }
-    Array2::from_shape_vec((nrays, max_gates), buf)
-        .map_err(|e| RadishError::Conversion(e.to_string()))
 }
 
 #[inline]
