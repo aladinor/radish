@@ -66,7 +66,7 @@ pub trait RadarBackend: Send + Sync {
 
     /// Decode a volume from a single in-memory byte buffer.
     ///
-    /// Default returns [`RadishError::Unsupported`] — only formats whose
+    /// Default returns [`crate::RadishError::Unsupported`] — only formats whose
     /// upstream parsers accept owned byte buffers (currently NEXRAD via
     /// `nexrad-data`) override this. CfRadial1 stays at the default because
     /// `libnetcdf` needs a filename and doesn't expose an in-memory open.
@@ -105,7 +105,7 @@ pub fn auto_backend(path: &Path) -> Result<Box<dyn RadarBackend>> {
 ///
 /// Iterates [`available_backends`] in declaration order and returns the first
 /// whose [`RadarBackend::can_read_bytes`] accepts the prefix. Fails with
-/// [`RadishError::InvalidFormat`] if no backend recognises the buffer.
+/// [`crate::RadishError::InvalidFormat`] if no backend recognises the buffer.
 ///
 /// Mirrors [`auto_backend`] for the file-path path. The two are kept in sync
 /// so the Python `_open.py` dispatch table can pick the right shape→reader
