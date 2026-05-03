@@ -6,10 +6,17 @@ This guide will help you get started with Radish, a high-performance weather rad
 
 ```
 radish/
-├── ARCHITECTURE.md           # Detailed architecture documentation with diagrams
 ├── README.md                 # Main project README
+├── CLAUDE.md                 # Repo-level instructions for Claude Code agents
 ├── Cargo.toml                # Rust workspace configuration
 ├── .gitignore                # Git ignore file
+│
+├── docs/                     # Long-form documentation
+│   ├── README.md             # Index of docs/ contents
+│   ├── ARCHITECTURE.md       # Detailed architecture documentation with diagrams
+│   ├── GETTING_STARTED.md    # This file
+│   ├── PROJECT_SUMMARY.md    # Phased roadmap and status
+│   └── CHANGELOG.md          # Version history (Keep a Changelog format)
 │
 ├── radish/                   # Core Rust library
 │   ├── Cargo.toml
@@ -239,7 +246,7 @@ plt.show()
 
 ### For Users
 
-1. **Read the Architecture Documentation**: See `ARCHITECTURE.md` for detailed design diagrams
+1. **Read the Architecture Documentation**: See `docs/ARCHITECTURE.md` for detailed design diagrams
 
 2. **Try the Examples**:
    - Rust: `examples/read_cfradial.rs`
@@ -292,7 +299,7 @@ pip install --upgrade numpy
 
 ## Resources
 
-- **Architecture**: See `ARCHITECTURE.md` for detailed design diagrams
+- **Architecture**: See `docs/ARCHITECTURE.md` for detailed design diagrams
 - **Rust API Docs**: Run `cargo doc --open`
 - **Python API Docs**: Coming soon
 - **Examples**: `examples/` and `python/examples/`
@@ -301,7 +308,7 @@ pip install --upgrade numpy
 ## License
 
 Licensed under either of:
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](../LICENSE-MIT))
 
 at your option.

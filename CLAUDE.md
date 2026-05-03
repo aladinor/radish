@@ -191,11 +191,12 @@ Always return `Result<T>` (which is aliased to `Result<T, RadishError>`).
 
 ## Further Documentation
 
-Longer-form docs in the repo root (read these when more context is needed than this file provides):
-- `ARCHITECTURE.md` — deeper dive on the data model, backend trait, and design rationale
-- `GETTING_STARTED.md` — end-to-end install + first-read walkthrough
-- `PROJECT_SUMMARY.md` — phased roadmap and status
-- `plans/0001-nexrad-level2-backend.md` — design and Phase 0/1/2 retro for the NEXRAD backend (achieved **16.96×** faster than xradar on a typical KLOT volume)
+Longer-form docs live in `docs/` (read these when more context is needed than this file provides):
+- `docs/ARCHITECTURE.md` — deeper dive on the data model, backend trait, and design rationale
+- `docs/GETTING_STARTED.md` — end-to-end install + first-read walkthrough
+- `docs/PROJECT_SUMMARY.md` — phased roadmap and status
+- `docs/CHANGELOG.md` — version history (Keep a Changelog format)
+- `docs/README.md` — index of the `docs/` folder
 
 ## Performance gotcha — `nexrad/parallel` feature
 

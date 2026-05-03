@@ -27,3 +27,8 @@ target
 .idea/
 .vscode/
 
+# Local-only working notes (Claude Code transcripts, scratch plans).
+# These are author-private and must not be tracked.
+.claude/
+plans/
+
