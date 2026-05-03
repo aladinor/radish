@@ -8,7 +8,7 @@
 
 use nexrad::decode::messages::rda_status_data::Message as RdaStatusMessage;
 use nexrad_model::data::{
-    ChannelConfiguration, ElevationCut, PulseWidth, VolumeCoveragePattern, WaveformType,
+    ChannelConfiguration, ElevationCut, PulseWidth, Sweep, VolumeCoveragePattern, WaveformType,
 };
 
 use crate::{NexradSweepAttrs, NexradVolumeAttrs};
@@ -166,9 +166,19 @@ fn decode_rda_scan_data_flags(raw: u16) -> (bool, bool) {
 /// for moments) plus the optional MSG_2. Missing MSG_2 yields zero/false
 /// values for the 5 RDA-status fields — xradar's
 /// `dict.get(name, default)` does the same.
+///
+/// `sweeps` provides the per-sweep data needed to populate
+/// [`NexradVolumeAttrs::sweep_attrs`] (one [`NexradSweepAttrs`] per sweep,
+/// from the corresponding `ElevationCut`) and
+/// [`NexradVolumeAttrs::sweep_time_ranges`] (each sweep's
+/// `(time_start, time_end)` from its first/last ray's
+/// `collection_time`). Both are populated whether the caller is doing a
+/// metadata-only `scan_file` or a full `read_volume` — neither needs
+/// per-ray moment decode.
 pub(super) fn volume_attrs(
     vcp: &VolumeCoveragePattern,
     msg2: Option<&RdaStatusMessage<'_>>,
+    sweeps: &[Sweep],
     actual_elevation_cuts: u32,
 ) -> NexradVolumeAttrs {
     let (avset_enabled, ebc_enabled, super_res_status, rda_build_number, operational_mode) =
@@ -186,6 +196,33 @@ pub(super) fn volume_attrs(
             None => (false, false, 0, 0, 0),
         };
 
+    // Per-sweep MSG_5 attrs. Index-aligned with the volume's sweep list:
+    // entry `i` corresponds to `sweeps[i]`. When the cut table is shorter
+    // than the sweep count (e.g. truncated VCP), pad with default
+    // `NexradSweepAttrs` so callers can still index by sweep number — see
+    // [`NexradVolumeAttrs::sweep_attrs`] for the consumer-side contract on
+    // distinguishing "default-padded" from "definitively false."
+    let cuts = vcp.elevation_cuts();
+    let sweep_attrs: Vec<NexradSweepAttrs> = (0..sweeps.len())
+        .map(|idx| cuts.get(idx).map(sweep_attrs_from_cut).unwrap_or_default())
+        .collect();
+
+    // Per-sweep `(time_start, time_end)` ranges as Unix seconds since
+    // 1970-01-01 UTC, matching the `Coordinates::time` axis convention.
+    // `Sweep::time_range()` is a min/max walk over already-decoded
+    // radials — sub-millisecond for a typical volume.
+    let sweep_time_ranges: Vec<Option<(f64, f64)>> = sweeps
+        .iter()
+        .map(|s| {
+            s.time_range().map(|(start, end)| {
+                (
+                    start.timestamp_micros() as f64 / 1.0e6,
+                    end.timestamp_micros() as f64 / 1.0e6,
+                )
+            })
+        })
+        .collect();
+
     NexradVolumeAttrs {
         dynamic_scan_type: dynamic_scan_type(vcp),
         mpda_vcp: vcp.mpda_enabled(),
@@ -202,6 +239,8 @@ pub(super) fn volume_attrs(
         rda_build_number,
         operational_mode,
         actual_elevation_cuts,
+        sweep_attrs,
+        sweep_time_ranges,
     }
 }
 
@@ -387,7 +426,7 @@ mod tests {
     #[test]
     fn volume_attrs_without_msg2_zeroes_rda_fields() {
         let vcp = sample_vcp(false, 0, false, 0, vec![sample_cut()]);
-        let attrs = volume_attrs(&vcp, None, 5);
+        let attrs = volume_attrs(&vcp, None, &[], 5);
         assert_eq!(attrs.dynamic_scan_type, "standard");
         assert!(!attrs.avset_enabled);
         assert!(!attrs.ebc_enabled);
@@ -396,6 +435,161 @@ mod tests {
         assert_eq!(attrs.operational_mode, 0);
         assert_eq!(attrs.actual_elevation_cuts, 5);
         assert_eq!(attrs.number_elevation_cuts, 1);
+        // Empty `sweeps` slice → empty per-sweep arrays even when the
+        // VCP carries cuts. Pins "we size by sweeps, not by cuts."
+        assert!(attrs.sweep_attrs.is_empty());
+        assert!(attrs.sweep_time_ranges.is_empty());
+    }
+
+    /// HIGH-priority: pin that `volume_attrs` populates one
+    /// `NexradSweepAttrs` per sweep, sourced from the corresponding
+    /// `ElevationCut`. A regression that drops the sweeps loop
+    /// (or sources from `sweeps[0]` for every entry) is caught here.
+    #[test]
+    fn volume_attrs_populates_one_sweep_attr_per_sweep_from_matching_cut() {
+        // Three cuts with distinct, observable signatures: vary the
+        // commanded angle and the SAILS bit so each cut is uniquely
+        // identifiable from the resulting `NexradSweepAttrs` (via
+        // `sails_cut`).
+        let cut_a = cut_with(0.5, false);
+        let cut_b = cut_with(0.9, true);
+        let cut_c = cut_with(1.5, false);
+        let vcp = sample_vcp(true, 1, false, 0, vec![cut_a, cut_b, cut_c]);
+        let sweeps = vec![empty_sweep(1), empty_sweep(2), empty_sweep(3)];
+
+        let attrs = volume_attrs(&vcp, None, &sweeps, 3);
+
+        assert_eq!(attrs.sweep_attrs.len(), 3, "one entry per sweep");
+        assert!(!attrs.sweep_attrs[0].sails_cut);
+        assert!(attrs.sweep_attrs[1].sails_cut, "cut_b has sails_cut=true");
+        assert!(!attrs.sweep_attrs[2].sails_cut);
+    }
+
+    /// HIGH-priority: pin the truncated-VCP padding contract. When
+    /// `cuts.len() < sweeps.len()`, trailing entries fall back to
+    /// `NexradSweepAttrs::default()` rather than panicking or
+    /// truncating the output.
+    #[test]
+    fn volume_attrs_pads_with_default_when_cuts_shorter_than_sweeps() {
+        // 1 cut, 4 sweeps. Entries 1..4 must be defaults.
+        let vcp = sample_vcp(false, 0, false, 0, vec![sample_cut()]);
+        let sweeps = vec![
+            empty_sweep(1),
+            empty_sweep(2),
+            empty_sweep(3),
+            empty_sweep(4),
+        ];
+
+        let attrs = volume_attrs(&vcp, None, &sweeps, 4);
+
+        assert_eq!(attrs.sweep_attrs.len(), 4);
+        // Entry 0 is sourced from the real cut (waveform_type non-empty).
+        assert_eq!(
+            attrs.sweep_attrs[0].waveform_type,
+            "contiguous_surveillance"
+        );
+        // Entries 1..4 are defaults — empty waveform_type is the
+        // sentinel that tells consumers "we don't know."
+        for sa in &attrs.sweep_attrs[1..] {
+            assert_eq!(sa, &NexradSweepAttrs::default());
+        }
+    }
+
+    /// HIGH-priority: pin both branches of `Sweep::time_range`.
+    /// `None` for empty sweeps (no radials), `Some((start, end))` with
+    /// `start <= end` for sweeps with timestamped radials. We use
+    /// `f64` Unix seconds to match the public axis convention.
+    #[test]
+    fn volume_attrs_sweep_time_ranges_some_and_none_branches() {
+        let vcp = sample_vcp(false, 0, false, 0, vec![sample_cut(), sample_cut()]);
+        let sweeps = vec![
+            empty_sweep(1), // → None
+            sweep_with_timestamps(
+                2,
+                &[
+                    1_700_000_000_000_i64, // 2023-11-14T22:13:20Z
+                    1_700_000_005_500_i64, // +5.5 s
+                    1_700_000_002_000_i64,
+                ],
+            ),
+        ];
+
+        let attrs = volume_attrs(&vcp, None, &sweeps, 2);
+
+        assert_eq!(attrs.sweep_time_ranges.len(), 2);
+        assert!(attrs.sweep_time_ranges[0].is_none(), "no radials → None");
+
+        let (start, end) = attrs.sweep_time_ranges[1].expect("Some");
+        // 1700000000.000 → 1700000005.500. Allow microsecond noise from
+        // the `timestamp_micros() / 1e6` round-trip.
+        assert!((start - 1_700_000_000.0).abs() < 1e-3, "start = {start}");
+        assert!((end - 1_700_000_005.5).abs() < 1e-3, "end = {end}");
+        assert!(start <= end, "time_range invariant: start <= end");
+    }
+
+    fn cut_with(angle_deg: f64, sails: bool) -> ElevationCut {
+        ElevationCut::new(
+            angle_deg,
+            ChannelConfiguration::ConstantPhase,
+            WaveformType::CS,
+            18.0,
+            true,
+            true,
+            false,
+            false,
+            1,
+            17,
+            16.0,
+            -20.0,
+            12.0,
+            0.0,
+            0.0,
+            0.0,
+            sails,
+            if sails { 1 } else { 0 },
+            false,
+            0,
+            false,
+            false,
+        )
+    }
+
+    fn empty_sweep(elevation_number: u8) -> Sweep {
+        Sweep::new(elevation_number, Vec::new())
+    }
+
+    /// Build a sweep whose radials carry the given collection
+    /// timestamps (milliseconds since Unix epoch, matching upstream
+    /// `Radial::collection_timestamp`). Other radial fields are
+    /// arbitrary defaults — only the timestamps drive
+    /// [`Sweep::time_range`].
+    fn sweep_with_timestamps(elevation_number: u8, timestamps_ms: &[i64]) -> Sweep {
+        use nexrad_model::data::{MomentData, Radial, RadialStatus};
+        let radials: Vec<Radial> = timestamps_ms
+            .iter()
+            .enumerate()
+            .map(|(i, ts)| {
+                let reflectivity =
+                    MomentData::from_fixed_point(1, 2_000, 250, 8, 2.0, 66.0, vec![10]);
+                Radial::new(
+                    *ts,
+                    i as u16,
+                    (i as f32) * 1.0,
+                    0.5,
+                    RadialStatus::ScanStart,
+                    elevation_number,
+                    0.5,
+                    Some(reflectivity),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        Sweep::new(elevation_number, radials)
     }
 
     fn sample_cut() -> ElevationCut {

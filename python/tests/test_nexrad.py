@@ -29,6 +29,59 @@ def test_scan_nexrad_returns_metadata(nexrad_fixture):
     assert md.num_sweeps >= 5
 
 
+def test_scan_nexrad_exposes_per_sweep_attrs_and_time_ranges(nexrad_fixture):
+    """`scan_nexrad` must surface the per-sweep MSG_5 cut attrs and the
+    `(start, end)` time ranges so downstream bulk-ingest callers can
+    classify SAILS / MRLE / MPDA slices and find sweep boundaries
+    without paying for a full per-ray decode.
+    """
+    md = radish.scan_nexrad(nexrad_fixture)
+    nx = md.nexrad_attrs
+
+    assert len(nx.sweep_attrs) == md.num_sweeps
+    assert len(nx.sweep_time_ranges) == md.num_sweeps
+
+    # Per-sweep classifier flags must be reachable from each entry.
+    # Spot-check one — the first sweep is always a real scan, never a
+    # `default()` pad — and verify the field types come through PyO3
+    # cleanly.
+    first = nx.sweep_attrs[0]
+    assert isinstance(first.sails_cut, bool)
+    assert isinstance(first.mrle_cut, bool)
+    assert isinstance(first.mpda_cut, bool)
+    assert isinstance(first.base_tilt_cut, bool)
+    assert isinstance(first.waveform_type, str)
+    assert isinstance(first.channel_config, str)
+
+    # `scan_nexrad` and `read_nexrad` must produce byte-identical
+    # per-sweep attrs — both route through the same `volume_attrs`
+    # builder. Pin it so a future refactor can't decouple them.
+    vol = radish.read_nexrad(nexrad_fixture)
+    for i in range(vol.num_sweeps):
+        sweep = vol.get_sweep(i)
+        scanned = nx.sweep_attrs[i]
+        loaded = sweep.nexrad_attrs
+        assert loaded is not None, f"sweep {i} missing nexrad_attrs after read"
+        assert scanned.sails_cut == loaded.sails_cut
+        assert scanned.mrle_cut == loaded.mrle_cut
+        assert scanned.mpda_cut == loaded.mpda_cut
+        assert scanned.waveform_type == loaded.waveform_type
+        assert scanned.channel_config == loaded.channel_config
+
+    # Time ranges are Unix seconds (float). Sweeps that decoded with
+    # timestamped radials produce `(start, end)` with `start <= end`.
+    seen_some = False
+    for tr in nx.sweep_time_ranges:
+        if tr is None:
+            continue
+        seen_some = True
+        start, end = tr
+        assert isinstance(start, float)
+        assert isinstance(end, float)
+        assert start <= end
+    assert seen_some, "fixture should have at least one timestamped sweep"
+
+
 def test_xarray_engine_radish_dispatches_to_nexrad(nexrad_fixture):
     xr = pytest.importorskip("xarray")
     dt = xr.open_datatree(nexrad_fixture, engine="radish")
