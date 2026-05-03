@@ -34,10 +34,15 @@ stays unchanged regardless — that's a different namespace.
 #    refreshes Cargo.lock so a single commit captures the change.
 ./scripts/bump-version.sh 0.1.1
 
-# 2. Run the full test matrix locally
+# 2. Run the full test matrix locally. Fixture-gated tests need
+#    RADISH_NEXRAD_FIXTURE_DIR (or the legacy single-file
+#    RADISH_NEXRAD_FIXTURE) set; see radish/tests/fixtures/CORPUS.md
+#    for the canonical layout and download instructions.
+export RADISH_NEXRAD_FIXTURE_DIR="$HOME/.cache/radish/fixtures/nexrad"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release -p radish
+cargo test --release -p radish -- --ignored   # parity tests vs danielway/nexrad
 cd python && ../.venv/bin/python -m pytest tests/ && cd ..
 
 # 3. Commit + tag (push the tag last — it's what fires the workflow)

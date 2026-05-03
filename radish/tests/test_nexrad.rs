@@ -1,13 +1,92 @@
 //! Integration test for the NEXRAD Level 2 backend on a real fixture.
 //!
-//! Skipped unless `RADISH_NEXRAD_FIXTURE` points at an Archive II file.
+//! Skipped unless either `RADISH_NEXRAD_FIXTURE` (single-file legacy
+//! convention) or `RADISH_NEXRAD_FIXTURE_DIR` (corpus directory; see
+//! `radish/tests/fixtures/CORPUS.md`) is set.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use radish::backends::{NexradBackend, RadarBackend};
 
-fn fixture() -> Option<std::path::PathBuf> {
-    std::env::var_os("RADISH_NEXRAD_FIXTURE").map(Into::into)
+/// Resolve the happy-path KLOT fixture. Prefers the legacy
+/// `RADISH_NEXRAD_FIXTURE` env var when set; falls back to
+/// `RADISH_NEXRAD_FIXTURE_DIR/KLOT20251210_102338_V06`.
+fn fixture() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("RADISH_NEXRAD_FIXTURE") {
+        return Some(PathBuf::from(p));
+    }
+    let dir = std::env::var_os("RADISH_NEXRAD_FIXTURE_DIR")?;
+    let candidate = PathBuf::from(dir).join("KLOT20251210_102338_V06");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Resolve the KILX phantom-radial divergence fixture. Always rooted
+/// at `RADISH_NEXRAD_FIXTURE_DIR` because the divergence test isn't
+/// meaningful on any other file.
+#[allow(dead_code)] // Will be consumed by phase 2's regression test.
+fn kilx_fixture() -> Option<PathBuf> {
+    let dir = std::env::var_os("RADISH_NEXRAD_FIXTURE_DIR")?;
+    let candidate = PathBuf::from(dir).join("KILX20230629_154426_V06");
+    candidate.is_file().then_some(candidate)
+}
+
+/// SHA-256 sums for every file in the documented corpus. Source of
+/// truth: `radish/tests/fixtures/CORPUS.md`. The values are mirrored
+/// here so the test fails loudly if a maintainer updates the docs but
+/// not the code (or vice versa).
+const CORPUS_SHA256: &[(&str, &str)] = &[
+    (
+        "KLOT20251210_102338_V06",
+        "a5ed05d7dceaaceeb5adfb08601f10276a77a161ffdae7f302c49626e16cca81",
+    ),
+    (
+        "KILX20230629_154426_V06",
+        "715c3c18691f6efe87a27127d631add8d90fd92c66a019a17965b624757180da",
+    ),
+];
+
+/// Hex-format a SHA-256 digest without pulling in the `hex` crate.
+fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}")).unwrap();
+    }
+    s
+}
+
+/// Pin the corpus's bytes against the SHA-256 sums published in
+/// `CORPUS.md`. Skips when `RADISH_NEXRAD_FIXTURE_DIR` is unset
+/// (matches the rest of this file). When the env var IS set but a
+/// file's contents drift from the documented sum, fail loudly so
+/// downstream parity tests don't run against unverified data.
+#[test]
+fn corpus_sha256s_match_documentation() {
+    use sha2::{Digest, Sha256};
+
+    let Some(dir) = std::env::var_os("RADISH_NEXRAD_FIXTURE_DIR") else {
+        eprintln!("skipping: RADISH_NEXRAD_FIXTURE_DIR not set");
+        return;
+    };
+    let dir = PathBuf::from(dir);
+
+    for (name, expected_hex) in CORPUS_SHA256 {
+        let path = dir.join(name);
+        if !path.is_file() {
+            eprintln!("skipping {name}: not present at {}", path.display());
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let actual_hex = hex32(&digest);
+        assert_eq!(
+            &actual_hex,
+            expected_hex,
+            "{name} sha256 mismatch — file at {} has been replaced or \
+             corrupted; re-acquire from the URL in CORPUS.md or update \
+             both the docs AND CORPUS_SHA256 if this is intentional",
+            path.display(),
+        );
+    }
 }
 
 #[test]
