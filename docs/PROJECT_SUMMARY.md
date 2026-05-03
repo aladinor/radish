@@ -89,13 +89,13 @@ This project combines the best aspects of:
   - Proper Python package structure
 
 #### 8. Documentation
-- **ARCHITECTURE.md**:
+- **docs/ARCHITECTURE.md**:
   - 6 Mermaid diagrams (architecture overview, data flow, component structure, module layout, data model hierarchy)
   - Detailed design decisions
   - Technology stack
   - Development roadmap
 
-- **GETTING_STARTED.md**:
+- **docs/GETTING_STARTED.md**:
   - Complete build instructions
   - Prerequisites and dependencies
   - Usage examples (Rust and Python)
@@ -228,8 +228,8 @@ python examples/read_cfradial.py
 ```
 
 ### Read Documentation
-- Architecture: `ARCHITECTURE.md`
-- Getting Started: `GETTING_STARTED.md`
+- Architecture: `docs/ARCHITECTURE.md`
+- Getting Started: `docs/GETTING_STARTED.md`
 - Examples: `examples/` and `python/examples/`
 
 ## Next Steps for Development
