@@ -57,10 +57,11 @@ The tag push triggers
 [`.github/workflows/release.yml`](../.github/workflows/release.yml), which:
 
 1. Creates a GitHub Release with auto-generated notes.
-2. Builds wheels for **3 targets × 4 Python versions = 12 wheels**:
+2. Builds wheels for **3 targets × 2 Python versions = 6 wheels**:
    - Linux x86_64 (manylinux_2_28)
    - macOS x86_64 + arm64
-   - Each on Python 3.9, 3.10, 3.11, 3.12
+   - Each on Python 3.12, 3.13 (3.9-3.11 dropped: 3.9 EOL Oct 2025;
+     internal NEXRAD decoder uses PEP 604 `Path | None` requiring 3.10+)
 
    Linux aarch64 and Windows are deferred (cross-compile linker
    can't find aarch64 libhdf5/libnetcdf, and `hdf5-metno-sys` chokes
@@ -68,7 +69,7 @@ The tag push triggers
 3. Builds the sdist as a fallback (`pip install` users without a
    matching wheel build from source — needs Rust + libnetcdf-dev +
    libhdf5-dev on their machine).
-4. Uploads all 13 artefacts to PyPI in one batch via the official
+4. Uploads all 7 artefacts to PyPI in one batch via the official
    `pypa/gh-action-pypi-publish` action with OIDC trusted publishing.
 
 End-to-end tag-to-PyPI takes ~15 minutes.
