@@ -1,0 +1,94 @@
+"""End-to-end tests for the Sigmet/IRIS RAW backend.
+
+Gated on `RADISH_SIGMET_FIXTURE`; see `conftest.py::sigmet_fixture`.
+"""
+
+import numpy as np
+import pytest
+
+import radish
+
+
+def test_read_sigmet_returns_volume(sigmet_fixture):
+    vol = radish.read_sigmet(sigmet_fixture)
+    assert vol.num_sweeps >= 1
+    md = vol.metadata
+    assert md.instrument_name  # non-empty
+    assert -90 <= md.latitude <= 90
+    assert -180 <= md.longitude <= 180
+    s0 = vol.get_sweep(0)
+    assert s0.num_rays > 0
+    assert s0.num_gates > 0
+    # Sigmet typically writes at least one of DBZH / DBTH.
+    moments = s0.moment_names()
+    assert any(m in moments for m in ("DBZH", "DBTH"))
+
+
+def test_scan_sigmet_returns_metadata(sigmet_fixture):
+    md = radish.scan_sigmet(sigmet_fixture)
+    assert md.instrument_name
+    assert md.num_sweeps >= 1
+
+
+def test_xarray_engine_radish_dispatches_to_sigmet(sigmet_fixture):
+    xr = pytest.importorskip("xarray")
+    dt = xr.open_datatree(sigmet_fixture, engine="radish")
+    sweep_keys = [k for k in dt.children if k.startswith("sweep_")]
+    assert len(sweep_keys) >= 1
+    s0 = dt[sweep_keys[0]]
+    assert "azimuth" in s0.coords
+    assert "elevation" in s0.coords
+    assert "range" in s0.coords
+    # IRIS-shaped root attrs (xradar's open_iris_datatree contract).
+    assert dt.attrs.get("Conventions") == "None"
+    assert "task_name" in dt.attrs
+    assert "iris_version" in dt.attrs
+    # Per-sweep sigmet attrs from SigmetSweepAttrs.
+    assert s0.attrs.get("sweep_mode") in ("azimuth_surveillance", "rhi")
+    assert isinstance(s0.attrs.get("fixed_angle_deg"), float)
+
+
+def test_radish_open_datatree_path(sigmet_fixture):
+    """`radish.open_datatree(path)` auto-detects sigmet."""
+    pytest.importorskip("xarray")
+    dt = radish.open_datatree(sigmet_fixture)
+    assert any(k.startswith("sweep_") for k in dt.children)
+    assert dt.attrs.get("scan_mode") in ("PPI", "RHI", "OTHER")
+
+
+def test_radish_open_datatree_bytes(sigmet_fixture):
+    """`radish.open_datatree(<bytes>)` auto-detects sigmet via magic bytes."""
+    pytest.importorskip("xarray")
+    with open(sigmet_fixture, "rb") as f:
+        buf = f.read()
+    dt = radish.open_datatree(buf)
+    assert any(k.startswith("sweep_") for k in dt.children)
+
+
+def test_detect_backend_sigmet(sigmet_fixture):
+    assert radish.detect_backend(sigmet_fixture) == "sigmet"
+
+
+def test_sigmet_volume_attrs_populated(sigmet_fixture):
+    """SigmetVolumeAttrs carries the IRIS metadata block."""
+    vol = radish.read_sigmet(sigmet_fixture)
+    sattrs = vol.metadata.sigmet_attrs
+    assert sattrs is not None
+    assert isinstance(sattrs.task_name, str)
+    assert sattrs.iris_version  # non-empty for valid IRIS files
+    assert sattrs.scan_mode in ("PPI", "RHI", "OTHER")
+    # PRF and unambiguous range are positive when wavelength was extracted;
+    # either way, they should be finite (no inf/nan from a parse error).
+    assert np.isfinite(sattrs.prf_hz)
+    assert np.isfinite(sattrs.unambiguous_range_m)
+
+
+def test_sigmet_sweep_attrs_populated(sigmet_fixture):
+    """SigmetSweepAttrs is filled in on every sweep."""
+    vol = radish.read_sigmet(sigmet_fixture)
+    s0 = vol.get_sweep(0)
+    sweep_attrs = s0.sigmet_attrs
+    assert sweep_attrs is not None
+    assert sweep_attrs.sweep_mode in ("azimuth_surveillance", "rhi")
+    # Fixed angles are degrees in [0, 360).
+    assert 0.0 <= sweep_attrs.fixed_angle_deg < 360.0

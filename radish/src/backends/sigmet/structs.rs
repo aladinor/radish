@@ -555,10 +555,12 @@ mod tests {
 
     #[test]
     fn bin4_to_degrees_pinned_values() {
-        // 0 → 0°; 2^30 → 45°; -2^30 → -45°
+        // BIN4 maps a signed i32 to degrees: full int32 range covers
+        // ±180°. So raw=2^30 → 90°, raw=2^29 → 45°.
         assert_eq!(bin4_to_degrees(0), 0.0);
-        assert!((bin4_to_degrees(1 << 30) - 45.0).abs() < 1e-9);
-        assert!((bin4_to_degrees(-(1 << 30)) - (-45.0)).abs() < 1e-9);
+        assert!((bin4_to_degrees(1 << 30) - 90.0).abs() < 1e-9);
+        assert!((bin4_to_degrees(1 << 29) - 45.0).abs() < 1e-9);
+        assert!((bin4_to_degrees(-(1 << 29)) - (-45.0)).abs() < 1e-9);
     }
 
     #[test]
