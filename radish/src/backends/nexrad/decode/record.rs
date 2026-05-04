@@ -1,6 +1,7 @@
-//! LDM (Local Data Manager) record splitting + bzip2 decompression.
+//! LDM (Local Data Manager) record splitting + bzip2 decompression,
+//! plus raw-CTM (pre-Build-12) 2432-byte frame walking.
 //!
-//! NEXRAD Level 2 Archive II files (modern, post-2016) are written as:
+//! Build-12+ files (March 2012 onward) are written as:
 //!
 //! ```text
 //! [optional 24-byte Volume Header]
@@ -8,13 +9,18 @@
 //! [LDM record N+1]: ...
 //! ```
 //!
-//! The `size_be` prefix is the compressed-payload length. A negative
-//! sign-bit signals a "control" record (per ICD §3.5) — we treat
-//! its absolute value as the size and decompress unconditionally;
-//! the decompressed payload is normal NEXRAD messages either way.
+//! Pre-Build-12 files (1991-March 2012) skip the LDM wrapper and
+//! store messages as raw 2432-byte CTM frames back-to-back after the
+//! 24-byte volume header. Detection: `u32_be(bytes[24..28]) == 0`
+//! → raw; non-zero → LDM size prefix. (Matches xradar's
+//! `nexrad_level2.py:309-319` and danielway/nexrad's
+//! `volume/record.rs:139-156`.)
 //!
-//! **Pre-2016 CTM (2432-byte fixed frames) is not supported** — see
-//! `NexradDecodeError::UnsupportedRecordFormat` and plan 0004.
+//! The LDM `size_be` prefix is the compressed-payload length. A
+//! negative sign-bit signals a "control" record (per ICD §3.5) —
+//! we treat its absolute value as the size and decompress
+//! unconditionally; the decompressed payload is normal NEXRAD
+//! messages either way.
 //!
 //! The decompression path is wired through rayon's `par_iter` so we
 //! preserve the ~6× speedup that `nexrad-data/parallel` provides
@@ -27,6 +33,9 @@ use bzip2::read::BzDecoder;
 use rayon::prelude::*;
 
 use super::error::{NexradDecodeError, Result};
+
+/// Width of the optional AR2V volume header (ICD §3.4.1).
+const VOLUME_HEADER_SIZE: usize = 24;
 
 /// One LDM record's compressed payload, as a borrowed slice into the
 /// caller's `&[u8]`. `offset` is the start of the size-prefix in the
@@ -107,6 +116,39 @@ pub(crate) fn decompress(record: &LdmRecord<'_>) -> Result<Vec<u8>> {
 /// to `records[i]`.
 pub(crate) fn decompress_all(records: &[LdmRecord<'_>]) -> Result<Vec<Vec<u8>>> {
     records.par_iter().map(decompress).collect()
+}
+
+/// True when `bytes` look like a pre-Build-12 raw Archive II file:
+/// AR2V volume header followed by zero `u32_be` at offset 24
+/// (i.e. **not** an LDM size prefix). Returns false for any input
+/// missing the AR2V magic — those are routed to LDM by default.
+pub(crate) fn is_raw_archive2(bytes: &[u8]) -> bool {
+    bytes.len() >= VOLUME_HEADER_SIZE + 4
+        && &bytes[..4] == b"AR2V"
+        && BigEndian::read_u32(&bytes[VOLUME_HEADER_SIZE..VOLUME_HEADER_SIZE + 4]) == 0
+}
+
+/// Return the message-stream body of a raw Archive II buffer (everything
+/// after the 24-byte volume header).
+///
+/// Pre-Build-12 files **don't** chunk their body into independent
+/// 2432-byte frames the way one might naively expect from the
+/// segment-frame size — `danielway/nexrad`'s `split_ctm_frames`
+/// (`volume/record.rs`) returns the entire body as one contiguous
+/// record, and the message-walking loop relies on each Table II
+/// header's declared size + framing flags to find the next message.
+/// Mirroring that behavior is the only way the pre-existing
+/// segmented + variable-length dispatch reaches the actual MSG_1
+/// radials, which often share frames or span them.
+pub(crate) fn raw_archive2_body(bytes: &[u8]) -> Result<&[u8]> {
+    if bytes.len() < VOLUME_HEADER_SIZE {
+        return Err(NexradDecodeError::UnexpectedEof {
+            offset: 0,
+            needed: VOLUME_HEADER_SIZE,
+            available: bytes.len(),
+        });
+    }
+    Ok(&bytes[VOLUME_HEADER_SIZE..])
 }
 
 #[cfg(test)]
@@ -216,6 +258,55 @@ mod tests {
         for (i, want) in payloads.iter().enumerate() {
             assert_eq!(&outs[i][..], *want, "record {i} order");
         }
+    }
+
+    #[test]
+    fn is_raw_archive2_detects_zero_size_prefix() {
+        // 24-byte AR2V header + 4 zero bytes → raw CTM signal.
+        let mut bytes = b"AR2V0006.001-XYZWXYZWXYZW".to_vec();
+        bytes.truncate(24);
+        bytes.extend_from_slice(&[0u8; 4]);
+        assert!(is_raw_archive2(&bytes));
+    }
+
+    #[test]
+    fn is_raw_archive2_rejects_ldm_size_prefix() {
+        // 24-byte AR2V header + non-zero size → LDM-wrapped.
+        let mut bytes = b"AR2V0006.001-XYZWXYZWXYZW".to_vec();
+        bytes.truncate(24);
+        bytes.extend_from_slice(&123_456_i32.to_be_bytes());
+        assert!(!is_raw_archive2(&bytes));
+    }
+
+    #[test]
+    fn is_raw_archive2_rejects_inputs_without_ar2v_magic() {
+        let bytes = vec![0u8; 64];
+        assert!(!is_raw_archive2(&bytes));
+    }
+
+    #[test]
+    fn is_raw_archive2_rejects_short_inputs() {
+        let bytes = b"AR2V0006".to_vec(); // 8 bytes, no room for the size field
+        assert!(!is_raw_archive2(&bytes));
+    }
+
+    #[test]
+    fn raw_archive2_body_skips_volume_header() {
+        let mut bytes = b"AR2V0006.001-XYZWXYZWXYZW".to_vec();
+        bytes.truncate(24);
+        bytes.extend(vec![0xAAu8; 100]);
+        let body = raw_archive2_body(&bytes).unwrap();
+        assert_eq!(body.len(), 100);
+        assert!(body.iter().all(|&b| b == 0xAA));
+    }
+
+    #[test]
+    fn raw_archive2_body_errors_when_volume_header_missing() {
+        let bytes = vec![0u8; 8];
+        assert!(matches!(
+            raw_archive2_body(&bytes).unwrap_err(),
+            NexradDecodeError::UnexpectedEof { .. }
+        ));
     }
 
     #[test]

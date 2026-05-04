@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **NEXRAD: pre-Build-12 raw Archive II support (no LDM/bzip2
+  wrapping).** Before this change, files predating Build 12 (March
+  2012) — e.g. `s3://unidata-nexrad-level2/2011/05/20/KVNX/...` —
+  raised `unexpected EOF at offset 36` because the decoder assumed
+  every file was wrapped in LDM-bzip2 records. radish now detects
+  raw files via the zero-valued `u32_be` at byte offset 24
+  (matches xradar's `nexrad_level2.py:309-319` and
+  `danielway/nexrad`'s `volume/record.rs:139-156`) and walks the
+  message stream directly. Includes a new `messages::msg1` parser
+  for the legacy MSG_1 (Digital Radar Data, ICD §3.2.4.2 Table III)
+  format used by 1991-2008 files, plus a synthetic `Msg5` fallback
+  when the source file lacks a Volume Coverage Pattern record.
+  `radish.scan(blob)` and `radish.open_datatree(blob)` now succeed
+  on the previously-failing 2011 KVNX fixture.
+
+  **Known gap:** Build-11.x files (2008-2012, post-MSG_31 but
+  pre-LDM) decode to 17 sweeps × 8000+ radials but moment data
+  (REF/VEL/ZDR/PHI/RHO) is not yet extracted because Build-11 MSG_31
+  uses a different data-header / block-pointer layout than the
+  Build-12+ format radish was originally written against. Tracked
+  for follow-up; the metadata-fast-path through `radish.scan` works
+  on these files today.
+
 ## [0.2.2] - 2026-05-04
 
 The "internal NEXRAD decoder" release. radish now ships a from-scratch ICD-2620002AA-compliant Level 2 / Archive II decoder at `radish::backends::nexrad::decode`, replacing the runtime dependency on `danielway/nexrad`. The public Python and Rust surfaces are unchanged; output values are byte-identical to 0.2.0 except where 0.2.0 had bugs (KLOT VCP-32 surveillance sweeps now omit spurious `VRADH`/`WRADH` moments). Decode performance matches `danielway/nexrad` (1.01× ratio on KLOT and KILX) and is **7.78× faster than xradar** end-to-end through the xarray engine.

@@ -16,6 +16,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 
+use super::messages::msg1::Msg1;
 use super::messages::msg2::Msg2;
 use super::messages::msg31::cfp::CfpBlock;
 use super::messages::msg31::header::DataHeader;
@@ -197,6 +198,73 @@ impl OwnedCfp {
 }
 
 impl Radial {
+    /// Convert a parsed `Msg1` (legacy pre-Build-12 radial) into an
+    /// owned `Radial`. Dual-pol moments stay `None` — MSG_1 predates
+    /// the Build-12 dual-polarization upgrade. Gate scaling per
+    /// ICD §3.2.4.5 Table III-E:
+    /// `dBZ = (raw - 66)/2`, velocity offset 129.0 with scale 2.0
+    /// (0.5 m/s LSB) or 1.0 (1.0 m/s LSB), spectrum width same as
+    /// 0.5-m/s velocity.
+    pub(crate) fn from_msg1(m: Msg1) -> Self {
+        let collection_time = m.collection_time();
+        let surv_range_km = f32::from(m.surveillance_first_gate_range_m.unsigned_abs()) / 1000.0;
+        let surv_interval_km = f32::from(m.surveillance_gate_interval_m.max(0)) / 1000.0;
+        let dopp_range_km = f32::from(m.doppler_first_gate_range_m.unsigned_abs()) / 1000.0;
+        let dopp_interval_km = f32::from(m.doppler_gate_interval_m.max(0)) / 1000.0;
+        let vel_scale = if m.doppler_velocity_resolution == 4 {
+            1.0
+        } else {
+            2.0
+        };
+        let azimuth_angle_degrees = m.azimuth_angle_degrees();
+        let elevation_angle_degrees = m.elevation_angle_degrees();
+        // ICD-defined ranges: radial_status 0..=5 (Table III-C),
+        // elevation_number 1..=N (N <= ~25), azimuth_number 1..=720.
+        // Fall back to 0 on out-of-range — the lenient
+        // `parse_fixed_frame_payload` already routed garbage frames
+        // to Raw, so anything reaching here is plausible-enough.
+        let radial_status = u8::try_from(m.radial_status).unwrap_or(0);
+        let elevation_number = u8::try_from(m.elevation_number).unwrap_or(0);
+        let azimuth_number = u16::try_from(m.azimuth_number).unwrap_or(0);
+        let num_surv = u16::try_from(m.num_surveillance_gates.max(0)).unwrap_or(0);
+        let num_dopp = u16::try_from(m.num_doppler_gates.max(0)).unwrap_or(0);
+
+        let reflectivity = m.reflectivity_gates.map(|gates| OwnedMoment {
+            descriptor: legacy_descriptor(num_surv, surv_range_km, surv_interval_km, 2.0, 66.0),
+            gate_bytes: gates,
+        });
+        let velocity = m.velocity_gates.map(|gates| OwnedMoment {
+            descriptor: legacy_descriptor(
+                num_dopp,
+                dopp_range_km,
+                dopp_interval_km,
+                vel_scale,
+                129.0,
+            ),
+            gate_bytes: gates,
+        });
+        let spectrum_width = m.spectrum_width_gates.map(|gates| OwnedMoment {
+            descriptor: legacy_descriptor(num_dopp, dopp_range_km, dopp_interval_km, 2.0, 129.0),
+            gate_bytes: gates,
+        });
+
+        Self {
+            azimuth_number,
+            azimuth_angle_degrees,
+            elevation_number,
+            elevation_angle_degrees,
+            radial_status,
+            collection_time,
+            reflectivity,
+            velocity,
+            spectrum_width,
+            differential_reflectivity: None,
+            differential_phase: None,
+            correlation_coefficient: None,
+            clutter_filter_power: None,
+        }
+    }
+
     /// Convert a parsed `Msg31` into an owned `Radial` by copying
     /// the per-product gate-byte slices into owned `Vec<u8>`s.
     pub(crate) fn from_msg31(m: Msg31<'_>) -> Self {
@@ -229,6 +297,39 @@ impl Radial {
             correlation_coefficient: rho.map(OwnedMoment::from_borrowed),
             clutter_filter_power: cfp.map(OwnedCfp::from_borrowed),
         }
+    }
+}
+
+/// Build a synthetic `MomentDescriptor` for MSG_1 gate arrays. MSG_1
+/// has no on-wire descriptor block — fields like `tover_db` and
+/// `snr_threshold_db` weren't part of the legacy format, so we
+/// fill them with zeros. The downstream `MomentValue::iter` only
+/// reads `gate_count`, `data_word_size_bits`, `scale`, and `offset`.
+///
+/// Scale/offset convention reminder: `MomentValue::iter` decodes via
+/// `value = (raw - offset) / scale` (msg31/moment.rs:167). The ICD
+/// Table III-E reflectivity formula is `dBZ = (raw - 2)/2 - 32`,
+/// which rearranges to `(raw - 66)/2` — hence `offset=66.0,
+/// scale=2.0`. Velocity at 0.5 m/s LSB: `m/s = (raw - 2)*0.5 - 63.5`
+/// → `(raw - 129)/2` → `offset=129.0, scale=2.0`. Velocity at 1.0
+/// m/s LSB: `(raw - 129)/1` → `offset=129.0, scale=1.0`.
+fn legacy_descriptor(
+    gate_count: u16,
+    range_to_first_gate_km: f32,
+    gate_interval_km: f32,
+    scale: f32,
+    offset: f32,
+) -> MomentDescriptor {
+    MomentDescriptor {
+        gate_count,
+        range_to_first_gate_km,
+        gate_interval_km,
+        tover_db: 0.0,
+        snr_threshold_db: 0.0,
+        control_flags: 0,
+        data_word_size_bits: 8,
+        scale,
+        offset,
     }
 }
 

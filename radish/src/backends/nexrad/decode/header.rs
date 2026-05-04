@@ -145,8 +145,8 @@ impl MessageHeader {
 /// pretending we understand them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MessageType {
-    /// Type 1 — legacy radial data (pre-2008). Decoder support is
-    /// deferred to plan 0004; the loop walks the bytes.
+    /// Type 1 — legacy radial data (pre-Build-12, March 2012).
+    /// Parsed by `messages::msg1::Msg1` (plan 0006).
     DigitalRadarDataLegacy,
     /// Type 2 — RDA Status data.
     RdaStatusData,

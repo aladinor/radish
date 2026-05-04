@@ -31,7 +31,7 @@ use messages::msg5::Msg5;
 use messages::{decode_messages, MessagePayload};
 use model::{group_radials_into_sweeps, Radial, Scan, Site};
 use rayon::prelude::*;
-use record::{decompress, split_ldm_records};
+use record::{decompress, is_raw_archive2, raw_archive2_body, split_ldm_records};
 use volume::parse as parse_volume_header;
 
 /// End-to-end decode of an in-memory NEXRAD Level 2 buffer:
@@ -53,13 +53,17 @@ pub(crate) fn decode_volume_with_phase_timing(bytes: &[u8]) -> Result<Scan> {
     use std::time::Instant;
     let t0 = Instant::now();
     let _ = parse_volume_header(bytes);
-    let records = split_ldm_records(bytes)?;
+    let per_record: Vec<PerRecordDecode> = if is_raw_archive2(bytes) {
+        let body = raw_archive2_body(bytes)?;
+        vec![decode_one_message_stream(body)?]
+    } else {
+        let records = split_ldm_records(bytes)?;
+        records
+            .par_iter()
+            .map(decode_one_record)
+            .collect::<Result<Vec<_>>>()?
+    };
     let t1 = Instant::now();
-
-    let per_record: Vec<PerRecordDecode> = records
-        .par_iter()
-        .map(decode_one_record)
-        .collect::<Result<Vec<_>>>()?;
     let t2 = Instant::now();
 
     let total_radials: usize = per_record.iter().map(|r| r.radials.len()).sum();
@@ -81,8 +85,11 @@ pub(crate) fn decode_volume_with_phase_timing(bytes: &[u8]) -> Result<Scan> {
     }
     let t3 = Instant::now();
 
-    let coverage_pattern =
-        coverage_pattern.ok_or(error::NexradDecodeError::MissingCoveragePattern)?;
+    let coverage_pattern = match coverage_pattern {
+        Some(m) => m,
+        None if !radials.is_empty() => Msg5::synthetic_from_radials(&radials),
+        None => return Err(error::NexradDecodeError::MissingCoveragePattern),
+    };
     let sweeps = group_radials_into_sweeps(radials);
     let t4 = Instant::now();
 
@@ -135,7 +142,16 @@ struct PerRecordDecode {
 /// back together preserving record order.
 fn decode_one_record(record: &record::LdmRecord<'_>) -> Result<PerRecordDecode> {
     let payload = decompress(record)?;
-    let messages = decode_messages(&payload)?;
+    decode_one_message_stream(&payload)
+}
+
+/// Walk one already-decompressed message stream, extracting per-frame
+/// radials + the first MSG_1 / MSG_2 / MSG_5 / MSG_31-derived Site
+/// seen inside this stream. Shared between the LDM path (one stream
+/// per LDM record after bzip2) and the raw-CTM path (one stream per
+/// 2432-byte frame, no decompression).
+fn decode_one_message_stream(payload: &[u8]) -> Result<PerRecordDecode> {
+    let messages = decode_messages(payload)?;
     let mut out = PerRecordDecode::default();
     for msg in messages {
         match msg.payload {
@@ -147,6 +163,9 @@ fn decode_one_record(record: &record::LdmRecord<'_>) -> Result<PerRecordDecode> 
                     }
                 }
                 out.radials.push(Radial::from_msg31(m));
+            }
+            MessagePayload::Msg1(boxed) => {
+                out.radials.push(Radial::from_msg1(*boxed));
             }
             MessagePayload::Msg2(boxed) if out.msg2.is_none() => {
                 out.msg2 = Some(*boxed);
@@ -166,25 +185,37 @@ pub(crate) fn decode_volume(bytes: &[u8]) -> Result<Scan> {
     // the per-radial DataHeader carries the same identifier.
     let _ = parse_volume_header(bytes);
 
-    let records = split_ldm_records(bytes)?;
-
-    // Fused per-record pipeline: each rayon worker decompresses
-    // one LDM record AND walks its typed messages in the same
-    // task, so the typed-parse + Radial::from_msg31 gate copies
-    // run in parallel with bzip2 decompression instead of
-    // sequentially after `decompress_all` finishes. Mirrors
-    // `nexrad-data 1.0.0-rc.7`'s `File::scan` shape
-    // (`src/volume/file.rs:143-157`); on this machine takes ~17 ms
-    // of sequential post-decompress work to ~3 ms parallelised.
-    //
-    // `par_iter().collect::<Result<Vec<_>>>()` short-circuits on
-    // first error and preserves record order in the output Vec —
-    // important because radial order within a sweep matters for
-    // the ICD radial_status grouping pass below.
-    let per_record: Vec<PerRecordDecode> = records
-        .par_iter()
-        .map(decode_one_record)
-        .collect::<Result<Vec<_>>>()?;
+    // Pre-Build-12 (March 2012) raw Archive II files have no LDM
+    // wrapper — the entire body after the 24-byte volume header is
+    // one continuous variable-length / fixed-segment message
+    // stream (mirroring `danielway/nexrad`'s `split_ctm_frames`,
+    // which returns one record for the whole body). Detection is
+    // by zero-valued u32_be at offset 24 (where an LDM size prefix
+    // would otherwise live). No per-record parallelism — there's
+    // only one record by construction.
+    let per_record: Vec<PerRecordDecode> = if is_raw_archive2(bytes) {
+        let body = raw_archive2_body(bytes)?;
+        vec![decode_one_message_stream(body)?]
+    } else {
+        let records = split_ldm_records(bytes)?;
+        // Fused per-record pipeline: each rayon worker decompresses
+        // one LDM record AND walks its typed messages in the same
+        // task, so the typed-parse + Radial::from_msg31 gate copies
+        // run in parallel with bzip2 decompression instead of
+        // sequentially after `decompress_all` finishes. Mirrors
+        // `nexrad-data 1.0.0-rc.7`'s `File::scan` shape
+        // (`src/volume/file.rs:143-157`); on this machine takes ~17 ms
+        // of sequential post-decompress work to ~3 ms parallelised.
+        //
+        // `par_iter().collect::<Result<Vec<_>>>()` short-circuits on
+        // first error and preserves record order in the output Vec —
+        // important because radial order within a sweep matters for
+        // the ICD radial_status grouping pass below.
+        records
+            .par_iter()
+            .map(decode_one_record)
+            .collect::<Result<Vec<_>>>()?
+    };
 
     // Stitch: walk per-record results in arrival order, taking
     // the first non-None for site/msg2/msg5 and concatenating
@@ -209,8 +240,14 @@ pub(crate) fn decode_volume(bytes: &[u8]) -> Result<Scan> {
         radials.append(&mut chunk.radials);
     }
 
-    let coverage_pattern =
-        coverage_pattern.ok_or(error::NexradDecodeError::MissingCoveragePattern)?;
+    // Pre-Build-12 raw files don't always carry an MSG_5. Synthesize
+    // a minimal placeholder VCP from the radials' own elevation list
+    // so the rest of the pipeline can keep its hard MSG_5 dependency.
+    let coverage_pattern = match coverage_pattern {
+        Some(m) => m,
+        None if !radials.is_empty() => Msg5::synthetic_from_radials(&radials),
+        None => return Err(error::NexradDecodeError::MissingCoveragePattern),
+    };
     let sweeps = group_radials_into_sweeps(radials);
 
     Ok(Scan {
