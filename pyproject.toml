@@ -22,7 +22,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT OR Apache-2.0" }
 dependencies = [
-    "radish",
+    "radish-rs",
 ]
 
 [dependency-groups]
@@ -50,12 +50,15 @@ dev = [
 [tool.uv.workspace]
 members = ["python"]
 
-# Bind the `radish` dependency above to the local workspace member rather
-# than the (unrelated) selenium-test-framework package on PyPI that outranks
-# our 0.1.0 by version. Same pattern we use in CI's `pip install
-# target/wheels/*.whl` rather than `pip install --find-links radish`.
+# Bind the `radish-rs` dependency above to the local workspace member
+# (`python/`, whose `pyproject.toml` declares `name = "radish-rs"`) rather
+# than the published wheel on PyPI. uv requires the source key here to
+# match the dependency name *and* the workspace member's `name` exactly —
+# referring to it as `radish` (legacy from when the package was named
+# `radish` before the 0.1.0 PyPI rename) breaks `uv run` with
+# "references a workspace ... but is not a workspace member".
 [tool.uv.sources]
-radish = { workspace = true }
+radish-rs = { workspace = true }
 
 # This pyproject doesn't ship a package itself — it's only a workspace anchor.
 [tool.uv]
