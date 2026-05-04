@@ -82,6 +82,88 @@ fn walks_klot_fixture_and_finds_msg31_records() {
     );
 }
 
+/// Phase 4: confirm typed MSG_2 + MSG_5 parsers fire on the KLOT
+/// fixture and produce plausible values. Each volume has exactly
+/// one MSG_2 and one MSG_5; we extract both and pin a few fields.
+#[test]
+#[ignore = "needs RADISH_NEXRAD_FIXTURE_DIR"]
+fn typed_msg2_and_msg5_parsers_on_klot_fixture_yield_plausible_values() {
+    use super::messages::MessagePayload;
+
+    let Some(path) = klot_fixture() else {
+        eprintln!("skipping: RADISH_NEXRAD_FIXTURE_DIR not set");
+        return;
+    };
+    let bytes = std::fs::read(&path).expect("read fixture");
+    let records = split_ldm_records(&bytes).expect("split");
+    let payloads = decompress_all(&records).expect("decompress");
+
+    let mut msg2 = None;
+    let mut msg5 = None;
+    for payload in &payloads {
+        let messages = decode_messages(payload).expect("decode");
+        for msg in messages {
+            match msg.payload {
+                MessagePayload::Msg2(boxed) if msg2.is_none() => msg2 = Some(*boxed),
+                MessagePayload::Msg5(boxed) if msg5.is_none() => msg5 = Some(*boxed),
+                _ => {}
+            }
+        }
+    }
+
+    let m2 = msg2.expect("KLOT volume must carry MSG_2");
+    let m5 = msg5.expect("KLOT volume must carry MSG_5");
+
+    // MSG_2: KLOT VCP-212 fixture, build 19+ era. Plausible bounds.
+    assert!(
+        m2.rda_build_number >= 1900 && m2.rda_build_number <= 2400,
+        "rda_build_number out of range: {}",
+        m2.rda_build_number
+    );
+    assert!(
+        m2.average_transmitter_power_w < 2_000,
+        "tx power suspiciously high: {}",
+        m2.average_transmitter_power_w
+    );
+    // ICD HW 8 / Appendix C: VCP magnitudes 1..767. ICD HW 8 sign
+    // convention encodes local vs remote pattern selection — we
+    // don't care which here, just that the magnitude is in range.
+    let vcp_mag = m2.volume_coverage_pattern_number.unsigned_abs();
+    assert!(
+        (1..=767).contains(&vcp_mag),
+        "VCP magnitude out of ICD range 1..767: {vcp_mag}"
+    );
+    // status_version is bumped per ICD revision; non-zero in modern files.
+    assert!(
+        m2.status_version >= 1,
+        "status_version: {}",
+        m2.status_version
+    );
+
+    // MSG_5 should advertise the same VCP as MSG_2's selected pattern.
+    assert_eq!(
+        m5.pattern_number, vcp_mag,
+        "MSG_5 pattern_number ({}) should match MSG_2 VCP magnitude ({})",
+        m5.pattern_number, vcp_mag
+    );
+    assert!(
+        (1..=32).contains(&m5.number_of_elevation_cuts),
+        "elevation count out of range: {}",
+        m5.number_of_elevation_cuts
+    );
+    assert_eq!(
+        m5.elevation_cuts.len(),
+        m5.number_of_elevation_cuts as usize,
+        "elevation_cuts vec length must match header count"
+    );
+    // First cut elevation should be ≈ 0.5° (KLOT VCP-212 lowest tilt).
+    let first_cut_deg = m5.elevation_cuts[0].elevation_angle_degrees();
+    assert!(
+        (0.4..=1.0).contains(&first_cut_deg),
+        "first cut elevation_angle_degrees out of range: {first_cut_deg}"
+    );
+}
+
 /// Phase 3: confirm we don't just *count* MSG_31s but actually
 /// parse them through `msg31::parse`. Sample the first MSG_31 in
 /// the file and verify its header fields decode to plausible

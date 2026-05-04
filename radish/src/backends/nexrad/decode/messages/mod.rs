@@ -15,7 +15,9 @@
 //! particular parser, and we want the loop tested in isolation
 //! before parser bugs can confound the picture.
 
+pub(crate) mod msg2;
 pub(crate) mod msg31;
+pub(crate) mod msg5;
 
 use super::error::{NexradDecodeError, Result};
 use super::header::{
@@ -44,9 +46,10 @@ pub(crate) struct Message<'a> {
 
 /// Payload variants carried alongside the header.
 ///
-/// Phase 3 introduces the typed `Msg31` variant; Phase 4 will add
-/// typed `Msg2` and `Msg5` variants. `Raw` remains for messages we
-/// don't decode (Skip / fixed-frame types we don't consume).
+/// Typed variants land per-phase: `Msg31` in Phase 3, `Msg2` and
+/// `Msg5` in Phase 4. `Raw` / `Reassembled` remain for messages we
+/// don't decode (MSG_15 clutter filter map, MSG_18 adaptation data,
+/// `Skip(_)` types).
 #[derive(Debug)]
 #[allow(dead_code)] // SegmentedFragment / Reassembled used by tests + later phases.
 pub(crate) enum MessagePayload<'a> {
@@ -54,6 +57,10 @@ pub(crate) enum MessagePayload<'a> {
     Raw(&'a [u8]),
     /// Decoded MSG_31 (Digital Radar Data Generic Format) message.
     Msg31(Box<msg31::Msg31<'a>>),
+    /// Decoded MSG_2 (RDA Status Data) message.
+    Msg2(Box<msg2::Msg2>),
+    /// Decoded MSG_5 (Volume Coverage Pattern) message.
+    Msg5(Box<msg5::Msg5>),
     /// One frame of a fixed-segment message that hasn't been
     /// reassembled yet. The accumulator hands it back to the loop
     /// when it isn't ready to emit the assembled message.
@@ -62,8 +69,9 @@ pub(crate) enum MessagePayload<'a> {
         segment_count: u16,
         bytes: &'a [u8],
     },
-    /// Final reassembled payload for a multi-segment message —
-    /// every fragment's bytes concatenated in segment order.
+    /// Final reassembled payload for a multi-segment message we
+    /// don't typed-decode (e.g. MSG_15) — every fragment's bytes
+    /// concatenated in segment order.
     Reassembled(Vec<u8>),
 }
 
@@ -144,11 +152,13 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
         reader.try_skip_to(target)?;
 
         // Single-segment fixed-frame messages emit immediately;
-        // multi-segment ones go through the accumulator.
+        // multi-segment ones go through the accumulator. In both
+        // cases we typed-dispatch by message type at emit time.
         if header.segment_count <= 1 {
+            let payload = parse_fixed_frame_payload(&header, payload_bytes)?;
             messages.push(Message {
                 header,
-                payload: MessagePayload::Raw(payload_bytes),
+                payload,
                 offset,
                 size: SEGMENT_FRAME_SIZE,
             });
@@ -156,9 +166,10 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
         }
 
         if let Some(reassembled) = accumulator.feed(header, payload_bytes)? {
+            let payload = parse_reassembled_payload(&header, reassembled)?;
             messages.push(Message {
                 header,
-                payload: MessagePayload::Reassembled(reassembled),
+                payload,
                 offset,
                 size: SEGMENT_FRAME_SIZE,
             });
@@ -166,6 +177,50 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
     }
 
     Ok(messages)
+}
+
+/// Dispatch a single-segment fixed-frame payload to the right
+/// typed parser. Falls back to `Raw` for message types we don't
+/// decode (MSG_15, MSG_18, etc.).
+fn parse_fixed_frame_payload<'a>(
+    header: &MessageHeader,
+    payload_bytes: &'a [u8],
+) -> Result<MessagePayload<'a>> {
+    match header.message_type {
+        MessageType::RdaStatusData => {
+            let mut r = SliceReader::new(payload_bytes);
+            let m = msg2::Msg2::read(&mut r)?;
+            Ok(MessagePayload::Msg2(Box::new(m)))
+        }
+        MessageType::VolumeCoveragePattern => {
+            let mut r = SliceReader::new(payload_bytes);
+            let m = msg5::Msg5::read(&mut r)?;
+            Ok(MessagePayload::Msg5(Box::new(m)))
+        }
+        _ => Ok(MessagePayload::Raw(payload_bytes)),
+    }
+}
+
+/// Dispatch a multi-segment reassembled payload to the right typed
+/// parser. MSG_5 occasionally spans 2-3 segments; MSG_15 is many
+/// frames but radish doesn't decode it, so it stays `Reassembled`.
+fn parse_reassembled_payload(
+    header: &MessageHeader,
+    reassembled: Vec<u8>,
+) -> Result<MessagePayload<'static>> {
+    match header.message_type {
+        MessageType::RdaStatusData => {
+            let mut r = SliceReader::new(&reassembled);
+            let m = msg2::Msg2::read(&mut r)?;
+            Ok(MessagePayload::Msg2(Box::new(m)))
+        }
+        MessageType::VolumeCoveragePattern => {
+            let mut r = SliceReader::new(&reassembled);
+            let m = msg5::Msg5::read(&mut r)?;
+            Ok(MessagePayload::Msg5(Box::new(m)))
+        }
+        _ => Ok(MessagePayload::Reassembled(reassembled)),
+    }
 }
 
 /// Pull the variable-length payload out as a raw slice. Reader is
@@ -426,16 +481,19 @@ mod tests {
         buf
     }
 
-    /// Reassembly sanity check: build a 2-segment MSG_5 (one of the
-    /// real fixed-frame cases — VCP definitions span 2-3 frames in
-    /// practice) and verify the loop emits one reassembled message.
+    /// Reassembly sanity check: build a 2-segment MSG_15 (Clutter
+    /// Filter Map). MSG_15 is fixed-frame and segmented like MSG_5
+    /// but radish doesn't typed-decode it, so reassembly emits
+    /// `MessagePayload::Reassembled`. We use MSG_15 here because
+    /// MSG_5 is now typed-dispatched and would reject synthetic
+    /// non-VCP bytes.
     #[test]
     fn segmented_message_reassembles_in_order() {
         // Each segment: 16-byte logical header + 2400-byte payload
         // = 2416 byte logical size. Total fixed-frame width = 2432.
         let segment_size_hw: u16 = ((LOGICAL_HEADER_SIZE + 2400) / 2) as u16;
-        let mut buf = synthesize_fixed_frame(5, 77, segment_size_hw, 2, 1, 0xAA);
-        buf.extend_from_slice(&synthesize_fixed_frame(5, 77, segment_size_hw, 2, 2, 0xBB));
+        let mut buf = synthesize_fixed_frame(15, 77, segment_size_hw, 2, 1, 0xAA);
+        buf.extend_from_slice(&synthesize_fixed_frame(15, 77, segment_size_hw, 2, 2, 0xBB));
 
         let messages = decode_messages(&buf).expect("decode");
         // The accumulator suppresses segment 1 (partial) and emits
@@ -457,21 +515,24 @@ mod tests {
     /// header" check.
     #[test]
     fn trailing_zero_padded_frames_are_walked_silently() {
-        // One real MSG_5 segment, then 3 frames of all zeros.
+        // One real MSG_18 (RDA Adaptation Data — fixed-frame, not
+        // typed-decoded by radish), then 3 frames of all zeros.
+        // MSG_18 here instead of MSG_5 because Phase 4's typed
+        // dispatch would reject the synthetic bytes.
         let segment_size_hw: u16 = ((LOGICAL_HEADER_SIZE + 100) / 2) as u16;
-        let mut buf = synthesize_fixed_frame(5, 1, segment_size_hw, 1, 1, 0xAA);
+        let mut buf = synthesize_fixed_frame(18, 1, segment_size_hw, 1, 1, 0xAA);
         buf.extend(vec![0u8; SEGMENT_FRAME_SIZE * 3]);
 
         let messages = decode_messages(&buf).expect("decode");
         assert_eq!(
             messages.len(),
             1,
-            "only the real MSG_5 should be yielded; zero-padded \
+            "only the real MSG_18 should be yielded; zero-padded \
              trailers are walked silently"
         );
         assert_eq!(
             messages[0].header.message_type,
-            MessageType::VolumeCoveragePattern
+            MessageType::RdaAdaptationData
         );
     }
 

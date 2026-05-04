@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NEXRAD: typed MSG_2 (RDA Status) + MSG_5 (Volume Coverage
+  Pattern) parsers** at
+  `radish/src/backends/nexrad/decode/messages/{msg2,msg5}.rs` —
+  Phase 4 of plan 0003. MSG_2 is a flat 60-halfword
+  fixed-frame parser (ICD §3.2.4.6 Table IV) covering all 30+
+  status/calibration fields including the bit-packed
+  `rda_scan_and_data_flags` (HW 14) that radish's existing
+  `attrs.rs` consumes for the AVSET/EBC parity attrs. MSG_5
+  decodes the 11-halfword header + N×23-halfword elevation cuts
+  (ICD §3.2.4.12 Table XI), including ICD Table III-A binary-
+  angle decoding for commanded elevation angles. The fixed-frame
+  branch in `decode_messages` now dispatches MSG_2/MSG_5 to typed
+  parsers in both single-segment and multi-segment (reassembled)
+  paths via new `parse_fixed_frame_payload` /
+  `parse_reassembled_payload` helpers; everything else stays
+  `Raw` / `Reassembled`. Live KLOT fixture validation: typed MSG_2
+  decodes plausible bounds (rda_build_number 19xx-24xx,
+  vcp_magnitude in ICD range 1..767), typed MSG_5 advertises the
+  same VCP as MSG_2 with first cut elevation ≈ 0.5°. (#15)
 - **NEXRAD: typed MSG_31 (Digital Radar Data Generic Format)
   parser** at `radish/src/backends/nexrad/decode/messages/msg31/`
   — Phase 3 of plan 0003. Decodes the 72-byte per-radial data
