@@ -24,10 +24,6 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use ndarray::Array2;
-use nexrad::decode::messages::rda_status_data::Message as RdaStatusMessage;
-use nexrad_model::data::{
-    CFPMomentValue, DataMoment, ElevationCut, MomentValue, Product, Radial, Scan, Sweep,
-};
 use radish_types::{PlatformType, SweepMode};
 use rayon::prelude::*;
 
@@ -36,6 +32,9 @@ use crate::{
 };
 
 use super::attrs::{sweep_attrs_from_cut, volume_attrs};
+use super::decode::messages::msg5::ElevationCut;
+use super::decode::model::{Radial, Scan, Sweep};
+use super::decode::products::{CfpMomentValue, DataMoment, MomentValue, Product};
 use super::mapping::{moment_meta, SUPPORTED_PRODUCTS};
 use super::sniff;
 use crate::backends::common::{
@@ -47,17 +46,13 @@ use crate::backends::common::{
 ///
 /// Sweep conversion is data-parallel: each `convert_sweep` invocation reads
 /// only its own `Sweep` and writes its own owned `SweepData`. We dispatch
-/// across rayon's global pool — already warmed up by the upstream
-/// `nexrad-data/parallel` decompression that ran moments earlier.
-pub(super) fn convert_scan(
-    scan: Scan,
-    msg2: Option<RdaStatusMessage<'static>>,
-    source: &Path,
-) -> Result<VolumeData> {
-    let metadata = build_volume_metadata(&scan, msg2.as_ref(), source)?;
-    let cuts = scan.coverage_pattern().elevation_cuts();
+/// across rayon's global pool — already warmed up by the in-tree
+/// decoder's parallel bzip2 decompression that ran moments earlier.
+pub(super) fn convert_scan(scan: Scan, source: &Path) -> Result<VolumeData> {
+    let metadata = build_volume_metadata(&scan, source)?;
+    let cuts = scan.coverage_pattern.elevation_cuts();
     let sweeps: Vec<SweepData> = scan
-        .sweeps()
+        .sweeps
         .par_iter()
         .enumerate()
         .map(|(idx, sweep)| convert_sweep(sweep, idx, cuts.get(idx)))
@@ -68,25 +63,21 @@ pub(super) fn convert_scan(
 /// Build the `VolumeMetadata` from the scan, falling back to the file path for
 /// the ICAO when the scan does not carry a `Site` (rare but possible for
 /// truncated chunk files).
-pub(super) fn build_volume_metadata(
-    scan: &Scan,
-    msg2: Option<&RdaStatusMessage<'_>>,
-    source: &Path,
-) -> Result<VolumeMetadata> {
-    let site = scan.site();
+pub(super) fn build_volume_metadata(scan: &Scan, source: &Path) -> Result<VolumeMetadata> {
+    let site = scan.site.as_ref();
 
     let icao = site
-        .map(|s| s.identifier_string())
+        .map(|s| s.icao_str().into_owned())
         .or_else(|| sniff::icao_from_filename(source).map(str::to_owned))
         .unwrap_or_else(|| "UNKN".to_string());
 
     // WSR-88D antenna height = base height + tower (feedhorn) height.
     let (latitude, longitude, altitude, altitude_agl) = match site {
         Some(s) => (
-            s.latitude() as f64,
-            s.longitude() as f64,
-            s.height_meters() as f64 + s.tower_height_meters() as f64,
-            Some(s.tower_height_meters() as f64),
+            f64::from(s.latitude_degrees),
+            f64::from(s.longitude_degrees),
+            f64::from(s.site_height_m) + f64::from(s.tower_height_m),
+            Some(f64::from(s.tower_height_m)),
         ),
         None => (f64::NAN, f64::NAN, f64::NAN, None),
     };
@@ -95,7 +86,7 @@ pub(super) fn build_volume_metadata(
         .time_range()
         .unwrap_or((DateTime::<Utc>::UNIX_EPOCH, DateTime::<Utc>::UNIX_EPOCH));
 
-    let num_sweeps = scan.sweeps().len();
+    let num_sweeps = scan.sweeps.len();
     let mut metadata =
         VolumeMetadata::new(icao, latitude, longitude, altitude, time_start, time_end);
     metadata.altitude_agl = altitude_agl;
@@ -106,9 +97,9 @@ pub(super) fn build_volume_metadata(
     // of per-ray MSG_31 angles — see [`fixed_angle_for`] for why. Keeps
     // the root-level `sweep_fixed_angle(sweep)` array byte-identical to
     // xradar's and aligned with the VCP reference.
-    let cuts = scan.coverage_pattern().elevation_cuts();
+    let cuts = scan.coverage_pattern.elevation_cuts();
     metadata.sweep_fixed_angles = scan
-        .sweeps()
+        .sweeps
         .iter()
         .enumerate()
         .map(|(idx, s)| fixed_angle_for(cuts.get(idx), s).unwrap_or(f64::NAN))
@@ -116,22 +107,22 @@ pub(super) fn build_volume_metadata(
 
     // VCP attributes match xradar's `VCP-NNN` form (e.g. `VCP-212`) so
     // engine-swap users see the same scan_name string.
-    let vcp = scan.coverage_pattern_number();
-    let vcp_number = vcp.number();
+    let vcp_number = scan.coverage_pattern.number();
     metadata
         .attributes
         .insert("scan_name".to_string(), format!("VCP-{vcp_number}"));
     metadata
         .attributes
         .insert("vcp".to_string(), vcp_number.to_string());
-    metadata
-        .attributes
-        .insert("vcp_description".to_string(), vcp.description().to_string());
+    metadata.attributes.insert(
+        "vcp_description".to_string(),
+        scan.coverage_pattern.description().to_string(),
+    );
 
     metadata.nexrad = Some(volume_attrs(
-        scan.coverage_pattern(),
-        msg2,
-        scan.sweeps(),
+        &scan.coverage_pattern,
+        scan.rda_status.as_ref(),
+        &scan.sweeps,
         num_sweeps as u32,
     ));
 
@@ -146,7 +137,7 @@ pub(super) fn convert_sweep(
     sweep_idx: usize,
     cut: Option<&ElevationCut>,
 ) -> Result<SweepData> {
-    let radials = sweep.radials();
+    let radials = sweep.radials.as_slice();
     if radials.is_empty() {
         return Err(RadishError::MalformedRecord {
             offset: 0,
@@ -157,9 +148,6 @@ pub(super) fn convert_sweep(
     // 1. Probe each supported product to see whether it appears in this sweep
     //    and capture its (first_gate, gate_interval, gate_count). Cheap: we
     //    only need to find the first radial with each product, no decoding.
-    //    `geometries` is a parallel `(Product, MomentGeometry)` Vec because
-    //    the shared `MomentGeometry` is intentionally backend-agnostic and
-    //    doesn't carry the upstream product enum.
     let geometries: Vec<(Product, MomentGeometry)> = SUPPORTED_PRODUCTS
         .iter()
         .filter_map(|&p| probe_geometry(radials, p).map(|g| (p, g)))
@@ -174,17 +162,17 @@ pub(super) fn convert_sweep(
     let max_gates = canonical.gate_count;
 
     // 2. Sort radials by azimuth *once* and reuse for every axis + moment.
-    let order = sort_indices_by_key(radials, |r| r.azimuth_angle_degrees());
+    let order = sort_indices_by_key(radials, |r| r.azimuth_angle_degrees);
 
     // 3. Build coordinates from the sorted permutation.
     let coordinates = assemble_ppi_coordinates(
         radials,
         &order,
         build_range_axis(canonical),
-        |r| r.azimuth_angle_degrees(),
-        |r| r.elevation_angle_degrees(),
+        |r| r.azimuth_angle_degrees,
+        |r| r.elevation_angle_degrees,
         |r| {
-            r.collection_time()
+            r.collection_time
                 .map(|dt| dt.timestamp_micros() as f64 / 1.0e6)
                 .unwrap_or(f64::NAN)
         },
@@ -192,10 +180,7 @@ pub(super) fn convert_sweep(
 
     let fixed_angle =
         fixed_angle_for(cut, sweep).unwrap_or_else(|| median_elevation(&coordinates.elevation));
-    let sweep_number = sweep.elevation_number() as u32;
-    // PRT, Nyquist, PRF and polarization mode aren't surfaced by
-    // `nexrad-model` 1.0.0-rc.2; they live in the RAD block at the
-    // `nexrad-decode` level. Phase 2 will fill them.
+    let sweep_number = u32::from(sweep.elevation_number);
     let mut sweep_meta = SweepMetadata::new(sweep_number, SweepMode::Azimuth, fixed_angle);
     sweep_meta.nexrad = cut.map(sweep_attrs_from_cut);
 
@@ -223,8 +208,8 @@ pub(super) fn convert_sweep(
 /// Returns `None` if the product is absent from every radial in the sweep.
 ///
 /// Handles both the regular six moments (`Product::moment_data` →
-/// `&MomentData`) and the special-cased clutter filter power
-/// (`Product::cfp_moment_data` → `&CFPMomentData`). Both impl the
+/// `&OwnedMoment`) and the special-cased clutter filter power
+/// (`Product::cfp_moment_data` → `&OwnedCfp`). Both impl the
 /// `DataMoment` trait so the geometry call is uniform.
 fn probe_geometry(radials: &[Radial], product: Product) -> Option<MomentGeometry> {
     radials.iter().find_map(|r| {
@@ -274,9 +259,9 @@ fn decode_product(
     let ngates = geometry.gate_count;
     if product == Product::ClutterFilterPower {
         decode_into_array(radials, order, nrays, ngates, max_gates, |r, dst| {
-            if let Some(cfp) = r.clutter_filter_power() {
+            if let Some(cfp) = r.clutter_filter_power.as_ref() {
                 let n = dst.len();
-                for (slot, v) in dst.iter_mut().zip(cfp.iter().take(n)) {
+                for (slot, v) in dst.iter_mut().zip(cfp.iter_moment_value().take(n)) {
                     *slot = scaled_cfp(v);
                 }
             }
@@ -304,12 +289,12 @@ fn scaled_moment(value: MomentValue) -> f32 {
 }
 
 #[inline]
-fn scaled_cfp(value: CFPMomentValue) -> f32 {
+fn scaled_cfp(value: CfpMomentValue) -> f32 {
     match value {
-        CFPMomentValue::Value(v) => v,
-        // CFPMomentValue::Status(_) variants represent metadata about the
-        // clutter filter, not a measurement; xradar emits NaN for these.
-        CFPMomentValue::Status(_) => f32::NAN,
+        CfpMomentValue::Value(v) => v,
+        // Status variants represent metadata about the clutter filter,
+        // not a measurement; xradar emits NaN for these.
+        CfpMomentValue::Status(_) => f32::NAN,
     }
 }
 
@@ -331,10 +316,10 @@ fn median_elevation(elevations: &[f32]) -> f64 {
 /// MSG_5 *commanded* angle over the MSG_31 *achieved* (median-of-radials)
 /// angle.
 ///
-/// `nexrad-model 1.0.0-rc.2` exposes two getters that both return
-/// "elevation in degrees" but mean different things:
+/// Two values both return "elevation in degrees" but mean different
+/// things:
 ///
-/// * [`ElevationCut::elevation_angle_degrees`] — the commanded angle
+/// * [`ElevationCut::elevation_angle_degrees_f64`] — the commanded angle
 ///   from MSG_5 (the VCP definition; what the radar was *told* to point
 ///   at). xradar's `open_nexradlevel2_datatree` reads this. Matches the
 ///   VCP reference table users compare against (e.g. "VCP-32 sweep 1
@@ -349,21 +334,23 @@ fn median_elevation(elevations: &[f32]) -> f64 {
 /// xradar parity. Fallback chain: commanded → median-of-radials → None
 /// (caller decides what to do — `f64::NAN` for the volume-level array,
 /// `median_elevation(coordinates.elevation)` for the per-sweep value).
-///
-/// `f64::from(f32)` is used over `as f64` because the conversion is
-/// lossless and `as` is a clippy::cast_lossless lint hit.
 fn fixed_angle_for(cut: Option<&ElevationCut>, sweep: &Sweep) -> Option<f64> {
-    cut.map(|c| c.elevation_angle_degrees())
+    cut.map(|c| c.elevation_angle_degrees_f64())
         .or_else(|| sweep.elevation_angle_degrees().map(f64::from))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::nexrad::decode::messages::msg31::moment::MomentDescriptor;
+    use crate::backends::nexrad::decode::model::OwnedMoment;
+    use crate::backends::nexrad::decode::products::CfpStatus;
 
-    /// Construct an empty Sweep (no radials) to exercise the error path.
     fn empty_sweep(elevation_number: u8) -> Sweep {
-        Sweep::new(elevation_number, Vec::<Radial>::new())
+        Sweep {
+            elevation_number,
+            radials: Vec::new(),
+        }
     }
 
     #[test]
@@ -384,10 +371,9 @@ mod tests {
 
     #[test]
     fn scaled_cfp_maps_status_codes_to_nan() {
-        use nexrad_model::data::CFPStatus;
-        assert_eq!(scaled_cfp(CFPMomentValue::Value(0.5)), 0.5);
-        assert!(scaled_cfp(CFPMomentValue::Status(CFPStatus::FilterNotApplied)).is_nan());
-        assert!(scaled_cfp(CFPMomentValue::Status(CFPStatus::PointClutterFilterApplied)).is_nan());
+        assert_eq!(scaled_cfp(CfpMomentValue::Value(0.5)), 0.5);
+        assert!(scaled_cfp(CfpMomentValue::Status(CfpStatus::FilterNotApplied)).is_nan());
+        assert!(scaled_cfp(CfpMomentValue::Status(CfpStatus::PointClutterFilterApplied)).is_nan());
     }
 
     #[test]
@@ -413,43 +399,47 @@ mod tests {
     /// `(raw - offset) / scale`. We use scale=2.0, offset=66.0 (the legacy
     /// MSG_1 reflectivity defaults) so the math is hand-checkable.
     fn ref_only_radial(azimuth_deg: f32, elevation_number: u8, raw_gates: Vec<u8>) -> Radial {
-        use nexrad_model::data::{MomentData, RadialStatus};
-        let gate_count = raw_gates.len() as u16;
-        let reflectivity = MomentData::from_fixed_point(
-            gate_count, /* first_gate_range */ 2_000, /* gate_interval */ 250,
-            /* data_word_size */ 8, /* scale */ 2.0, /* offset */ 66.0, raw_gates,
-        );
-        Radial::new(
-            /* collection_timestamp */ 0,
-            /* azimuth_number */ 0,
-            azimuth_deg,
-            /* azimuth_spacing_degrees */ 0.5,
-            RadialStatus::ScanStart,
+        Radial {
+            azimuth_number: 0,
+            azimuth_angle_degrees: azimuth_deg,
             elevation_number,
-            /* elevation_angle_degrees */ 0.5,
-            Some(reflectivity),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            elevation_angle_degrees: 0.5,
+            radial_status: 0,
+            collection_time: None,
+            reflectivity: Some(OwnedMoment {
+                descriptor: MomentDescriptor {
+                    gate_count: raw_gates.len() as u16,
+                    range_to_first_gate_km: 2.0,
+                    gate_interval_km: 0.25,
+                    tover_db: 0.0,
+                    snr_threshold_db: 0.0,
+                    control_flags: 0,
+                    data_word_size_bits: 8,
+                    scale: 2.0,
+                    offset: 66.0,
+                },
+                gate_bytes: raw_gates,
+            }),
+            velocity: None,
+            spectrum_width: None,
+            differential_reflectivity: None,
+            differential_phase: None,
+            correlation_coefficient: None,
+            clutter_filter_power: None,
+        }
     }
 
     #[test]
     fn convert_sweep_sorts_rays_and_decodes_reflectivity_correctly() {
         // Two rays in REVERSE azimuth order: the adapter must sort them so
         // row 0 has azimuth=10° and row 1 has azimuth=20°.
-        // Per gate: 0/1 → NaN (sentinels), raw=2 → (2-66)/2 = -32 dBZ,
-        //                                  raw=130 → (130-66)/2 = 32 dBZ.
-        let sweep = Sweep::new(
-            1,
-            vec![
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials: vec![
                 ref_only_radial(20.0, 1, vec![130, 0, 130]),
                 ref_only_radial(10.0, 1, vec![2, 1, 2]),
             ],
-        );
+        };
         let sd = convert_sweep(&sweep, 0, None).expect("convert_sweep");
 
         // Coords reflect the sorted order.
@@ -473,16 +463,13 @@ mod tests {
 
     #[test]
     fn convert_sweep_pads_short_moments_with_nan() {
-        // Sweep with two radials carrying 2-gate REF only. We probe geometry
-        // and (since there's only one product) max_gates == 2. Verify nothing
-        // explodes on the trivial single-product case.
-        let sweep = Sweep::new(
-            1,
-            vec![
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials: vec![
                 ref_only_radial(0.0, 1, vec![10, 20]),
                 ref_only_radial(180.0, 1, vec![30, 40]),
             ],
-        );
+        };
         let sd = convert_sweep(&sweep, 0, None).expect("convert_sweep");
         let dbzh = &sd.moments["DBZH"];
         assert_eq!(dbzh.shape(), (2, 2));
@@ -491,60 +478,74 @@ mod tests {
         assert!((dbzh.data[(0, 1)] - (-23.0)).abs() < 1e-6);
     }
 
-    /// Build an `ElevationCut` with a given commanded angle. Other
-    /// fields are arbitrary defaults — none of them affect
-    /// [`fixed_angle_for`].
+    /// Build an `ElevationCut` with a given commanded elevation
+    /// angle in degrees. The angle is encoded back into ICD
+    /// Table III-A binary form so the decoded
+    /// `elevation_angle_degrees()` round-trips.
     fn cut_with_angle(angle_deg: f64) -> ElevationCut {
-        use nexrad_model::data::{ChannelConfiguration, WaveformType};
-        ElevationCut::new(
-            angle_deg,
-            ChannelConfiguration::ConstantPhase,
-            WaveformType::CS,
-            18.0,
-            false,
-            false,
-            false,
-            false,
-            1,
-            17,
-            16.0,
-            -20.0,
-            12.0,
-            0.0,
-            0.0,
-            0.0,
-            false,
-            0,
-            false,
-            0,
-            false,
-            false,
-        )
+        // Inverse of `binary_angle_degrees`: angle * 65536 / 360,
+        // mask off bits 0-2 (per Table III-A bits 3-15 carry the
+        // angle).
+        let raw = ((angle_deg * 65536.0 / 360.0).round() as u16) & !0b0000_0111;
+        ElevationCut {
+            elevation_angle_raw: raw,
+            channel_configuration: 0,
+            waveform_type: 1,
+            super_resolution_control: 0,
+            surveillance_prf_number: 1,
+            surveillance_pulse_count: 17,
+            azimuth_rate_raw: 0,
+            reflectivity_threshold_raw: 0,
+            velocity_threshold_raw: 0,
+            spectrum_width_threshold_raw: 0,
+            differential_reflectivity_threshold_raw: 0,
+            differential_phase_threshold_raw: 0,
+            correlation_coefficient_threshold_raw: 0,
+            sector1_edge_angle_raw: 0,
+            sector1_doppler_prf_number: 0,
+            sector1_doppler_pulse_count: 0,
+            supplemental_data: 0,
+            sector2_edge_angle_raw: 0,
+            sector2_doppler_prf_number: 0,
+            sector2_doppler_pulse_count: 0,
+            ebc_angle_raw: 0,
+            sector3_edge_angle_raw: 0,
+            sector3_doppler_prf_number: 0,
+            sector3_doppler_pulse_count: 0,
+            reserved: 0,
+        }
     }
 
     /// Build a single MSG_31 radial whose elevation field is `elev_deg`.
-    /// Differs from [`ref_only_radial`] only in the elevation value;
-    /// used to construct sweeps where the radials' median elevation is
-    /// distinguishable from the cut's commanded value.
     fn radial_at(azimuth_deg: f32, elev_deg: f32) -> Radial {
-        use nexrad_model::data::{MomentData, RadialStatus};
-        let reflectivity = MomentData::from_fixed_point(1, 2_000, 250, 8, 2.0, 66.0, vec![10]);
-        Radial::new(
-            0,
-            0,
-            azimuth_deg,
-            0.5,
-            RadialStatus::ScanStart,
-            1,
-            elev_deg,
-            Some(reflectivity),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        Radial {
+            azimuth_number: 0,
+            azimuth_angle_degrees: azimuth_deg,
+            elevation_number: 1,
+            elevation_angle_degrees: elev_deg,
+            radial_status: 0,
+            collection_time: None,
+            reflectivity: Some(OwnedMoment {
+                descriptor: MomentDescriptor {
+                    gate_count: 1,
+                    range_to_first_gate_km: 2.0,
+                    gate_interval_km: 0.25,
+                    tover_db: 0.0,
+                    snr_threshold_db: 0.0,
+                    control_flags: 0,
+                    data_word_size_bits: 8,
+                    scale: 2.0,
+                    offset: 66.0,
+                },
+                gate_bytes: vec![10],
+            }),
+            velocity: None,
+            spectrum_width: None,
+            differential_reflectivity: None,
+            differential_phase: None,
+            correlation_coefficient: None,
+            clutter_filter_power: None,
+        }
     }
 
     /// HIGH-priority regression: pin "we use MSG_5 commanded, not
@@ -552,36 +553,41 @@ mod tests {
     /// `sweep.elevation_angle_degrees()` would break this test.
     #[test]
     fn fixed_angle_for_prefers_msg5_commanded_over_msg31_median() {
-        // Cut commands 0.5°. Three radials whose elevations average to
-        // 0.4395° — exactly the divergence the downstream parity bug
-        // surfaced (8 × MSG_5 LSB ≈ 0.044° below commanded).
+        // Cut commands ~0.5° (binary-angle quantised). Three radials
+        // whose elevations average to ~0.44°.
         let cut = cut_with_angle(0.5);
-        let sweep = Sweep::new(
-            1,
-            vec![
+        let commanded = cut.elevation_angle_degrees_f64();
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials: vec![
                 radial_at(0.0, 0.4395),
                 radial_at(120.0, 0.4395),
                 radial_at(240.0, 0.4395),
             ],
-        );
+        };
 
         let got = fixed_angle_for(Some(&cut), &sweep).expect("Some");
-        assert!((got - 0.5).abs() < 1e-6, "expected 0.5° (MSG_5), got {got}");
+        assert!(
+            (got - commanded).abs() < 1e-6,
+            "expected commanded {commanded}, got {got}"
+        );
+        // Sanity: commanded is *not* the median (0.4395), so we'd
+        // notice a regression that swapped back to it.
+        assert!((got - 0.4395).abs() > 0.01, "got = {got} matches median");
     }
 
     /// HIGH-priority fallback: when the cut is missing (truncated VCP,
-    /// malformed file), drop to the median-of-radials path. Pinned so a
-    /// regression that returns NaN here is caught.
+    /// malformed file), drop to the median-of-radials path.
     #[test]
     fn fixed_angle_for_falls_back_to_sweep_median_when_cut_is_none() {
-        let sweep = Sweep::new(
-            1,
-            vec![
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials: vec![
                 radial_at(0.0, 1.5),
                 radial_at(120.0, 1.5),
                 radial_at(240.0, 1.5),
             ],
-        );
+        };
         let got = fixed_angle_for(None, &sweep).expect("Some");
         assert!(
             (got - 1.5).abs() < 1e-6,
@@ -591,22 +597,20 @@ mod tests {
 
     /// HIGH-priority: when both the cut and the sweep are unusable
     /// (no radials, no cut), `fixed_angle_for` must return None so the
-    /// caller can route to its own fallback (NaN at volume scope,
-    /// `median_elevation(coordinates.elevation)` at sweep scope).
+    /// caller can route to its own fallback.
     #[test]
     fn fixed_angle_for_returns_none_for_empty_sweep_and_no_cut() {
         assert!(fixed_angle_for(None, &empty_sweep(1)).is_none());
     }
 
     /// MEDIUM: the lossless `f64::from(f32)` path in the sweep-only
-    /// fallback must not introduce float drift. Sweep's getter returns
-    /// f32; cut returns f64. Without `f64::from`, an `as` cast would
-    /// pass clippy::cast_lossless but is less idiomatic.
+    /// fallback must not introduce float drift.
     #[test]
     fn fixed_angle_for_promotes_f32_to_f64_losslessly() {
-        // 1.5_f32 is exactly representable; the f32 → f64 promotion
-        // must preserve the bits.
-        let sweep = Sweep::new(1, vec![radial_at(0.0, 1.5_f32)]);
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials: vec![radial_at(0.0, 1.5_f32)],
+        };
         let got = fixed_angle_for(None, &sweep).expect("Some");
         assert_eq!(got, f64::from(1.5_f32));
     }

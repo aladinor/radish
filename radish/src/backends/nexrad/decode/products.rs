@@ -12,19 +12,21 @@ use super::model::{OwnedCfp, OwnedMoment, Radial};
 
 /// Common geometry for any per-radial moment block. Used by the
 /// adapter's `probe_geometry` to size the (rays × gates) array
-/// without decoding gate values.
+/// without decoding gate values. f64 return matches
+/// `backends::common::MomentGeometry` so the adapter doesn't need
+/// per-call casts.
 pub(crate) trait DataMoment {
-    fn first_gate_range_km(&self) -> f32;
-    fn gate_interval_km(&self) -> f32;
+    fn first_gate_range_km(&self) -> f64;
+    fn gate_interval_km(&self) -> f64;
     fn gate_count(&self) -> u16;
 }
 
 impl DataMoment for OwnedMoment {
-    fn first_gate_range_km(&self) -> f32 {
-        self.descriptor.range_to_first_gate_km
+    fn first_gate_range_km(&self) -> f64 {
+        f64::from(self.descriptor.range_to_first_gate_km)
     }
-    fn gate_interval_km(&self) -> f32 {
-        self.descriptor.gate_interval_km
+    fn gate_interval_km(&self) -> f64 {
+        f64::from(self.descriptor.gate_interval_km)
     }
     fn gate_count(&self) -> u16 {
         self.descriptor.gate_count
@@ -32,11 +34,11 @@ impl DataMoment for OwnedMoment {
 }
 
 impl DataMoment for OwnedCfp {
-    fn first_gate_range_km(&self) -> f32 {
-        self.descriptor.range_to_first_gate_km
+    fn first_gate_range_km(&self) -> f64 {
+        f64::from(self.descriptor.range_to_first_gate_km)
     }
-    fn gate_interval_km(&self) -> f32 {
-        self.descriptor.gate_interval_km
+    fn gate_interval_km(&self) -> f64 {
+        f64::from(self.descriptor.gate_interval_km)
     }
     fn gate_count(&self) -> u16 {
         self.descriptor.gate_count
