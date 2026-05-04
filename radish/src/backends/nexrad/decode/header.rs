@@ -1,41 +1,76 @@
-//! NEXRAD `MessageHeader` (ICD 2620002AA Table II) — 16 bytes that
-//! precede every message in the decompressed record stream.
+//! NEXRAD message header — 28 bytes total per ICD 2620002AA on the wire.
 //!
-//! Wire layout (big-endian):
+//! Two pieces, in order:
 //!
-//! | Offset | Bytes | Field                                          |
-//! |-------:|------:|------------------------------------------------|
-//! |      0 |     2 | Message size (in 16-bit halfwords)             |
-//! |      2 |     1 | Channel byte (RDA/RPG/control)                 |
-//! |      3 |     1 | Message type (Table II)                        |
-//! |      4 |     2 | Message sequence number                        |
-//! |      6 |     2 | Julian date (since Jan 1, 1970)                |
-//! |      8 |     4 | Milliseconds since midnight                    |
-//! |     12 |     2 | Number of segments (for fixed-frame msgs)      |
-//! |     14 |     2 | Segment number (1-based, for fixed-frame msgs) |
+//! 1. **TCM Message Header** (ICD §3.1.3) — 12 bytes of session-level
+//!    framing (`Message Type` / `Type-Dependent` / `Data Size`). In
+//!    Level II Archive files these come through as zero-filled in
+//!    practice; danielway's `nexrad-decode` calls them
+//!    `rpg_unknown`.
+//! 2. **Message Header per Table II** (ICD §3.2.4.1) — the 16-byte
+//!    logical header that downstream parsers read for size, type,
+//!    and segmentation:
 //!
-//! `bytemuck::Pod` would only help if NEXRAD were little-endian (and
-//! we'd skip the BE conversions). We're not, so we read each field
-//! explicitly. Same approach as the existing sigmet backend.
+//!    | Offset | Bytes | Field                                          |
+//!    |-------:|------:|------------------------------------------------|
+//!    |     12 |     2 | Message Size (halfwords; `0xFFFF` = sentinel)  |
+//!    |     14 |     1 | RDA Redundant Channel                          |
+//!    |     15 |     1 | Message Type (Table I)                         |
+//!    |  16-17 |     2 | I.D. Sequence Number                           |
+//!    |  18-19 |     2 | Modified Julian Date                           |
+//!    |  20-23 |     4 | Milliseconds of Day                            |
+//!    |  24-25 |     2 | Number of Message Segments                     |
+//!    |  26-27 |     2 | Message Segment Number                         |
+//!
+//! Per ICD §3.2.4.1 Note 7: when `Message Size == 0xFFFF`, halfwords
+//! 12-15 (i.e. `segment_count` and `segment_number`) are repurposed
+//! as a 32-bit byte count. The message is assumed to be a single
+//! segment (variable-length).
+//!
+//! `message_size_bytes()` returns the **logical** message size
+//! (16-byte Table II header + payload). It excludes the 12-byte TCM
+//! prefix — so per-message wire stride for variable-length messages
+//! is `12 + message_size_bytes()`.
 
 use super::error::Result;
 use super::reader::SliceReader;
 
-/// Size of the on-wire header. Asserted against `read` consumption
-/// in tests so a future field rearrangement can't drift the loop.
-pub(crate) const SIZE: usize = 16;
+/// Combined width of the TCM prefix + Table II logical header.
+pub(crate) const SIZE: usize = 28;
 
-/// Frame width for fixed-segment messages (ICD §3.5.2). Variable-
-/// length messages (e.g. MSG_31) are not bound by this — the loop
-/// uses `MessageHeader::message_size_bytes()` instead.
+/// TCM Message Header width (ICD §3.1.3): 3 × 4-octet fields.
+pub(crate) const TCM_PREFIX_SIZE: usize = 12;
+
+/// Table II logical header width (ICD §3.2.4.1).
+pub(crate) const LOGICAL_HEADER_SIZE: usize = 16;
+
+const _: () = assert!(SIZE == TCM_PREFIX_SIZE + LOGICAL_HEADER_SIZE);
+
+/// Frame width for fixed-segment (segmented) messages (ICD §3.1.3
+/// — the wire-level frame that holds one segment plus padding).
+/// Variable-length messages (`segment_size == 0xFFFF` and Type 31)
+/// are not bound by this — they consume `12 + message_size_bytes()`
+/// bytes per message.
 pub(crate) const SEGMENT_FRAME_SIZE: usize = 2432;
 
-/// Decoded message header. Fields are decoded once on parse; raw
-/// halfword counts are converted to bytes via `message_size_bytes`.
+/// Sentinel value in `Message Size` that signals the variable-length
+/// extended encoding (ICD §3.2.4.1 Note 6 + Note 7).
+pub(crate) const VARIABLE_LENGTH_MESSAGE_SIZE: u16 = 0xFFFF;
+
+/// Decoded message header. Fields hold the **post-decode** values
+/// (e.g. byte-arithmetic units already converted from halfwords);
+/// raw fields are kept where the consumer cares about the wire bits
+/// (sentinel detection, segment counting).
+///
+/// The 12-byte TCM prefix (ICD §3.1.3) is consumed by `read` but
+/// not stored — no downstream consumer of radish reads it, and
+/// keeping it would add 12 bytes per header for nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MessageHeader {
-    /// Total message size **in halfwords** as it appears on the
-    /// wire. Use `message_size_bytes()` for byte arithmetic.
+    /// Raw Message Size halfword count from the Table II header
+    /// (ICD §3.2.4.1). `0xFFFF` triggers the variable-length
+    /// extended size encoding via `segment_count`/`segment_number`.
+    /// Use `message_size_bytes()` for byte arithmetic.
     pub(crate) message_size_halfwords: u16,
     pub(crate) channel: u8,
     pub(crate) message_type: MessageType,
@@ -48,6 +83,10 @@ pub(crate) struct MessageHeader {
 
 impl MessageHeader {
     pub(crate) fn read(reader: &mut SliceReader<'_>) -> Result<Self> {
+        // Consume + discard the 12-byte TCM prefix (ICD §3.1.3).
+        // We just need the cursor advanced; no consumer reads it.
+        reader.advance(TCM_PREFIX_SIZE)?;
+
         let message_size_halfwords = reader.read_u16_be()?;
         let channel = reader.read_u8()?;
         let type_byte = reader.read_u8()?;
@@ -69,38 +108,41 @@ impl MessageHeader {
         })
     }
 
-    /// Total message size in bytes (`halfwords * 2`).
+    /// Logical message size in bytes — the Table II header (16) plus
+    /// payload, **not** including the 12-byte TCM prefix.
+    ///
+    /// Per ICD §3.2.4.1 Note 7: when the on-wire halfword field is
+    /// `0xFFFF`, the size is reconstructed from
+    /// `segment_count`/`segment_number` as a 32-bit byte count. The
+    /// message is assumed to be a single segment (variable-length).
     pub(crate) fn message_size_bytes(&self) -> usize {
-        usize::from(self.message_size_halfwords) * 2
+        if self.message_size_halfwords < VARIABLE_LENGTH_MESSAGE_SIZE {
+            usize::from(self.message_size_halfwords) * 2
+        } else {
+            // Halfwords 12-15 (`segment_count` MSB | `segment_number` LSB)
+            // → 32-bit byte count.
+            ((u32::from(self.segment_count) << 16) | u32::from(self.segment_number)) as usize
+        }
     }
 
-    /// Whether this message uses the 2432-byte fixed-frame layout
-    /// (per ICD §3.5.2). MSG_31 is variable-length; the explicitly
-    /// known fixed-frame types (MSG_1, MSG_2, MSG_5, MSG_15, MSG_18)
-    /// return `true`. `Skip(_)` returns `false` so the loop walks
-    /// the declared `message_size_bytes` rather than assuming a
-    /// 2432-byte frame for codes we don't understand.
+    /// Whether this message uses fixed-segment framing (one or more
+    /// 2432-byte frames per ICD §3.1.3) rather than the
+    /// variable-length encoding.
+    ///
+    /// Type 31 (Digital Radar Data Generic Format) is **always**
+    /// variable-length even when its `Message Size` halfword field
+    /// holds the actual halfword count rather than the `0xFFFF`
+    /// sentinel — matching danielway/nexrad's interpretation.
     pub(crate) fn segmented(&self) -> bool {
-        matches!(
-            self.message_type,
-            MessageType::DigitalRadarDataLegacy
-                | MessageType::RdaStatusData
-                | MessageType::VolumeCoveragePattern
-                | MessageType::ClutterFilterMap
-                | MessageType::RdaAdaptationData
-        )
+        self.message_size_halfwords < VARIABLE_LENGTH_MESSAGE_SIZE
+            && self.message_type != MessageType::DigitalRadarDataGenericFormat
     }
 }
 
-/// Message type codes per ICD 2620002AA Table II. Variants are
+/// Message type codes per ICD 2620002AA Table I. Variants are
 /// limited to the ones radish actually consumes; everything else
 /// folds into `Skip(u8)` so the loop walks the bytes without
 /// pretending we understand them.
-///
-/// `Skip(0)` covers the zero-padding type-byte that some files
-/// emit between records. Truly unknown codes (i.e. anything outside
-/// ICD Table II) also fold into `Skip` for forward compatibility —
-/// the alternative is to fail loudly on every spec revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MessageType {
     /// Type 1 — legacy radial data (pre-2008). Decoder support is
@@ -152,35 +194,46 @@ impl std::fmt::Display for MessageType {
     }
 }
 
-#[allow(dead_code)] // field 0 read indirectly via `header_size_compile_time_check`.
-struct AssertHeaderSize([(); SIZE - 16]);
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Construct 16 bytes that decode to a header with the given
-    /// type byte, message size (halfwords), and segment_count.
-    fn synth(type_byte: u8, halfwords: u16, segment_count: u16) -> [u8; 16] {
-        let mut bytes = [0u8; 16];
-        bytes[0..2].copy_from_slice(&halfwords.to_be_bytes());
-        bytes[2] = 0; // channel
-        bytes[3] = type_byte;
-        bytes[12..14].copy_from_slice(&segment_count.to_be_bytes());
-        bytes[14..16].copy_from_slice(&1u16.to_be_bytes()); // segment_number
+    /// Construct 28 bytes that decode to a header with the given
+    /// type byte, message size halfwords, segment_count, and
+    /// segment_number. The 12-byte TCM prefix is zero-filled.
+    fn synth(type_byte: u8, halfwords: u16, segment_count: u16, segment_number: u16) -> [u8; 28] {
+        let mut bytes = [0u8; 28];
+        // bytes 0..12 are the zero-filled TCM prefix.
+        bytes[12..14].copy_from_slice(&halfwords.to_be_bytes());
+        bytes[14] = 0; // channel
+        bytes[15] = type_byte;
+        bytes[24..26].copy_from_slice(&segment_count.to_be_bytes());
+        bytes[26..28].copy_from_slice(&segment_number.to_be_bytes());
         bytes
     }
 
     #[test]
-    fn message_size_bytes_doubles_halfwords() {
-        let bytes = synth(31, 100, 1);
+    fn message_size_bytes_doubles_halfwords_on_normal_path() {
+        let bytes = synth(31, 100, 0, 1);
         let mut r = SliceReader::new(&bytes);
         let h = MessageHeader::read(&mut r).unwrap();
         assert_eq!(h.message_size_bytes(), 200);
     }
 
     #[test]
-    fn message_type_dispatch_matches_icd_table_ii() {
+    fn message_size_bytes_uses_extended_encoding_at_sentinel() {
+        // ICD §3.2.4.1 Note 7: halfword 0 = 0xFFFF, then
+        // halfwords 12-15 (segment_count MSB, segment_number LSB)
+        // = 32-bit byte count. Pick segment_count=0x0001,
+        // segment_number=0x2000 → 0x00012000 = 73728 bytes.
+        let bytes = synth(31, VARIABLE_LENGTH_MESSAGE_SIZE, 0x0001, 0x2000);
+        let mut r = SliceReader::new(&bytes);
+        let h = MessageHeader::read(&mut r).unwrap();
+        assert_eq!(h.message_size_bytes(), 0x00012000);
+    }
+
+    #[test]
+    fn message_type_dispatch_matches_icd_table_i() {
         let cases = [
             (1u8, MessageType::DigitalRadarDataLegacy),
             (2, MessageType::RdaStatusData),
@@ -198,21 +251,31 @@ mod tests {
     }
 
     #[test]
-    fn segmented_returns_false_only_for_msg31() {
-        let make = |t: u8| {
-            let bytes = synth(t, 0, 1);
+    fn segmented_distinguishes_msg31_and_sentinel() {
+        let segmented_for = |type_byte: u8, halfwords: u16, sc: u16, sn: u16| {
+            let bytes = synth(type_byte, halfwords, sc, sn);
             let mut r = SliceReader::new(&bytes);
             MessageHeader::read(&mut r).unwrap().segmented()
         };
-        assert!(!make(31), "MSG_31 is variable-length, not segmented");
-        assert!(make(2));
-        assert!(make(5));
-        assert!(make(15));
+
+        // MSG_31 is always variable-length, regardless of the size
+        // halfword value (matches danielway/nexrad's interpretation).
+        assert!(!segmented_for(31, 100, 0, 1));
+
+        // Other types: variable-length only when sentinel is set.
+        assert!(segmented_for(2, 100, 0, 1));
+        assert!(!segmented_for(2, VARIABLE_LENGTH_MESSAGE_SIZE, 0, 100));
+        assert!(segmented_for(5, 100, 0, 1));
+        assert!(segmented_for(15, 100, 0, 1));
+
+        // Skip(_) follows the sentinel rule.
+        assert!(segmented_for(99, 100, 0, 1));
+        assert!(!segmented_for(99, VARIABLE_LENGTH_MESSAGE_SIZE, 0, 50));
     }
 
     #[test]
-    fn read_consumes_exactly_16_bytes() {
-        let bytes = synth(31, 100, 1);
+    fn read_consumes_exactly_28_bytes() {
+        let bytes = synth(31, 100, 0, 1);
         let mut r = SliceReader::new(&bytes);
         let _ = MessageHeader::read(&mut r).unwrap();
         assert_eq!(r.position(), SIZE);
@@ -220,8 +283,30 @@ mod tests {
 
     #[test]
     fn read_errors_on_short_input() {
-        let bytes = synth(31, 100, 1);
-        let mut r = SliceReader::new(&bytes[..8]);
+        let bytes = synth(31, 100, 0, 1);
+        let mut r = SliceReader::new(&bytes[..16]);
         assert!(MessageHeader::read(&mut r).is_err());
+    }
+
+    /// Wire-format empirical fixture: matches the bytes observed at
+    /// the start of LDM record 0 of `KLOT20251210_102338_V06`.
+    #[test]
+    fn read_decodes_klot_record_0_msg15_header() {
+        // First 28 bytes of LDM record 0 (decompressed):
+        //   [12 zero bytes][04 b8 08 0f 78 a8 4f d1 00 5c 4f 0a 00 05 00 01]
+        let mut bytes = [0u8; 28];
+        bytes[12..28].copy_from_slice(&[
+            0x04, 0xB8, 0x08, 0x0F, 0x78, 0xA8, 0x4F, 0xD1, 0x00, 0x5C, 0x4F, 0x0A, 0x00, 0x05,
+            0x00, 0x01,
+        ]);
+        let mut r = SliceReader::new(&bytes);
+        let h = MessageHeader::read(&mut r).unwrap();
+        assert_eq!(h.message_size_halfwords, 0x04B8);
+        assert_eq!(h.message_size_bytes(), 0x04B8 * 2); // 2416
+        assert_eq!(h.channel, 0x08);
+        assert_eq!(h.message_type, MessageType::ClutterFilterMap); // 0x0F = 15
+        assert_eq!(h.segment_count, 5);
+        assert_eq!(h.segment_number, 1);
+        assert!(h.segmented(), "MSG_15 should be fixed-frame");
     }
 }

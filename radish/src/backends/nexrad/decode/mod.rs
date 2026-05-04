@@ -25,3 +25,6 @@ pub(super) mod messages;
 pub(super) mod reader;
 pub(super) mod record;
 pub(super) mod volume;
+
+#[cfg(test)]
+mod integration_test;
