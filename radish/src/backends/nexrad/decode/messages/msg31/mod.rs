@@ -30,9 +30,11 @@ use crate::backends::nexrad::decode::error::{NexradDecodeError, Result};
 use crate::backends::nexrad::decode::reader::SliceReader;
 
 use cfp::CfpBlock;
+#[cfg(test)]
+use header::TOTAL_HEADER_SIZE;
 use header::{
     DataHeader, POINTER_COUNT, PTR_CFP, PTR_ELV, PTR_PHI, PTR_RAD, PTR_REF, PTR_RHO, PTR_SW,
-    PTR_VEL, PTR_VOL, PTR_ZDR, TOTAL_HEADER_SIZE,
+    PTR_VEL, PTR_VOL, PTR_ZDR,
 };
 use info_blocks::{DataBlockId, ElevationBlock, RadialBlock, VolumeBlock};
 use moment::MomentBlock;
@@ -127,10 +129,11 @@ pub(crate) fn parse<'a>(
         }
     }
 
-    // Cosmetic: point header_offset so it can't get optimised away
-    // pre-Phase-7 wiring. Once Phase 7 lands, the adapter consumes
-    // header_offset to compute relative file positions.
-    let _ = (header_offset, TOTAL_HEADER_SIZE);
+    // `header_offset` is consumed by the debug_assert above; once
+    // Phase 7 wires the parser into the adapter, the adapter will
+    // also use it to compute relative file positions for error
+    // reporting.
+    let _ = header_offset;
 
     Ok(Msg31 {
         header,

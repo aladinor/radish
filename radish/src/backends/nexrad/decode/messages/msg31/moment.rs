@@ -241,6 +241,17 @@ mod tests {
     }
 
     #[test]
+    fn moment_block_errors_on_truncated_gate_bytes() {
+        // Descriptor declares 100 gates × 1 byte but only 4 bytes
+        // of gate data follow. `MomentBlock::read` must error
+        // rather than panic / return junk.
+        let mut bytes = descriptor_8bit(100);
+        bytes.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut r = SliceReader::new(&bytes);
+        assert!(MomentBlock::read(&mut r).is_err());
+    }
+
+    #[test]
     fn moment_block_supports_16bit_gates() {
         // 2 16-bit gates with scale=1, offset=0 so raw values pass
         // through unchanged.

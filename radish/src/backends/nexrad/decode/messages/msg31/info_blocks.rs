@@ -191,16 +191,6 @@ impl RadialBlock {
             vertical_calibration_constant_db,
         })
     }
-
-    fn _ensure_unused(&self) {
-        // Suppress dead-field warnings on legacy-only fields used only
-        // via PartialEq derivation in tests.
-        let _ = (
-            self.horizontal_channel_noise_level_dbm,
-            self.vertical_channel_noise_level_dbm,
-            self.radial_flags,
-        );
-    }
 }
 
 #[cfg(test)]
@@ -243,6 +233,9 @@ mod tests {
         let bytes = legacy_vol_payload();
         let mut r = SliceReader::new(&bytes);
         let v = VolumeBlock::read(&mut r).unwrap();
+        // Cover every field that comes in from the wire so a future
+        // typo in `read()` (e.g. swapping H tx_power and V tx_power
+        // since they're both Real4) is caught.
         assert_eq!(v.lrtup, 44);
         assert_eq!(v.major_version, 2);
         assert_eq!(v.minor_version, 0);
@@ -250,7 +243,13 @@ mod tests {
         assert!((v.longitude_degrees - (-88.084)).abs() < 1e-3);
         assert_eq!(v.site_height_m, 202);
         assert_eq!(v.tower_height_m, 29);
+        assert!((v.calibration_constant_db - 36.0).abs() < 1e-6);
+        assert!((v.horizontal_shv_tx_power_kw - 750.0).abs() < 1e-6);
+        assert!((v.vertical_shv_tx_power_kw - 750.0).abs() < 1e-6);
+        assert!((v.system_differential_reflectivity_db - 0.5).abs() < 1e-6);
+        assert!((v.initial_system_differential_phase_deg - 90.0).abs() < 1e-6);
         assert_eq!(v.volume_coverage_pattern_number, 212);
+        assert_eq!(v.processing_status, 0);
         assert!(
             v.zdr_bias_estimate_weighted_mean.is_none(),
             "legacy block doesn't carry zdr_bias"
