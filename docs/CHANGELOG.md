@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NEXRAD: typed MSG_31 (Digital Radar Data Generic Format)
+  parser** at `radish/src/backends/nexrad/decode/messages/msg31/`
+  — Phase 3 of plan 0003. Decodes the 72-byte per-radial data
+  header (ICD §3.2.4.17.1 Table XVII-A: ICAO + collection time +
+  azimuth/elevation + 10 data block pointers), the VOL/ELV/RAD
+  info blocks (Tables XVII-E/F/H, with legacy 16-byte and modern
+  24-byte RAD layouts auto-detected via `lrtup`; legacy 40-byte
+  and modern 48-byte VOL likewise), the generic moment block
+  shared by REF/VEL/SW/ZDR/PHI/RHO (Table XVII-B descriptor with
+  ICD Table XVII-I gate decoding: `raw=0 → BelowThreshold`,
+  `raw=1 → RangeFolded`, else `(raw - offset) / scale`), and the
+  CFP block (Table XVII-Q clutter-status / power overlay). The
+  message-iteration loop now dispatches MSG_31 to the typed
+  parser via `MessagePayload::Msg31(Box<msg31::Msg31<'a>>)`;
+  Skip / fixed-frame messages keep their `Raw` payload until
+  Phase 4. Live KLOT fixture validates: 7200 typed MSG_31s
+  parsed, first radial's VOL block carries KLOT's published
+  lat/lon (~41.6°N, -88.1°W), modified Julian date matches
+  2025-12-10 (20433). (#14)
 - **NEXRAD: internal byte-level decoder infrastructure** at
   `radish/src/backends/nexrad/decode/` — first installment toward
   replacing the runtime dependency on `danielway/nexrad`.
