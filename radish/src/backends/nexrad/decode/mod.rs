@@ -17,6 +17,7 @@ pub(super) mod error;
 pub(super) mod header;
 pub(super) mod messages;
 pub(super) mod model;
+pub(super) mod products;
 pub(super) mod reader;
 pub(super) mod record;
 pub(super) mod volume;
