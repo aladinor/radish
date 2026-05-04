@@ -198,25 +198,20 @@ Longer-form docs live in `docs/` (read these when more context is needed than th
 - `docs/CHANGELOG.md` — version history (Keep a Changelog format)
 - `docs/README.md` — index of the `docs/` folder
 
-## Performance gotcha — `nexrad/parallel` feature
+## NEXRAD decoder location
 
-The `nexrad` crate's `parallel` feature gates rayon-based parallel LDM bzip2
-decompression in `nexrad-data`. **It must stay enabled.** Disabling it (or
-setting `default-features = false` without re-adding `parallel`) silently
-drops decode throughput by ~6× with no test failure — every test still passes,
-just slowly.
+The NEXRAD Level 2 / Archive II decoder lives in-tree at
+`radish/src/backends/nexrad/decode/`. As of Phase 7 of plan 0003 it
+is the production read path for `NexradBackend` — there are no
+upstream `nexrad`/`nexrad-data`/`nexrad-decode`/`nexrad-model`
+runtime dependencies. The upstream `nexrad` crate is a
+`[dev-dependencies]`-only side-by-side reference for
+`radish/tests/test_nexrad_internal_parity.rs`.
 
-The minimum correct feature set in the workspace `Cargo.toml`:
-
-```toml
-nexrad = {
-    version = "1.0.0-rc.4",
-    default-features = false,
-    features = ["model", "decode", "data", "chrono", "parallel"],
-}
-```
-
-This skips `image` (render), `reqwest`/`tokio` (aws), and `nexrad-process`
-while keeping the parallel decompression path. If you change this, re-run
-`python/examples/bench_nexrad_vs_xradar.py` and confirm the speedup is still
-in the 10×+ range — anything in the 2–3× range means `parallel` is off.
+Parallel LDM bzip2 decompression lives at
+`decode::record::decompress_all` and uses rayon directly, so the
+~6× speedup the workspace previously got from
+`nexrad/parallel` is now ours to own. The `bench_nexrad_vs_xradar.py`
+benchmark is the regression gate — if `decompress_all` ever stops
+parallelising, that bench drops to 2-3× over xradar instead of
+10×+.
