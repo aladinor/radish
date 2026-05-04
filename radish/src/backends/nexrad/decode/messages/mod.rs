@@ -109,7 +109,16 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
             // typed variants).
             let payload = match header.message_type {
                 MessageType::DigitalRadarDataGenericFormat => {
-                    let msg = msg31::parse(&mut reader, offset)?;
+                    // `msg31::parse` resolves block pointers as
+                    // offsets from the MSG_31 wire-body start
+                    // (= reader.position() right after the 28-byte
+                    // TCM + Table II header was consumed). This
+                    // matches `danielway/nexrad`'s `start_position`
+                    // and xradar's `block_pointer + 12 + LEN_MSG_HEADER`
+                    // arithmetic. **Not** the start of the message
+                    // including the TCM prefix.
+                    let body_start = reader.position();
+                    let msg = msg31::parse(&mut reader, body_start)?;
                     MessagePayload::Msg31(Box::new(msg))
                 }
                 _ => {

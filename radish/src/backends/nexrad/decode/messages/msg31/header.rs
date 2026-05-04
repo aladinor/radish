@@ -1,7 +1,11 @@
 //! MSG_31 per-radial data header (ICD §3.2.4.17.1 Table XVII-A).
 //!
-//! Layout: 32 bytes of fixed fields followed by 10 × `u32` data
-//! block pointers (one per possible block, set to 0 if unused).
+//! Layout: 32 bytes of fixed fields followed by **9 (Build-11) or
+//! 10 (Build-12+) `u32` data block pointers**. The CFP (Clutter
+//! Filter Power) block was added in Build 12 (March 2012), so older
+//! files reserve only 9 pointer slots. `DataHeader::read` detects
+//! the layout by inspecting the smallest non-zero pointer value —
+//! `68` → 9-slot legacy, `72` → 10-slot modern.
 //!
 //! | Offset | Bytes | Field                                                  |
 //! |-------:|------:|--------------------------------------------------------|
@@ -21,12 +25,16 @@
 //! |     28 |     1 | Radial Spot Blanking Status                            |
 //! |     29 |     1 | Azimuth Indexing Mode (0=none, 1..100 = 0.01..1.00°)   |
 //! |     30 |     2 | Data Block Count (4..10)                               |
-//! |  32-71 |    40 | Data Block Pointers ×10 (u32 each, 0 = unused)         |
+//! |  32-67 |    36 | Data Block Pointers ×9 (Build-11)                      |
+//! |  32-71 |    40 | Data Block Pointers ×10 (Build-12+; adds CFP)          |
 //!
-//! Pointers are byte offsets **relative to the start of the
-//! MessageHeader** (i.e. relative to the 12-byte TCM prefix's first
-//! byte, _not_ to this header). Layout of the pointer array (per
-//! ICD Table XVII-A, in order):
+//! Pointers are byte offsets **relative to the start of the MSG_31
+//! wire body** (= the position right after the 28-byte combined TCM
+//! + Table II header). Equivalent to `danielway/nexrad`'s
+//! `start_position` (`digital_radar_data::Message::parse`) and
+//! xradar's `block_pointer + 12 + LEN_MSG_HEADER` arithmetic
+//! (`nexrad_level2.py:877`). Layout of the pointer array (per ICD
+//! Table XVII-A, in order):
 //!
 //! | Index | Block                                |
 //! |------:|--------------------------------------|
@@ -47,14 +55,30 @@ use crate::backends::nexrad::decode::reader::SliceReader;
 /// Width of the fixed (non-pointer) portion of the header.
 pub(crate) const FIXED_HEADER_SIZE: usize = 32;
 
-/// Number of data block pointers following the fixed header.
+/// Maximum number of data block pointers (Build-12+ files).
 pub(crate) const POINTER_COUNT: usize = 10;
+
+/// Pointer-slot count for pre-Build-12 (≤2011) NEXRAD files. The
+/// CFP (Clutter Filter Power) block was added in Build 12 (March
+/// 2012), so older files reserve only 9 pointer slots in the
+/// MSG_31 header. Detection: `pointers[0]` always equals the
+/// header's wire size by construction (first data block follows
+/// the header immediately) — `68` → 9 slots, `72` → 10 slots.
+pub(crate) const LEGACY_POINTER_COUNT: usize = 9;
 
 /// Width of one pointer.
 pub(crate) const POINTER_SIZE: usize = 4;
 
-/// Total wire width of the data header (fixed fields + pointer array).
-pub(crate) const TOTAL_HEADER_SIZE: usize = FIXED_HEADER_SIZE + POINTER_COUNT * POINTER_SIZE;
+/// Wire width of the Build-12+ data header (32 fixed + 10×4 pointers).
+pub(crate) const MODERN_HEADER_SIZE: usize = FIXED_HEADER_SIZE + POINTER_COUNT * POINTER_SIZE;
+
+/// Wire width of the Build-11 data header (32 fixed + 9×4 pointers).
+pub(crate) const LEGACY_HEADER_SIZE: usize =
+    FIXED_HEADER_SIZE + LEGACY_POINTER_COUNT * POINTER_SIZE;
+
+/// Backwards-compatible alias for tests written against the
+/// modern (Build-12+) layout.
+pub(crate) const TOTAL_HEADER_SIZE: usize = MODERN_HEADER_SIZE;
 
 /// Pointer-array index for each block type. Values are stable per
 /// ICD Table XVII-A and used by the dispatcher to route each
@@ -89,15 +113,35 @@ pub(crate) struct DataHeader {
     pub(crate) radial_spot_blanking_status: u8,
     pub(crate) azimuth_indexing_mode: u8,
     pub(crate) data_block_count: u16,
-    /// Byte offsets relative to the start of the message (the
-    /// 12-byte TCM prefix's first byte), one per block index per
-    /// ICD Table XVII-A. Zero means "block absent for this
-    /// radial."
+    /// Byte offsets to data blocks, **relative to the start of the
+    /// MSG_31 wire body** (= the position right after the
+    /// 28-byte combined TCM + Table II header, which is also where
+    /// `DataHeader::read` begins consuming bytes — matches
+    /// `danielway/nexrad`'s `start_position` semantics in
+    /// `digital_radar_data::Message::parse`). Zero means "block
+    /// absent for this radial."
     pub(crate) pointers: [u32; POINTER_COUNT],
+    /// Number of pointer slots actually present in the on-wire
+    /// header. 9 for Build-11 (pre-March-2012, no CFP block),
+    /// 10 for Build-12+. Only `pointers[..pointer_slot_count]` are
+    /// meaningful — slots beyond are zero-initialized.
+    pub(crate) pointer_slot_count: u8,
 }
 
 impl DataHeader {
-    /// Parse exactly `TOTAL_HEADER_SIZE` (72) bytes from `reader`.
+    /// Wire size of this on-wire header (varies by build). 68 bytes
+    /// for Build-11 (9 pointer slots), 72 bytes for Build-12+ (10
+    /// pointer slots). Used by `msg31::parse` to compute absolute
+    /// block-target byte offsets.
+    pub(crate) fn wire_size(&self) -> usize {
+        FIXED_HEADER_SIZE + usize::from(self.pointer_slot_count) * POINTER_SIZE
+    }
+
+    /// Parse the on-wire data header. Consumes 68 bytes for Build-11
+    /// (pre-Build-12, 9 pointer slots) or 72 bytes for Build-12+
+    /// (10 pointer slots). Detection is by `pointers[0]` — the
+    /// first block always immediately follows the header, so its
+    /// pointer value is the header's wire size by construction.
     pub(crate) fn read(reader: &mut SliceReader<'_>) -> Result<Self> {
         let radar_id_bytes = reader.take_bytes(4)?;
         let mut radar_identifier = [0u8; 4];
@@ -119,10 +163,35 @@ impl DataHeader {
         let azimuth_indexing_mode = reader.read_u8()?;
         let data_block_count = reader.read_u16_be()?;
 
+        // Read 9 pointer slots (always present in both Build-11 and
+        // Build-12+). Then detect the on-wire layout: the smallest
+        // non-zero pointer always equals the header's wire size by
+        // construction (the first present block immediately follows
+        // the header). 68 → Build-11 (9 slots, no CFP — pre-March
+        // 2012), anything else → Build-12+ (10 slots, read one more
+        // pointer). Using the smallest non-zero value rather than
+        // `pointers[0]` directly handles intermediate radials where
+        // the VOL block is absent (`pointers[0] == 0`).
         let mut pointers = [0u32; POINTER_COUNT];
-        for slot in pointers.iter_mut() {
+        for slot in pointers.iter_mut().take(LEGACY_POINTER_COUNT) {
             *slot = reader.read_u32_be()?;
         }
+        let smallest_nonzero = pointers
+            .iter()
+            .take(LEGACY_POINTER_COUNT)
+            .copied()
+            .filter(|p| *p != 0)
+            .min();
+        let pointer_slot_count: u8 = if smallest_nonzero == Some(LEGACY_HEADER_SIZE as u32) {
+            // Build-11: 9 slots. Don't read a 10th — those bytes
+            // are the first data block's content.
+            LEGACY_POINTER_COUNT as u8
+        } else {
+            // Build-12+ (or all-zero / synthetic): 10 slots. Read
+            // the 10th pointer to consume the full 72-byte header.
+            pointers[LEGACY_POINTER_COUNT] = reader.read_u32_be()?;
+            POINTER_COUNT as u8
+        };
 
         Ok(Self {
             radar_identifier,
@@ -141,6 +210,7 @@ impl DataHeader {
             azimuth_indexing_mode,
             data_block_count,
             pointers,
+            pointer_slot_count,
         })
     }
 
@@ -175,10 +245,11 @@ mod tests {
         buf.push(0); // spot_blanking
         buf.push(0); // azimuth_indexing_mode
         buf.extend_from_slice(&10u16.to_be_bytes()); // data_block_count
-                                                     // 10 pointers, all populated.
+                                                     // 10 pointers, all populated. pointers[0] = 72
+                                                     // signals Build-12+ layout per `DataHeader::read`.
+        let modern_first_ptr = MODERN_HEADER_SIZE as u32; // 72
         for idx in 0..POINTER_COUNT as u32 {
-            // arbitrary plausible offsets
-            buf.extend_from_slice(&(120 + idx * 1000).to_be_bytes());
+            buf.extend_from_slice(&(modern_first_ptr + idx * 1000).to_be_bytes());
         }
         debug_assert_eq!(buf.len(), TOTAL_HEADER_SIZE);
         buf
@@ -213,10 +284,85 @@ mod tests {
         assert_eq!(h.radial_spot_blanking_status, 0);
         assert_eq!(h.azimuth_indexing_mode, 0);
         assert_eq!(h.data_block_count, 10);
-        // Every pointer populated to its expected value.
+        // Every pointer populated to its expected value (Build-12+
+        // layout: pointers[0] = 72, then +1000 per slot).
+        let modern_first_ptr = MODERN_HEADER_SIZE as u32;
         for idx in 0..POINTER_COUNT {
-            assert_eq!(h.pointers[idx], 120 + idx as u32 * 1000);
+            assert_eq!(h.pointers[idx], modern_first_ptr + idx as u32 * 1000);
         }
+        assert_eq!(
+            h.pointer_slot_count, POINTER_COUNT as u8,
+            "Build-12+ layout (pointers[0] == 72) → 10 slots"
+        );
+        assert_eq!(h.wire_size(), MODERN_HEADER_SIZE);
+    }
+
+    /// Build a 68-byte pre-Build-12 (Build-11.x) data header. Mirrors
+    /// the wire layout actually observed in
+    /// `KVNX20110520_000442_V06`: 32-byte fixed header, 9 pointer
+    /// slots, no CFP. The first pointer's value is exactly the
+    /// header's wire size (68), which is the detection signal.
+    fn build11_kvnx_sample() -> Vec<u8> {
+        let mut buf = Vec::with_capacity(LEGACY_HEADER_SIZE);
+        buf.extend_from_slice(b"KVNX");
+        buf.extend_from_slice(&282u32.to_be_bytes());
+        buf.extend_from_slice(&15_480u16.to_be_bytes());
+        buf.extend_from_slice(&73u16.to_be_bytes());
+        buf.extend_from_slice(&237.27_f32.to_be_bytes());
+        buf.push(0);
+        buf.push(0);
+        buf.extend_from_slice(&5_624u16.to_be_bytes());
+        buf.push(2);
+        buf.push(3); // radial_status = ScanStart
+        buf.push(1);
+        buf.push(0);
+        buf.extend_from_slice(&0.6757_f32.to_be_bytes());
+        buf.push(0);
+        buf.push(0);
+        buf.extend_from_slice(&7u16.to_be_bytes()); // 7 valid blocks
+        let legacy_ptrs: [u32; LEGACY_POINTER_COUNT] = [68, 112, 124, 144, 2004, 3224, 5636, 0, 0];
+        for ptr in legacy_ptrs {
+            buf.extend_from_slice(&ptr.to_be_bytes());
+        }
+        debug_assert_eq!(buf.len(), LEGACY_HEADER_SIZE);
+        buf
+    }
+
+    #[test]
+    fn build11_layout_consumes_exactly_68_bytes_with_9_slots() {
+        let bytes = build11_kvnx_sample();
+        let mut r = SliceReader::new(&bytes);
+        let h = DataHeader::read(&mut r).unwrap();
+        assert_eq!(r.position(), LEGACY_HEADER_SIZE);
+        assert_eq!(h.pointer_slot_count, LEGACY_POINTER_COUNT as u8);
+        assert_eq!(h.wire_size(), LEGACY_HEADER_SIZE);
+        assert_eq!(&h.radar_identifier, b"KVNX");
+        assert_eq!(h.data_block_count, 7);
+        assert_eq!(h.pointers[0], 68, "Build-11 first pointer == header size");
+        assert_eq!(h.pointers[6], 5636);
+        assert_eq!(h.pointers[7], 0);
+        assert_eq!(h.pointers[8], 0);
+        assert_eq!(h.pointers[9], 0, "Build-11 has no slot 10");
+    }
+
+    /// Critical: when a Build-11 header is followed by data-block
+    /// bytes, `DataHeader::read` must NOT consume the first 4 bytes
+    /// of the next block as a phantom 10th pointer.
+    #[test]
+    fn build11_layout_does_not_consume_following_data_block_bytes() {
+        let mut bytes = build11_kvnx_sample();
+        // Append what would be the first data block's first 4 bytes
+        // (e.g. `b"DVOL"`). Read must leave these bytes alone.
+        bytes.extend_from_slice(b"DVOL");
+        let mut r = SliceReader::new(&bytes);
+        let _ = DataHeader::read(&mut r).unwrap();
+        assert_eq!(
+            r.position(),
+            LEGACY_HEADER_SIZE,
+            "must stop at byte 68 in Build-11 mode, not at 72"
+        );
+        // The DVOL bytes should still be there for the block parser.
+        assert_eq!(r.remaining(), b"DVOL");
     }
 
     #[test]

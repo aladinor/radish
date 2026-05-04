@@ -56,18 +56,27 @@ pub(crate) struct Msg31<'a> {
 
 /// Parse a single MSG_31 message. The reader must be positioned at
 /// the first byte of the data header — i.e. immediately after the
-/// 28-byte combined TCM + Table II header. `message_start_offset`
-/// is the offset of the message's first byte in the input buffer
-/// (the start of the TCM prefix); pointer values are resolved
-/// against it.
+/// 28-byte combined TCM + Table II header.
+///
+/// `message_start_offset` is the offset of the **MSG_31 wire body**
+/// in the input buffer — i.e. `reader.position()` at the call site,
+/// equivalently `tcm_start + 28`. Block pointers in the on-wire
+/// header are byte offsets relative to this position (matching
+/// `danielway/nexrad`'s `start_position` semantics in
+/// `digital_radar_data::Message::parse`, and `xradar`'s
+/// `block_pointer + 12 + LEN_MSG_HEADER` arithmetic at
+/// `nexrad_level2.py:877`). The argument is kept (rather than
+/// reassigned from `reader.position()` inside) so the caller stays
+/// in control of which position is canonical.
 pub(crate) fn parse<'a>(
     reader: &mut SliceReader<'a>,
     message_start_offset: usize,
 ) -> Result<Msg31<'a>> {
-    let header_offset = reader.position();
-    debug_assert!(
-        header_offset >= message_start_offset,
-        "reader is somewhere before the message — bad call site",
+    debug_assert_eq!(
+        reader.position(),
+        message_start_offset,
+        "reader must be positioned at the MSG_31 wire body start \
+         (= post TCM + Table II header) — see parse() docstring",
     );
     let header = DataHeader::read(reader)?;
 
@@ -83,10 +92,12 @@ pub(crate) fn parse<'a>(
     // into the 8 valid pointer slots. Routing by index would
     // mislabel ZDR's gate bytes as VEL.
     //
-    // Cap to `data_block_count` (clamped to the array bound for
-    // safety), drop zero slots, and sort by ptr so the reader
-    // walks forward.
-    let valid_len = (header.data_block_count as usize).min(POINTER_COUNT);
+    // Cap to the on-wire pointer-slot count (9 for Build-11, 10 for
+    // Build-12+ — exposed by `DataHeader::pointer_slot_count`),
+    // then to `data_block_count`, drop zero slots, and sort by
+    // ptr so the forward-only reader walks forward.
+    let slot_cap = usize::from(header.pointer_slot_count).min(POINTER_COUNT);
+    let valid_len = (header.data_block_count as usize).min(slot_cap);
     let mut sorted_pointers: Vec<u32> = header
         .pointers
         .iter()
@@ -142,8 +153,6 @@ pub(crate) fn parse<'a>(
             }
         }
     }
-
-    let _ = header_offset;
 
     Ok(Msg31 {
         header,
