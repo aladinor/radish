@@ -32,10 +32,7 @@ use crate::backends::nexrad::decode::reader::SliceReader;
 use cfp::CfpBlock;
 #[cfg(test)]
 use header::TOTAL_HEADER_SIZE;
-use header::{
-    DataHeader, POINTER_COUNT, PTR_CFP, PTR_ELV, PTR_PHI, PTR_RAD, PTR_REF, PTR_RHO, PTR_SW,
-    PTR_VEL, PTR_VOL, PTR_ZDR,
-};
+use header::{DataHeader, POINTER_COUNT};
 use info_blocks::{DataBlockId, ElevationBlock, RadialBlock, VolumeBlock};
 use moment::MomentBlock;
 
@@ -74,16 +71,30 @@ pub(crate) fn parse<'a>(
     );
     let header = DataHeader::read(reader)?;
 
-    // Resolve pointers against the message start. Sort by ascending
-    // offset so the reader can walk forward without seeking back.
-    let mut indexed: Vec<(usize, u32)> = header
+    // Resolve pointers and route blocks **by data_name**, not by
+    // slot index. Per empirical observation (matched by both
+    // `danielway/nexrad` and xradar): NEXRAD files pack the
+    // `data_block_count` valid blocks contiguously into the
+    // pointer slots in arrival order, and the slot index in ICD
+    // §3.2.4.17.1 Table XVII-A doesn't determine the block's
+    // type — the 4-byte `DataBlockId.name` does. KLOT surveillance
+    // sweeps demonstrate this: a `data_block_count = 8` radial
+    // with no VEL/SW packs {VOL, ELV, RAD, REF, ZDR, PHI, RHO, CFP}
+    // into the 8 valid pointer slots. Routing by index would
+    // mislabel ZDR's gate bytes as VEL.
+    //
+    // Cap to `data_block_count` (clamped to the array bound for
+    // safety), drop zero slots, and sort by ptr so the reader
+    // walks forward.
+    let valid_len = (header.data_block_count as usize).min(POINTER_COUNT);
+    let mut sorted_pointers: Vec<u32> = header
         .pointers
         .iter()
         .copied()
-        .enumerate()
-        .filter(|(_, ptr)| *ptr != 0)
+        .take(valid_len)
+        .filter(|ptr| *ptr != 0)
         .collect();
-    indexed.sort_by_key(|(_, ptr)| *ptr);
+    sorted_pointers.sort();
 
     let mut volume: Option<VolumeBlock> = None;
     let mut elevation: Option<ElevationBlock> = None;
@@ -96,43 +107,42 @@ pub(crate) fn parse<'a>(
     let mut rho: Option<MomentBlock<'a>> = None;
     let mut cfp: Option<CfpBlock<'a>> = None;
 
-    for (idx, ptr) in indexed {
+    for ptr in sorted_pointers {
         let target = message_start_offset.checked_add(ptr as usize).ok_or(
             NexradDecodeError::InvalidPointerOffset {
-                block: pointer_label(idx),
+                block: "<unknown>",
                 offset: ptr,
                 message_size: 0,
             },
         )?;
-        // Seek forward to the block's start. Pointers must be
-        // non-decreasing per the sort above; if a future ICD
-        // revision shuffles them, the reader's `try_skip_to`
-        // refuses to move backward.
         reader.try_skip_to(target)?;
 
-        // Every block is preceded by a 4-byte DataBlockId. Read
-        // and discard (the block-routing decision is by index, not
-        // by name; the name is debug-only).
-        let _id = DataBlockId::read(reader)?;
-        match idx {
-            PTR_VOL => volume = Some(VolumeBlock::read(reader)?),
-            PTR_ELV => elevation = Some(ElevationBlock::read(reader)?),
-            PTR_RAD => radial = Some(RadialBlock::read(reader)?),
-            PTR_REF => reflectivity = Some(MomentBlock::read(reader)?),
-            PTR_VEL => velocity = Some(MomentBlock::read(reader)?),
-            PTR_SW => spectrum_width = Some(MomentBlock::read(reader)?),
-            PTR_ZDR => zdr = Some(MomentBlock::read(reader)?),
-            PTR_PHI => phi = Some(MomentBlock::read(reader)?),
-            PTR_RHO => rho = Some(MomentBlock::read(reader)?),
-            PTR_CFP => cfp = Some(CfpBlock::read(reader)?),
-            _ => unreachable!("pointer index always < {POINTER_COUNT}"),
+        // Read the 4-byte DataBlockId, then route by `name`.
+        // Spectrum width is `b"SW "` (2-char name padded with
+        // space, per ICD Table XVII-B). Unknown names skip the
+        // block (forward compat with future ICD revisions).
+        let id = DataBlockId::read(reader)?;
+        match &id.name {
+            b"VOL" => volume = Some(VolumeBlock::read(reader)?),
+            b"ELV" => elevation = Some(ElevationBlock::read(reader)?),
+            b"RAD" => radial = Some(RadialBlock::read(reader)?),
+            b"REF" => reflectivity = Some(MomentBlock::read(reader)?),
+            b"VEL" => velocity = Some(MomentBlock::read(reader)?),
+            b"SW " => spectrum_width = Some(MomentBlock::read(reader)?),
+            b"ZDR" => zdr = Some(MomentBlock::read(reader)?),
+            b"PHI" => phi = Some(MomentBlock::read(reader)?),
+            b"RHO" => rho = Some(MomentBlock::read(reader)?),
+            b"CFP" => cfp = Some(CfpBlock::read(reader)?),
+            _ => {
+                // Unknown block type — skip silently so future ICD
+                // revisions don't break us. Reader stays at the
+                // position right after the DataBlockId; the next
+                // pointer's `try_skip_to` will advance over the
+                // unknown payload.
+            }
         }
     }
 
-    // `header_offset` is consumed by the debug_assert above; once
-    // Phase 7 wires the parser into the adapter, the adapter will
-    // also use it to compute relative file positions for error
-    // reporting.
     let _ = header_offset;
 
     Ok(Msg31 {
@@ -150,25 +160,10 @@ pub(crate) fn parse<'a>(
     })
 }
 
-fn pointer_label(idx: usize) -> &'static str {
-    match idx {
-        PTR_VOL => "VOL",
-        PTR_ELV => "ELV",
-        PTR_RAD => "RAD",
-        PTR_REF => "REF",
-        PTR_VEL => "VEL",
-        PTR_SW => "SW",
-        PTR_ZDR => "ZDR",
-        PTR_PHI => "PHI",
-        PTR_RHO => "RHO",
-        PTR_CFP => "CFP",
-        _ => "?",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use header::{PTR_ELV, PTR_REF};
 
     /// Build a minimal MSG_31 payload (header + REF block only).
     /// `message_start_offset` here is 0 since the synthetic input
@@ -327,5 +322,127 @@ mod tests {
         let e = msg.elevation.unwrap();
         assert_eq!(e.lrtup, 12);
         assert!((e.atmospheric_attenuation_db_per_km - (-0.015)).abs() < 1e-6);
+    }
+
+    /// **Audit regression test (HIGH).** Pin the route-by-name
+    /// behavior. ICD §3.2.4.17.1 Table XVII-A lists pointer slots
+    /// in a fixed order (VOL=0, ELV=1, RAD=2, REF=3, VEL=4, SW=5,
+    /// ZDR=6, PHI=7, RHO=8, CFP=9), but real files pack
+    /// `data_block_count` valid blocks contiguously in arrival
+    /// order — so a radial with no VEL/SW (e.g. KLOT surveillance
+    /// sweeps) puts ZDR data into pointer slot 4, which ICD says is
+    /// VEL. The parser must route by `DataBlockId.name`, not by
+    /// slot index, matching xradar and `danielway/nexrad`.
+    ///
+    /// This test puts a `DZDR` block at the slot that ICD
+    /// assigns to VEL and verifies the parser populates
+    /// `differential_reflectivity` (not `velocity`).
+    #[test]
+    fn parse_routes_by_block_name_not_slot_index() {
+        let header_offset = 0usize;
+        let zdr_offset = TOTAL_HEADER_SIZE; // first block right after the 72-byte data header
+
+        let mut buf = Vec::new();
+        // Header — minimal valid radial.
+        buf.extend_from_slice(b"KLOT");
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&0_f32.to_be_bytes());
+        buf.push(0);
+        buf.push(0);
+        buf.extend_from_slice(&500u16.to_be_bytes());
+        buf.push(2);
+        buf.push(1);
+        buf.push(1);
+        buf.push(0);
+        buf.extend_from_slice(&0_f32.to_be_bytes());
+        buf.push(0);
+        buf.push(0);
+        // data_block_count = 5 — the loop iterates slots 0..5 and
+        // skips zero-valued ones, leaving slot 4 (ICD's PTR_VEL
+        // position) as the only one that points at real data.
+        buf.extend_from_slice(&5u16.to_be_bytes());
+
+        // Pointers: put the (non-zero) pointer at slot 4 — ICD's
+        // PTR_VEL position. The block at the offset is `DZDR`, so a
+        // route-by-index parser would mislabel it as velocity; a
+        // route-by-name parser routes correctly.
+        for idx in 0..POINTER_COUNT {
+            let ptr = if idx == 4 { zdr_offset as u32 } else { 0 };
+            buf.extend_from_slice(&ptr.to_be_bytes());
+        }
+        debug_assert_eq!(buf.len(), TOTAL_HEADER_SIZE);
+
+        // ZDR block — `DZDR` id + 24-byte descriptor + 2 gates.
+        buf.extend_from_slice(b"DZDR");
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(&2u16.to_be_bytes());
+        buf.extend_from_slice(&2_000u16.to_be_bytes());
+        buf.extend_from_slice(&250u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0_i16.to_be_bytes());
+        buf.push(0);
+        buf.push(8);
+        buf.extend_from_slice(&10.0_f32.to_be_bytes());
+        buf.extend_from_slice(&100.0_f32.to_be_bytes());
+        buf.extend_from_slice(&[42, 43]);
+
+        let mut r = SliceReader::new(&buf);
+        let msg = parse(&mut r, header_offset).expect("parse");
+
+        // Routing was by name, so the ZDR slot is populated and
+        // VEL stays None — even though the pointer sat in ICD's
+        // PTR_VEL slot.
+        assert!(
+            msg.zdr.is_some(),
+            "ZDR block must be routed by name, not by slot index"
+        );
+        assert!(
+            msg.velocity.is_none(),
+            "VEL must be None — slot 4 carried a DZDR block, not DVEL"
+        );
+    }
+
+    /// Forward-compat: an unknown 3-letter block name (future ICD
+    /// revision adds a new moment) should be skipped silently
+    /// rather than failing the parse.
+    #[test]
+    fn parse_skips_unknown_block_names_for_forward_compat() {
+        let header_offset = 0usize;
+        let unk_offset = TOTAL_HEADER_SIZE;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"KLOT");
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&0_f32.to_be_bytes());
+        buf.push(0);
+        buf.push(0);
+        buf.extend_from_slice(&500u16.to_be_bytes());
+        buf.push(2);
+        buf.push(1);
+        buf.push(1);
+        buf.push(0);
+        buf.extend_from_slice(&0_f32.to_be_bytes());
+        buf.push(0);
+        buf.push(0);
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        for idx in 0..POINTER_COUNT {
+            let ptr = if idx == 0 { unk_offset as u32 } else { 0 };
+            buf.extend_from_slice(&ptr.to_be_bytes());
+        }
+        // Unknown block name — `DXYZ`. Not a real ICD block.
+        buf.extend_from_slice(b"DXYZ");
+
+        let mut r = SliceReader::new(&buf);
+        let msg = parse(&mut r, header_offset).expect("parse must not fail on unknown block");
+        // Every block field stays None; the parser advanced past
+        // the unknown DataBlockId without exploding.
+        assert!(msg.volume.is_none());
+        assert!(msg.elevation.is_none());
+        assert!(msg.reflectivity.is_none());
+        assert!(msg.velocity.is_none());
     }
 }
