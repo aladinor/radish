@@ -82,6 +82,70 @@ fn walks_klot_fixture_and_finds_msg31_records() {
     );
 }
 
+/// **KILX on-wire fidelity test.** Pins our decoder to the
+/// ground-truth byte content: `KILX20230629_154426_V06` contains
+/// 6840 MSG_31 records — including 360 in elevation 11 — at
+/// consistent 7,840-byte strides, all with valid ICD §3.2.4.17
+/// fields (monotonic timestamps, sequential azimuth_numbers,
+/// `spot_blank=0`, `radial_status=1`). Both our `decode_volume`
+/// and `danielway/nexrad` correctly read all 6840.
+///
+/// xradar reports 358 in sweep_10 (= 6838 total) by hard-coding
+/// "exactly 120 messages per LDM record" in its byte walker
+/// (xradar/io/backends/nexrad_level2.py:397, formula
+/// `(recnum - 134) // 120`). LDM record 49 of this fixture
+/// actually contains 122 messages — 120 MSG_31 + 2 MSG_2 — so
+/// xradar drops 2 valid MSG_31s at the tail of LDM 49. Per ICD
+/// there is no field that justifies dropping az_num=119/120;
+/// xradar's stride assumption is the bug.
+///
+/// This test is the canary: if it ever fails, either our walker
+/// regressed or the fixture changed.
+#[test]
+#[ignore = "needs RADISH_NEXRAD_FIXTURE_DIR"]
+fn decode_volume_kilx_reads_all_6840_on_wire_records() {
+    let Some(dir) = std::env::var_os("RADISH_NEXRAD_FIXTURE_DIR") else {
+        eprintln!("skipping: RADISH_NEXRAD_FIXTURE_DIR not set");
+        return;
+    };
+    let path = std::path::PathBuf::from(dir).join("KILX20230629_154426_V06");
+    if !path.is_file() {
+        eprintln!("skipping: KILX fixture not found");
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("read KILX");
+    let scan = super::decode_volume(&bytes).expect("decode_volume");
+
+    let total_rays: usize = scan.sweeps.iter().map(|s| s.radials.len()).sum();
+    let per_sweep: Vec<usize> = scan.sweeps.iter().map(|s| s.radials.len()).collect();
+    eprintln!(
+        "KILX via decode_volume: {} sweeps, {} total rays, per-sweep counts: {:?}",
+        scan.sweeps.len(),
+        total_rays,
+        per_sweep
+    );
+
+    assert_eq!(
+        total_rays, 6840,
+        "expected 6840 on-wire MSG_31 records; xradar reports 6838 due to \
+         its 120-msg-per-LDM stride bug — but radish must read what's \
+         actually in the bytes."
+    );
+
+    let sweep_10 = scan
+        .sweeps
+        .get(10)
+        .expect("KILX VCP-212 must have ≥ 11 sweeps");
+    assert_eq!(
+        sweep_10.radials.len(),
+        360,
+        "sweep_10 must have 360 rays (full circle at 1.0° az_spacing); \
+         xradar returns 358 because LDM record 49 contains 122 messages \
+         (120 MSG_31 + 2 MSG_2) and xradar's hard-coded 120-msg stride \
+         drops the trailing 2 MSG_31s."
+    );
+}
+
 /// Phase 5: confirm `decode_volume` on the live KLOT fixture
 /// produces a self-contained `Scan` with the expected sweep
 /// structure (13 sweeps from KLOT VCP-32 / 12, KLOT lat/lon in the
