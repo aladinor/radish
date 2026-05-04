@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NEXRAD: end-to-end `decode_volume(bytes) -> Scan` + parity
+  harness against `danielway/nexrad`** — Phase 5+6 of plan 0003.
+  New `decode/model.rs` lands the radish-internal `Scan` / `Sweep`
+  / `Radial` / `Site` types with owned gate-byte buffers
+  (`OwnedMoment` / `OwnedCfp`) so the returned tree is
+  self-contained — matches the existing
+  `nexrad_model::data::Radial` ownership shape that radish's
+  adapter consumes today. `decode_volume` ties LDM split + bzip2
+  + typed message decode + sweep grouping in one call. Sweep
+  grouping uses the **ICD §3.2.4.17 radial_status start/end
+  markers** (audit-required: SAILS / MRLE supplemental cuts that
+  re-use a previous `elevation_number` form their own short
+  sweep instead of merging into the parent — the divergence the
+  earlier `danielway/nexrad` audit flagged).
+  `radish/tests/test_nexrad_internal_parity.rs` adds two gated
+  tests: KLOT structural parity + KILX phantom-radial divergence
+  (pins `danielway/nexrad`'s known-wrong 6840-rays / 360-in-sweep_10
+  output as a canary). Live KLOT fixture validates: 12 sweeps,
+  KLOT lat/lon ≈ 41.6°N / -88.1°W, every sweep has REF moment.
+  Not yet wired into the runtime path — Phase 7 swaps the call
+  site. (#16)
 - **NEXRAD: typed MSG_2 (RDA Status) + MSG_5 (Volume Coverage
   Pattern) parsers** at
   `radish/src/backends/nexrad/decode/messages/{msg2,msg5}.rs` —

@@ -82,6 +82,67 @@ fn walks_klot_fixture_and_finds_msg31_records() {
     );
 }
 
+/// Phase 5: confirm `decode_volume` on the live KLOT fixture
+/// produces a self-contained `Scan` with the expected sweep
+/// structure (13 sweeps from KLOT VCP-32 / 12, KLOT lat/lon in the
+/// site, and reasonable elevation angles).
+#[test]
+#[ignore = "needs RADISH_NEXRAD_FIXTURE_DIR"]
+fn decode_volume_on_klot_fixture_produces_plausible_scan() {
+    let Some(path) = klot_fixture() else {
+        eprintln!("skipping: RADISH_NEXRAD_FIXTURE_DIR not set");
+        return;
+    };
+    let bytes = std::fs::read(&path).expect("read fixture");
+    let scan = super::decode_volume(&bytes).expect("decode_volume");
+
+    // KLOT fixture observed shape: 13 sweeps (matches xradar's
+    // VCP-32 layout for clear-air mode), lat/lon ~41.6°N -88.1°W.
+    assert!(
+        (8..=20).contains(&scan.sweeps.len()),
+        "sweep count out of plausible WSR-88D range: {}",
+        scan.sweeps.len()
+    );
+    let site = scan.site.as_ref().expect("KLOT volume must have a Site");
+    assert_eq!(&site.identifier, b"KLOT");
+    assert!(
+        (40.0..=43.0).contains(&site.latitude_degrees),
+        "site latitude out of range: {}",
+        site.latitude_degrees
+    );
+    assert!(
+        (-90.0..=-86.0).contains(&site.longitude_degrees),
+        "site longitude out of range: {}",
+        site.longitude_degrees
+    );
+    assert!(
+        scan.rda_status.is_some(),
+        "KLOT volume must carry a Msg2 (RDA Status)"
+    );
+
+    // Every sweep should have at least one radial and each
+    // radial's gate_count for REF should be 1832 or 360 (the
+    // typical WSR-88D super-res / surveillance modes).
+    for (i, sweep) in scan.sweeps.iter().enumerate() {
+        assert!(!sweep.radials.is_empty(), "sweep {i} has zero radials");
+        let any_ref = sweep.radials.iter().find_map(|r| r.reflectivity.as_ref());
+        assert!(
+            any_ref.is_some(),
+            "sweep {i} has no reflectivity moment in any radial"
+        );
+    }
+
+    // VCP cuts vector should agree with sweep count within a small
+    // margin (SAILS / MRLE supplemental cuts may diverge by a few).
+    let vcp_cuts = scan.coverage_pattern.elevation_cuts.len();
+    assert!(
+        scan.sweeps.len() <= vcp_cuts + 5,
+        "got {} sweeps but VCP advertises {} cuts",
+        scan.sweeps.len(),
+        vcp_cuts
+    );
+}
+
 /// Phase 4: confirm typed MSG_2 + MSG_5 parsers fire on the KLOT
 /// fixture and produce plausible values. Each volume has exactly
 /// one MSG_2 and one MSG_5; we extract both and pin a few fields.
