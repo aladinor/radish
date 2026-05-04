@@ -25,6 +25,17 @@ mod decode;
 mod mapping;
 pub(crate) mod sniff;
 
+/// Time the in-tree decode pipeline only (no adapter to
+/// `VolumeData`). Returns `Ok(())` so callers can `time` it
+/// without holding the produced `Scan` open. Hidden from the public
+/// docs — exposed only so `tests/test_decode_speed_comparison.rs`
+/// can do head-to-head timing against `nexrad::data::volume::File::scan()`.
+#[doc(hidden)]
+pub fn time_decode_volume(bytes: &[u8]) -> Result<()> {
+    let _scan = decode::decode_volume(bytes).map_err(|e| RadishError::Decode(e.to_string()))?;
+    Ok(())
+}
+
 /// Backend for NEXRAD Level 2 Archive II files (AR2V).
 pub struct NexradBackend;
 

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **NEXRAD: MSG_31 data-block routing now goes by
+  `DataBlockId.name`, not by ICD-slot index.** Real files pack
+  the `data_block_count` valid blocks contiguously into the
+  pointer slots in arrival order; the slot index doesn't
+  determine the block type. Pre-fix, KLOT VCP-32 surveillance
+  sweeps surfaced spurious `VRADH` / `WRADH` moments because
+  pointer slot 4 (ICD's PTR_VEL) actually carried a `DZDR`
+  block — its gate bytes got mislabeled as velocity.
+  Post-fix matches xradar and `danielway/nexrad`'s name-based
+  routing. Two new regression tests pin the behavior. (#17)
+
 ### Changed
 
 - **NEXRAD: replaced `nexrad` / `nexrad-decode` / `nexrad-data` /
