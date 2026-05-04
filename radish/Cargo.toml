@@ -20,6 +20,7 @@ nexrad = { workspace = true }
 nexrad-model = { workspace = true }
 byteorder = { workspace = true }
 bytemuck = { workspace = true }
+bzip2 = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
@@ -33,6 +34,9 @@ proptest = { version = "1.5", default-features = false, features = ["std"] }
 # SHA-256 verification of NEXRAD test-fixture corpus. See
 # `radish/tests/fixtures/CORPUS.md` for the canonical sums.
 sha2 = "0.10"
+# Parameterized tests for the message-iteration loop's boundary-resync
+# state space (under-read / exact / over-read / past-buffer).
+rstest = "0.21"
 
 [[bench]]
 name = "nexrad"

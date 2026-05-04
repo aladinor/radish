@@ -7,7 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing here yet — open a PR to start populating._
+### Added
+
+- **NEXRAD: internal byte-level decoder infrastructure** at
+  `radish/src/backends/nexrad/decode/` — first installment toward
+  replacing the runtime dependency on `danielway/nexrad`.
+  Lands typed `NexradDecodeError`, `SliceReader` with the
+  load-bearing `try_skip_to(target)` resync that fixes the upstream
+  phantom-radial bug, LDM record splitter + bzip2 (parallel via
+  rayon), optional 24-byte Volume Header parser, `MessageHeader`
+  per ICD §3.1.3 + §3.2.4.1 (28-byte: 12 TCM + 16 Table II logical),
+  `MessageType` enum with explicit `Skip(u8)` for forward-compat,
+  and a `decode_messages` iteration loop with the boundary fix from
+  day one. Handles ICD Note 7's 0xFFFF variable-length sentinel and
+  walks past LDM bzip2 trailing zero-padded frames silently. Not yet
+  wired to the production read path — `read_nexrad` / `scan_nexrad`
+  still go through the upstream `nexrad-data` decoder. Phase 7 of
+  plan 0003 will swap the call site once Phase 3-6 fill in the
+  per-message parsers and side-by-side parity tests. (#13)
+- **NEXRAD test-corpus infrastructure** — new
+  `RADISH_NEXRAD_FIXTURE_DIR` env-var convention (legacy single-file
+  `RADISH_NEXRAD_FIXTURE` still honoured); both Rust
+  (`radish/tests/test_nexrad.rs`) and Python
+  (`python/tests/conftest.py`) test harnesses resolve fixtures
+  from the directory with consistent fallback ordering. New
+  `radish/tests/fixtures/CORPUS.md` documents the canonical KLOT +
+  KILX corpus with SHA-256 sums, S3 URLs, `curl` / `fsspec`
+  download recipes, and a deferred-fixture roster. New
+  `corpus_sha256s_match_documentation` test pins file contents
+  against documented sums so a maintainer who replaces a fixture
+  with a slightly different S3 version gets a loud failure pointing
+  at CORPUS.md before any parity test runs against drift-data. New
+  `nexrad_kilx_fixture` Python fixture + `kilx_fixture()` Rust
+  helper queued for the upcoming Phase 2 regression test. (#12)
+
+### Changed
+
+- **CI: Python matrix trimmed to 3.12 + 3.13** (was 3.9, 3.10, 3.11,
+  3.12). Drivers: Python 3.9 reached EOL on 2025-10-31; the new
+  internal decoder uses PEP 604 (`Path | None`) syntax requiring
+  3.10+; consolidating now avoids re-trimming as the decoder grows.
+  `python/pyproject.toml` `requires-python = ">=3.12"`. Wheel matrix
+  drops from 12 to 6 (3 targets × 2 versions). Lint and type-check
+  jobs bumped 3.11 → 3.13. (#12)
+- **`docs/RELEASING.md`** — release matrix now exports
+  `RADISH_NEXRAD_FIXTURE_DIR=$HOME/.cache/radish/fixtures/nexrad`
+  and runs `cargo test -- --ignored` for the parity suite that
+  lands in a later phase. Wheel-count claim updated to 6. (#12, #13)
 
 ## [0.2.0] - 2026-05-03
 
