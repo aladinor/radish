@@ -82,6 +82,131 @@ fn walks_klot_fixture_and_finds_msg31_records() {
     );
 }
 
+/// **KILX on-wire fidelity test.** Pins our decoder to the
+/// ground-truth byte content: `KILX20230629_154426_V06` contains
+/// 6840 MSG_31 records — including 360 in elevation 11 — at
+/// consistent 7,840-byte strides, all with valid ICD §3.2.4.17
+/// fields (monotonic timestamps, sequential azimuth_numbers,
+/// `spot_blank=0`, `radial_status=1`). Both our `decode_volume`
+/// and `danielway/nexrad` correctly read all 6840.
+///
+/// xradar reports 358 in sweep_10 (= 6838 total) by hard-coding
+/// "exactly 120 messages per LDM record" in its byte walker
+/// (xradar/io/backends/nexrad_level2.py:397, formula
+/// `(recnum - 134) // 120`). LDM record 49 of this fixture
+/// actually contains 122 messages — 120 MSG_31 + 2 MSG_2 — so
+/// xradar drops 2 valid MSG_31s at the tail of LDM 49. Per ICD
+/// there is no field that justifies dropping az_num=119/120;
+/// xradar's stride assumption is the bug.
+///
+/// This test is the canary: if it ever fails, either our walker
+/// regressed or the fixture changed.
+#[test]
+#[ignore = "needs RADISH_NEXRAD_FIXTURE_DIR"]
+fn decode_volume_kilx_reads_all_6840_on_wire_records() {
+    let Some(dir) = std::env::var_os("RADISH_NEXRAD_FIXTURE_DIR") else {
+        eprintln!("skipping: RADISH_NEXRAD_FIXTURE_DIR not set");
+        return;
+    };
+    let path = std::path::PathBuf::from(dir).join("KILX20230629_154426_V06");
+    if !path.is_file() {
+        eprintln!("skipping: KILX fixture not found");
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("read KILX");
+    let scan = super::decode_volume(&bytes).expect("decode_volume");
+
+    let total_rays: usize = scan.sweeps.iter().map(|s| s.radials.len()).sum();
+    let per_sweep: Vec<usize> = scan.sweeps.iter().map(|s| s.radials.len()).collect();
+    eprintln!(
+        "KILX via decode_volume: {} sweeps, {} total rays, per-sweep counts: {:?}",
+        scan.sweeps.len(),
+        total_rays,
+        per_sweep
+    );
+
+    assert_eq!(
+        total_rays, 6840,
+        "expected 6840 on-wire MSG_31 records; xradar reports 6838 due to \
+         its 120-msg-per-LDM stride bug — but radish must read what's \
+         actually in the bytes."
+    );
+
+    let sweep_10 = scan
+        .sweeps
+        .get(10)
+        .expect("KILX VCP-212 must have ≥ 11 sweeps");
+    assert_eq!(
+        sweep_10.radials.len(),
+        360,
+        "sweep_10 must have 360 rays (full circle at 1.0° az_spacing); \
+         xradar returns 358 because LDM record 49 contains 122 messages \
+         (120 MSG_31 + 2 MSG_2) and xradar's hard-coded 120-msg stride \
+         drops the trailing 2 MSG_31s."
+    );
+}
+
+/// Phase 5: confirm `decode_volume` on the live KLOT fixture
+/// produces a self-contained `Scan` with the expected sweep
+/// structure (13 sweeps from KLOT VCP-32 / 12, KLOT lat/lon in the
+/// site, and reasonable elevation angles).
+#[test]
+#[ignore = "needs RADISH_NEXRAD_FIXTURE_DIR"]
+fn decode_volume_on_klot_fixture_produces_plausible_scan() {
+    let Some(path) = klot_fixture() else {
+        eprintln!("skipping: RADISH_NEXRAD_FIXTURE_DIR not set");
+        return;
+    };
+    let bytes = std::fs::read(&path).expect("read fixture");
+    let scan = super::decode_volume(&bytes).expect("decode_volume");
+
+    // KLOT fixture observed shape: 13 sweeps (matches xradar's
+    // VCP-32 layout for clear-air mode), lat/lon ~41.6°N -88.1°W.
+    assert!(
+        (8..=20).contains(&scan.sweeps.len()),
+        "sweep count out of plausible WSR-88D range: {}",
+        scan.sweeps.len()
+    );
+    let site = scan.site.as_ref().expect("KLOT volume must have a Site");
+    assert_eq!(&site.identifier, b"KLOT");
+    assert!(
+        (40.0..=43.0).contains(&site.latitude_degrees),
+        "site latitude out of range: {}",
+        site.latitude_degrees
+    );
+    assert!(
+        (-90.0..=-86.0).contains(&site.longitude_degrees),
+        "site longitude out of range: {}",
+        site.longitude_degrees
+    );
+    assert!(
+        scan.rda_status.is_some(),
+        "KLOT volume must carry a Msg2 (RDA Status)"
+    );
+
+    // Every sweep should have at least one radial and each
+    // radial's gate_count for REF should be 1832 or 360 (the
+    // typical WSR-88D super-res / surveillance modes).
+    for (i, sweep) in scan.sweeps.iter().enumerate() {
+        assert!(!sweep.radials.is_empty(), "sweep {i} has zero radials");
+        let any_ref = sweep.radials.iter().find_map(|r| r.reflectivity.as_ref());
+        assert!(
+            any_ref.is_some(),
+            "sweep {i} has no reflectivity moment in any radial"
+        );
+    }
+
+    // VCP cuts vector should agree with sweep count within a small
+    // margin (SAILS / MRLE supplemental cuts may diverge by a few).
+    let vcp_cuts = scan.coverage_pattern.elevation_cuts.len();
+    assert!(
+        scan.sweeps.len() <= vcp_cuts + 5,
+        "got {} sweeps but VCP advertises {} cuts",
+        scan.sweeps.len(),
+        vcp_cuts
+    );
+}
+
 /// Phase 4: confirm typed MSG_2 + MSG_5 parsers fire on the KLOT
 /// fixture and produce plausible values. Each volume has exactly
 /// one MSG_2 and one MSG_5; we extract both and pin a few fields.

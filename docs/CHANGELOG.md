@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NEXRAD: end-to-end `decode_volume(bytes) -> Scan` + parity
+  harness against `danielway/nexrad`** — Phase 5+6 of plan 0003.
+  New `decode/model.rs` lands the radish-internal `Scan` / `Sweep`
+  / `Radial` / `Site` types with owned gate-byte buffers
+  (`OwnedMoment` / `OwnedCfp`) so the returned tree is
+  self-contained — matches the existing
+  `nexrad_model::data::Radial` ownership shape that radish's
+  adapter consumes today. `decode_volume` ties LDM split + bzip2
+  + typed message decode + sweep grouping in one call. Sweep
+  grouping uses the **ICD §3.2.4.17 radial_status start/end
+  markers** (audit-required: SAILS / MRLE supplemental cuts that
+  re-use a previous `elevation_number` form their own short
+  sweep instead of merging into the parent — the divergence the
+  earlier `danielway/nexrad` audit flagged).
+  `radish/tests/test_nexrad_internal_parity.rs` adds two gated
+  tests: KLOT and KILX structural parity vs `danielway/nexrad`.
+  ICD §3.2.4.17 field-by-field analysis of the previously suspect
+  `KILX20230629_154426_V06` confirmed all 6840 MSG_31 records are
+  on-wire valid (monotonic timestamps, sequential azimuth_numbers,
+  `radial_status=1`, `spot_blank=0`); both our decoder and
+  danielway correctly read all 6840. The retracted xradar issue
+  #376 stands retracted — the off-by-2 was xradar's, traced to
+  its `(recnum - 134) // 120` stride in
+  `xradar/io/backends/nexrad_level2.py:397` hard-coding 120
+  messages per LDM record (LDM 49 of KILX has 122 = 120 MSG_31 +
+  2 MSG_2). Live KLOT fixture: 12 sweeps, KLOT lat/lon ≈
+  41.6°N / -88.1°W, every sweep has REF moment. Not yet wired
+  into the runtime path — Phase 7 swaps the call site. (#16)
 - **NEXRAD: typed MSG_2 (RDA Status) + MSG_5 (Volume Coverage
   Pattern) parsers** at
   `radish/src/backends/nexrad/decode/messages/{msg2,msg5}.rs` —
@@ -50,9 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **NEXRAD: internal byte-level decoder infrastructure** at
   `radish/src/backends/nexrad/decode/` — first installment toward
   replacing the runtime dependency on `danielway/nexrad`.
-  Lands typed `NexradDecodeError`, `SliceReader` with the
-  load-bearing `try_skip_to(target)` resync that fixes the upstream
-  phantom-radial bug, LDM record splitter + bzip2 (parallel via
+  Lands typed `NexradDecodeError`, `SliceReader` with a
+  `try_skip_to(target)` boundary-resync helper for defensive
+  recovery from any future under-read, LDM record splitter + bzip2
+  (parallel via
   rayon), optional 24-byte Volume Header parser, `MessageHeader`
   per ICD §3.1.3 + §3.2.4.1 (28-byte: 12 TCM + 16 Table II logical),
   `MessageType` enum with explicit `Skip(u8)` for forward-compat,
