@@ -15,9 +15,12 @@
 //! particular parser, and we want the loop tested in isolation
 //! before parser bugs can confound the picture.
 
+pub(crate) mod msg31;
+
 use super::error::{NexradDecodeError, Result};
 use super::header::{
-    MessageHeader, LOGICAL_HEADER_SIZE, SEGMENT_FRAME_SIZE, SIZE as HEADER_SIZE, TCM_PREFIX_SIZE,
+    MessageHeader, MessageType, LOGICAL_HEADER_SIZE, SEGMENT_FRAME_SIZE, SIZE as HEADER_SIZE,
+    TCM_PREFIX_SIZE,
 };
 use super::reader::SliceReader;
 
@@ -41,16 +44,16 @@ pub(crate) struct Message<'a> {
 
 /// Payload variants carried alongside the header.
 ///
-/// Phase 2 emits everything as `Raw` (the bytes between the header
-/// and the next message boundary) so the loop's resync semantics can
-/// be exercised without depending on any per-message parser. Phase
-/// 3+4 will introduce typed variants (`Msg31`, `Msg2`, `Msg5`) and
-/// keep `Raw` as a fallback for `MessageType::Skip(_)`.
+/// Phase 3 introduces the typed `Msg31` variant; Phase 4 will add
+/// typed `Msg2` and `Msg5` variants. `Raw` remains for messages we
+/// don't decode (Skip / fixed-frame types we don't consume).
 #[derive(Debug)]
 #[allow(dead_code)] // SegmentedFragment / Reassembled used by tests + later phases.
 pub(crate) enum MessagePayload<'a> {
     /// Raw bytes from the message header to the message boundary.
     Raw(&'a [u8]),
+    /// Decoded MSG_31 (Digital Radar Data Generic Format) message.
+    Msg31(Box<msg31::Msg31<'a>>),
     /// One frame of a fixed-segment message that hasn't been
     /// reassembled yet. The accumulator hands it back to the loop
     /// when it isn't ready to emit the assembled message.
@@ -89,10 +92,21 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
         };
 
         if !header.segmented() {
-            // Variable-length path. Phase 3 will replace
-            // `take_payload_bytes` with the typed MSG_31 parser and
-            // keep the resync behaviour identical.
-            let payload_bytes = take_payload_bytes(&mut reader, &header, offset, bytes.len())?;
+            // Variable-length path. MSG_31 is the typed-parse case
+            // (Phase 3); everything else falls through to a Raw
+            // payload-bytes capture (Phase 4 will add MSG_2, MSG_5
+            // typed variants).
+            let payload = match header.message_type {
+                MessageType::DigitalRadarDataGenericFormat => {
+                    let msg = msg31::parse(&mut reader, offset)?;
+                    MessagePayload::Msg31(Box::new(msg))
+                }
+                _ => {
+                    let payload_bytes =
+                        take_payload_bytes(&mut reader, &header, offset, bytes.len())?;
+                    MessagePayload::Raw(payload_bytes)
+                }
+            };
             // ─── THE FIX ───
             // Always resync to the declared boundary, regardless of
             // whether the parser consumed exactly that many bytes.
@@ -102,7 +116,7 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
             reader.try_skip_to(target)?;
             messages.push(Message {
                 header,
-                payload: MessagePayload::Raw(payload_bytes),
+                payload,
                 offset,
                 size: target - offset,
             });
@@ -276,69 +290,64 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    /// Build a single variable-length (Type 31) message:
+    /// Build a single variable-length message of unknown type
+    /// (`Skip(99)`) using the `0xFFFF` sentinel + extended size
+    /// encoding (ICD Note 7). `logical_size` is the bytes following
+    /// the 12-byte TCM prefix; on-wire span = `12 + logical_size`.
     ///
-    /// * 12-byte zero-filled TCM prefix (ICD §3.1.3).
-    /// * 16-byte Table II header with `message_size_halfwords =
-    ///   declared_halfwords` and `message_type = 31`.
-    /// * `(declared_halfwords * 2 - 16)` bytes of zero-filled payload.
-    ///
-    /// On-wire span = `12 + declared_halfwords * 2`.
-    fn synthesize_msg31(declared_halfwords: u16) -> Vec<u8> {
-        let logical_size = (declared_halfwords as usize) * 2;
+    /// Used by the loop-arithmetic tests so we don't depend on a
+    /// real MSG_31 data-header layout (Phase 3 dispatches MSG_31 to
+    /// the typed parser; Skip stays as `Raw` payload bytes).
+    fn synthesize_skip_message(logical_size: u32) -> Vec<u8> {
         assert!(
-            logical_size >= LOGICAL_HEADER_SIZE,
+            logical_size >= LOGICAL_HEADER_SIZE as u32,
             "logical_size must accommodate the 16-byte Table II header"
         );
-        let total = TCM_PREFIX_SIZE + logical_size;
+        let total = TCM_PREFIX_SIZE + logical_size as usize;
         let mut buf = vec![0u8; total];
         // bytes 0..12 are the zero-filled TCM prefix.
-        buf[12..14].copy_from_slice(&declared_halfwords.to_be_bytes());
-        buf[15] = 31; // message_type
-        buf[24..26].copy_from_slice(&1u16.to_be_bytes()); // segment_count
-        buf[26..28].copy_from_slice(&1u16.to_be_bytes()); // segment_number
+        buf[12..14].copy_from_slice(&VARIABLE_LENGTH_MESSAGE_SIZE.to_be_bytes());
+        buf[15] = 99; // unknown type → Skip(99)
+        let segment_count = ((logical_size >> 16) & 0xFFFF) as u16;
+        let segment_number = (logical_size & 0xFFFF) as u16;
+        buf[24..26].copy_from_slice(&segment_count.to_be_bytes());
+        buf[26..28].copy_from_slice(&segment_number.to_be_bytes());
         buf
     }
 
-    fn synthesize_two_msg31(decl1: u16, decl2: u16) -> Vec<u8> {
-        let mut buf = synthesize_msg31(decl1);
-        buf.extend_from_slice(&synthesize_msg31(decl2));
+    fn synthesize_two_skip(decl1: u32, decl2: u32) -> Vec<u8> {
+        let mut buf = synthesize_skip_message(decl1);
+        buf.extend_from_slice(&synthesize_skip_message(decl2));
         buf
     }
 
     /// **The load-bearing test.** Pin variable-length boundary resync
-    /// across pairs of MSG_31 messages with varying declared sizes.
-    /// Each MSG_31's wire span = `12 + halfwords * 2`, so the second
-    /// message's offset must be `12 + first_halfwords * 2`.
+    /// across pairs of `Skip(_)` messages with varying declared sizes.
+    /// Each message's wire span = `12 + logical_size`, so the second
+    /// message's offset must equal the first's wire span.
     #[rstest]
-    #[case::equal_sizes(32, 32, TCM_PREFIX_SIZE + 64)]
-    #[case::large_then_small(40, 32, TCM_PREFIX_SIZE + 80)]
-    #[case::small_then_large(32, 40, TCM_PREFIX_SIZE + 64)]
+    #[case::equal_sizes(64, 64, TCM_PREFIX_SIZE + 64)]
+    #[case::large_then_small(80, 64, TCM_PREFIX_SIZE + 80)]
+    #[case::small_then_large(64, 80, TCM_PREFIX_SIZE + 64)]
     fn boundary_resync_pins_second_message_offset(
-        #[case] first_halfwords: u16,
-        #[case] second_halfwords: u16,
+        #[case] first_logical: u32,
+        #[case] second_logical: u32,
         #[case] expected_second_offset: usize,
     ) {
-        let bytes = synthesize_two_msg31(first_halfwords, second_halfwords);
+        let bytes = synthesize_two_skip(first_logical, second_logical);
         let messages = decode_messages(&bytes).expect("decode");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].offset, 0);
         assert_eq!(messages[1].offset, expected_second_offset);
-        assert_eq!(
-            messages[0].size,
-            TCM_PREFIX_SIZE + (first_halfwords as usize) * 2
-        );
-        assert_eq!(
-            messages[1].size,
-            TCM_PREFIX_SIZE + (second_halfwords as usize) * 2
-        );
+        assert_eq!(messages[0].size, TCM_PREFIX_SIZE + first_logical as usize);
+        assert_eq!(messages[1].size, TCM_PREFIX_SIZE + second_logical as usize);
     }
 
     #[test]
     fn boundary_resync_target_past_buffer_returns_unexpected_eof() {
-        // 100 halfwords → declared logical size 200 bytes, wire span
-        // 12 + 200 = 212. Truncate to 50 to provoke EOF.
-        let bytes = synthesize_msg31(100);
+        // logical_size = 200 → wire span 12 + 200 = 212. Truncate to
+        // 50 to provoke EOF.
+        let bytes = synthesize_skip_message(200);
         let truncated = &bytes[..50];
         let err = decode_messages(truncated).expect_err("should fail");
         assert!(
@@ -381,18 +390,15 @@ mod tests {
         buf[24..26].copy_from_slice(&segment_count.to_be_bytes());
         buf[26..28].copy_from_slice(&segment_number.to_be_bytes());
 
-        // Second message: a vanilla MSG_31, 32 halfwords.
-        buf.extend_from_slice(&synthesize_msg31(32));
+        // Second message: another Skip-with-sentinel of size 32.
+        buf.extend_from_slice(&synthesize_skip_message(32));
 
         let messages = decode_messages(&buf).expect("decode");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].header.message_type, MessageType::Skip(99));
         assert_eq!(messages[0].size, total_wire);
         assert_eq!(messages[1].offset, total_wire);
-        assert_eq!(
-            messages[1].header.message_type,
-            MessageType::DigitalRadarDataGenericFormat
-        );
+        assert_eq!(messages[1].header.message_type, MessageType::Skip(99));
     }
 
     /// Build one fixed-segment frame with the given type byte,
