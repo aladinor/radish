@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **NEXRAD: fused decompress + typed decode into one rayon
+  par_iter step** in `decode_volume`. Each rayon worker now
+  decompresses one LDM record AND walks its typed messages in
+  the same task, so the typed parse + gate-byte copies run in
+  parallel with bzip2 decompression instead of sequentially
+  after it. Mirrors `nexrad-data-1.0.0-rc.7`'s `File::scan` shape.
+  KLOT (5.8 MB): radish::decode_volume 143 → 125.5 ms (-12%),
+  matching `danielway/nexrad`'s 127 ms (1.01× ratio).
+  KILX (10.4 MB): 147 → 140.8 ms, danielway 142.3 ms.
+  Python end-to-end vs xradar: KLOT 6.7× → 7.78×.
+
 ### Fixed
 
 - **NEXRAD: MSG_31 data-block routing now goes by

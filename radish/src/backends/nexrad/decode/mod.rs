@@ -26,9 +26,12 @@ pub(super) mod volume;
 mod integration_test;
 
 use error::Result;
+use messages::msg2::Msg2;
+use messages::msg5::Msg5;
 use messages::{decode_messages, MessagePayload};
 use model::{group_radials_into_sweeps, Radial, Scan, Site};
-use record::{decompress_all, split_ldm_records};
+use rayon::prelude::*;
+use record::{decompress, split_ldm_records};
 use volume::parse as parse_volume_header;
 
 /// End-to-end decode of an in-memory NEXRAD Level 2 buffer:
@@ -42,6 +45,121 @@ use volume::parse as parse_volume_header;
 /// Errors with `MissingCoveragePattern` if the file's MSG_5 isn't
 /// present — without it we can't emit per-elevation classifier
 /// flags downstream.
+/// Phase-instrumented variant of [`decode_volume`]. Prints
+/// per-phase wall-clock to stderr. Bench-only; the production
+/// path stays uninstrumented. Mirrors the fused par_iter shape so
+/// the breakdown reflects what `decode_volume` actually does.
+pub(crate) fn decode_volume_with_phase_timing(bytes: &[u8]) -> Result<Scan> {
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let _ = parse_volume_header(bytes);
+    let records = split_ldm_records(bytes)?;
+    let t1 = Instant::now();
+
+    let per_record: Vec<PerRecordDecode> = records
+        .par_iter()
+        .map(decode_one_record)
+        .collect::<Result<Vec<_>>>()?;
+    let t2 = Instant::now();
+
+    let total_radials: usize = per_record.iter().map(|r| r.radials.len()).sum();
+    let mut radials: Vec<Radial> = Vec::with_capacity(total_radials);
+    let mut coverage_pattern: Option<Msg5> = None;
+    let mut rda_status: Option<Msg2> = None;
+    let mut site: Option<Site> = None;
+    for mut chunk in per_record {
+        if site.is_none() {
+            site = chunk.site.take();
+        }
+        if rda_status.is_none() {
+            rda_status = chunk.msg2.take();
+        }
+        if coverage_pattern.is_none() {
+            coverage_pattern = chunk.msg5.take();
+        }
+        radials.append(&mut chunk.radials);
+    }
+    let t3 = Instant::now();
+
+    let coverage_pattern =
+        coverage_pattern.ok_or(error::NexradDecodeError::MissingCoveragePattern)?;
+    let sweeps = group_radials_into_sweeps(radials);
+    let t4 = Instant::now();
+
+    let to_ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
+    eprintln!(
+        "  phase  split_ldm:                  {:>6.2} ms",
+        to_ms(t0, t1)
+    );
+    eprintln!(
+        "  phase  par_iter(decompress+decode):{:>6.2} ms  (fused: bzip2 + typed parse + Radial::from_msg31)",
+        to_ms(t1, t2)
+    );
+    eprintln!(
+        "  phase  stitch_per_record:          {:>6.2} ms",
+        to_ms(t2, t3)
+    );
+    eprintln!(
+        "  phase  group_into_sweeps:          {:>6.2} ms",
+        to_ms(t3, t4)
+    );
+    eprintln!(
+        "  phase  TOTAL:                      {:>6.2} ms",
+        to_ms(t0, t4)
+    );
+
+    Ok(Scan {
+        coverage_pattern,
+        sweeps,
+        site,
+        rda_status,
+    })
+}
+
+/// Per-LDM-record decode results, gathered in `decode_volume`'s
+/// `par_iter` step. Each rayon worker decompresses one record,
+/// walks its messages, and accumulates radials + the optional
+/// MSG_2 / MSG_5 / Site. The final stitch step preserves
+/// LDM-record arrival order so radials stay sweep-grouped.
+#[derive(Default)]
+struct PerRecordDecode {
+    radials: Vec<Radial>,
+    msg2: Option<Msg2>,
+    msg5: Option<Msg5>,
+    site: Option<Site>,
+}
+
+/// Decompress one LDM record, then walk its typed messages,
+/// extracting per-record radials + the first MSG_2 / MSG_5 / Site
+/// seen inside this record. Caller stitches per-record results
+/// back together preserving record order.
+fn decode_one_record(record: &record::LdmRecord<'_>) -> Result<PerRecordDecode> {
+    let payload = decompress(record)?;
+    let messages = decode_messages(&payload)?;
+    let mut out = PerRecordDecode::default();
+    for msg in messages {
+        match msg.payload {
+            MessagePayload::Msg31(boxed) => {
+                let mut m = *boxed;
+                if out.site.is_none() {
+                    if let Some(vol) = m.volume.take() {
+                        out.site = Some(Site::from_vol(m.header.radar_identifier, &vol));
+                    }
+                }
+                out.radials.push(Radial::from_msg31(m));
+            }
+            MessagePayload::Msg2(boxed) if out.msg2.is_none() => {
+                out.msg2 = Some(*boxed);
+            }
+            MessagePayload::Msg5(boxed) if out.msg5.is_none() => {
+                out.msg5 = Some(*boxed);
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn decode_volume(bytes: &[u8]) -> Result<Scan> {
     // Volume header is optional but useful for the ICAO fallback
     // when no MSG_31 has been seen yet. We discard it for now;
@@ -49,38 +167,46 @@ pub(crate) fn decode_volume(bytes: &[u8]) -> Result<Scan> {
     let _ = parse_volume_header(bytes);
 
     let records = split_ldm_records(bytes)?;
-    let payloads = decompress_all(&records)?;
 
-    let mut radials: Vec<Radial> = Vec::new();
-    let mut coverage_pattern = None;
-    let mut rda_status = None;
+    // Fused per-record pipeline: each rayon worker decompresses
+    // one LDM record AND walks its typed messages in the same
+    // task, so the typed-parse + Radial::from_msg31 gate copies
+    // run in parallel with bzip2 decompression instead of
+    // sequentially after `decompress_all` finishes. Mirrors
+    // `nexrad-data 1.0.0-rc.7`'s `File::scan` shape
+    // (`src/volume/file.rs:143-157`); on this machine takes ~17 ms
+    // of sequential post-decompress work to ~3 ms parallelised.
+    //
+    // `par_iter().collect::<Result<Vec<_>>>()` short-circuits on
+    // first error and preserves record order in the output Vec —
+    // important because radial order within a sweep matters for
+    // the ICD radial_status grouping pass below.
+    let per_record: Vec<PerRecordDecode> = records
+        .par_iter()
+        .map(decode_one_record)
+        .collect::<Result<Vec<_>>>()?;
+
+    // Stitch: walk per-record results in arrival order, taking
+    // the first non-None for site/msg2/msg5 and concatenating
+    // radials. With known total radial count we can presize the
+    // Vec to avoid intermediate reallocs (typical NEXRAD volume
+    // is 6_000-7_500 radials).
+    let total_radials: usize = per_record.iter().map(|r| r.radials.len()).sum();
+    let mut radials: Vec<Radial> = Vec::with_capacity(total_radials);
+    let mut coverage_pattern: Option<Msg5> = None;
+    let mut rda_status: Option<Msg2> = None;
     let mut site: Option<Site> = None;
-
-    for payload in &payloads {
-        let messages = decode_messages(payload)?;
-        for msg in messages {
-            match msg.payload {
-                MessagePayload::Msg31(boxed) => {
-                    let mut m = *boxed;
-                    // First MSG_31 that carries a VOL block defines
-                    // the site. Take the VOL block out of the Msg31
-                    // before we consume the rest into an owned Radial.
-                    if site.is_none() {
-                        if let Some(vol) = m.volume.take() {
-                            site = Some(Site::from_vol(m.header.radar_identifier, &vol));
-                        }
-                    }
-                    radials.push(Radial::from_msg31(m));
-                }
-                MessagePayload::Msg2(boxed) if rda_status.is_none() => {
-                    rda_status = Some(*boxed);
-                }
-                MessagePayload::Msg5(boxed) if coverage_pattern.is_none() => {
-                    coverage_pattern = Some(*boxed);
-                }
-                _ => {}
-            }
+    for mut chunk in per_record {
+        if site.is_none() {
+            site = chunk.site.take();
         }
+        if rda_status.is_none() {
+            rda_status = chunk.msg2.take();
+        }
+        if coverage_pattern.is_none() {
+            coverage_pattern = chunk.msg5.take();
+        }
+        radials.append(&mut chunk.radials);
     }
 
     let coverage_pattern =
