@@ -32,7 +32,15 @@ from radish._radish import (
 # Canonical entry points: format-agnostic, input-shape-agnostic.
 from radish._open import detect_backend, open_dataset, open_datatree
 
-__version__ = "0.1.0"
+# Single source of truth: the version baked into the wheel by maturin
+# from `python/pyproject.toml`. Avoids the long-standing drift where
+# this constant was hard-coded at 0.1.0 while the wheels shipped 0.2.x.
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+try:
+    __version__ = _pkg_version("radish-rs")
+except PackageNotFoundError:  # editable install before maturin develop
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     # Data model
