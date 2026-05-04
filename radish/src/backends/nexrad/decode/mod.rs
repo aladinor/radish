@@ -71,15 +71,11 @@ pub(crate) fn decode_volume(bytes: &[u8]) -> Result<Scan> {
                     }
                     radials.push(Radial::from_msg31(m));
                 }
-                MessagePayload::Msg2(boxed) => {
-                    if rda_status.is_none() {
-                        rda_status = Some(*boxed);
-                    }
+                MessagePayload::Msg2(boxed) if rda_status.is_none() => {
+                    rda_status = Some(*boxed);
                 }
-                MessagePayload::Msg5(boxed) => {
-                    if coverage_pattern.is_none() {
-                        coverage_pattern = Some(*boxed);
-                    }
+                MessagePayload::Msg5(boxed) if coverage_pattern.is_none() => {
+                    coverage_pattern = Some(*boxed);
                 }
                 _ => {}
             }
