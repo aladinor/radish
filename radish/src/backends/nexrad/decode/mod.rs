@@ -42,6 +42,83 @@ use volume::parse as parse_volume_header;
 /// Errors with `MissingCoveragePattern` if the file's MSG_5 isn't
 /// present — without it we can't emit per-elevation classifier
 /// flags downstream.
+/// Phase-instrumented variant of [`decode_volume`]. Prints
+/// per-phase wall-clock to stderr. Bench-only; the main path
+/// stays uninstrumented.
+pub(crate) fn decode_volume_with_phase_timing(bytes: &[u8]) -> Result<Scan> {
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let _ = parse_volume_header(bytes);
+    let records = split_ldm_records(bytes)?;
+    let t1 = Instant::now();
+    let payloads = decompress_all(&records)?;
+    let t2 = Instant::now();
+
+    let mut radials: Vec<Radial> = Vec::new();
+    let mut coverage_pattern = None;
+    let mut rda_status = None;
+    let mut site: Option<Site> = None;
+
+    for payload in &payloads {
+        let messages = decode_messages(payload)?;
+        for msg in messages {
+            match msg.payload {
+                MessagePayload::Msg31(boxed) => {
+                    let mut m = *boxed;
+                    if site.is_none() {
+                        if let Some(vol) = m.volume.take() {
+                            site = Some(Site::from_vol(m.header.radar_identifier, &vol));
+                        }
+                    }
+                    radials.push(Radial::from_msg31(m));
+                }
+                MessagePayload::Msg2(boxed) if rda_status.is_none() => {
+                    rda_status = Some(*boxed);
+                }
+                MessagePayload::Msg5(boxed) if coverage_pattern.is_none() => {
+                    coverage_pattern = Some(*boxed);
+                }
+                _ => {}
+            }
+        }
+    }
+    let t3 = Instant::now();
+
+    let coverage_pattern =
+        coverage_pattern.ok_or(error::NexradDecodeError::MissingCoveragePattern)?;
+    let sweeps = group_radials_into_sweeps(radials);
+    let t4 = Instant::now();
+
+    let to_ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
+    eprintln!(
+        "  phase  split_ldm:           {:>6.2} ms",
+        to_ms(t0, t1)
+    );
+    eprintln!(
+        "  phase  decompress_all:      {:>6.2} ms",
+        to_ms(t1, t2)
+    );
+    eprintln!(
+        "  phase  decode_messages+own: {:>6.2} ms  (typed parse + Radial::from_msg31 gate copies)",
+        to_ms(t2, t3)
+    );
+    eprintln!(
+        "  phase  group_into_sweeps:   {:>6.2} ms",
+        to_ms(t3, t4)
+    );
+    eprintln!(
+        "  phase  TOTAL:               {:>6.2} ms",
+        to_ms(t0, t4)
+    );
+
+    Ok(Scan {
+        coverage_pattern,
+        sweeps,
+        site,
+        rda_status,
+    })
+}
+
 pub(crate) fn decode_volume(bytes: &[u8]) -> Result<Scan> {
     // Volume header is optional but useful for the ICAO fallback
     // when no MSG_31 has been seen yet. We discard it for now;

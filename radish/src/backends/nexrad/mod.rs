@@ -36,6 +36,19 @@ pub fn time_decode_volume(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Phase-breakdown bench escape hatch. Exposed for
+/// `tests/test_decode_phase_breakdown.rs` only — runs the decode
+/// pipeline with an optional `eprintln!` per phase when
+/// `RADISH_NEXRAD_PHASE_BREAKDOWN=1` is set. Not part of the
+/// supported API; treats numbers as a one-shot profiling aid, not
+/// a regression gate.
+#[doc(hidden)]
+pub fn bench_decode_phases(bytes: &[u8]) -> Result<()> {
+    decode::decode_volume_with_phase_timing(bytes)
+        .map_err(|e| RadishError::Decode(e.to_string()))?;
+    Ok(())
+}
+
 /// Backend for NEXRAD Level 2 Archive II files (AR2V).
 pub struct NexradBackend;
 
