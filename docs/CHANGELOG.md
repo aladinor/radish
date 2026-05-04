@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-04
+
+The "internal NEXRAD decoder" release. radish now ships a from-scratch ICD-2620002AA-compliant Level 2 / Archive II decoder at `radish::backends::nexrad::decode`, replacing the runtime dependency on `danielway/nexrad`. The public Python and Rust surfaces are unchanged; output values are byte-identical to 0.2.0 except where 0.2.0 had bugs (KLOT VCP-32 surveillance sweeps now omit spurious `VRADH`/`WRADH` moments). Decode performance matches `danielway/nexrad` (1.01× ratio on KLOT and KILX) and is **7.78× faster than xradar** end-to-end through the xarray engine.
+
 ### Performance
 
 - **NEXRAD: fused decompress + typed decode into one rayon
@@ -290,6 +294,7 @@ First public release on PyPI as
 - CfRadial2 native reader and ODIM H5 backend are planned for
   Phase 2 (see `docs/PROJECT_SUMMARY.md`).
 
-[Unreleased]: https://github.com/aladinor/radish/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/aladinor/radish/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/aladinor/radish/compare/v0.2.0...v0.2.2
 [0.2.0]: https://github.com/aladinor/radish/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/aladinor/radish/releases/tag/v0.1.0
