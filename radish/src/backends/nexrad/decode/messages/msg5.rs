@@ -93,6 +93,115 @@ pub(crate) struct Msg5 {
 }
 
 impl Msg5 {
+    /// VCP pattern number (e.g. 212 for VCP-212). Mirrors upstream's
+    /// `VolumeCoveragePattern::number()` accessor — wraps the
+    /// `pattern_number` field.
+    pub(crate) fn number(&self) -> u16 {
+        self.pattern_number
+    }
+
+    /// Best-effort human-readable VCP description (e.g. "Convective
+    /// precipitation"). Lookup table mirrors xradar's
+    /// `_VCP_DESCRIPTIONS`. Returns `"Unknown VCP"` for unknown
+    /// pattern numbers so the adapter's `vcp_description` attr is
+    /// always populated.
+    pub(crate) fn description(&self) -> &'static str {
+        match self.pattern_number {
+            12 | 212 => "Convective precipitation, dual-pol",
+            21 | 121 => "Convective precipitation, mid-range",
+            31 | 32 => "Clear-air mode, light or no precipitation",
+            34 => "Clear-air mode, dual-pol",
+            35 => "Clear-air mode, dual-pol (high res)",
+            80 => "Convective precipitation (deprecated)",
+            90 => "Convective precipitation, special",
+            112 => "MPDA convective precipitation",
+            215 => "Convective precipitation, dual-pol (high alt)",
+            _ => "Unknown VCP",
+        }
+    }
+
+    /// Number of elevation cuts in this VCP, as a `u8` for parity
+    /// with upstream's accessor (HW 4 of MSG_5 is `u16` but values
+    /// are constrained to 1..32 by the ICD).
+    pub(crate) fn number_of_elevation_cuts_u8(&self) -> u8 {
+        self.number_of_elevation_cuts as u8
+    }
+
+    /// Slice of elevation cuts. Mirrors upstream's accessor.
+    pub(crate) fn elevation_cuts(&self) -> &[ElevationCut] {
+        &self.elevation_cuts
+    }
+
+    /// SAILS enabled — bit 0 of `vcp_supplemental` (HW 10) per ICD
+    /// Note 16. Bits 1-3 give the SAILS cut count (max 3).
+    pub(crate) fn sails_enabled(&self) -> bool {
+        self.vcp_supplemental & 0b0001 != 0
+    }
+
+    /// Number of SAILS cuts (bits 1-3 of `vcp_supplemental`).
+    pub(crate) fn sails_cuts(&self) -> u8 {
+        ((self.vcp_supplemental >> 1) & 0b0111) as u8
+    }
+
+    /// MRLE enabled — bit 4 of `vcp_supplemental` per ICD Note 16.
+    pub(crate) fn mrle_enabled(&self) -> bool {
+        self.vcp_supplemental & 0b0001_0000 != 0
+    }
+
+    /// Number of MRLE cuts (bits 5-7 of `vcp_supplemental`, max 4).
+    pub(crate) fn mrle_cuts(&self) -> u8 {
+        ((self.vcp_supplemental >> 5) & 0b0111) as u8
+    }
+
+    /// MPDA VCP — bit 11 of `vcp_supplemental` per ICD Note 16.
+    pub(crate) fn mpda_enabled(&self) -> bool {
+        self.vcp_supplemental & 0b1000_0000_0000 != 0
+    }
+
+    /// VCP contains at least one BASE TILT — bit 12 of
+    /// `vcp_supplemental` per ICD Note 16.
+    pub(crate) fn base_tilt_enabled(&self) -> bool {
+        self.vcp_supplemental & 0b0001_0000_0000_0000 != 0
+    }
+
+    /// Number of BASE TILTs (bits 13-15 of `vcp_supplemental`).
+    pub(crate) fn base_tilt_count(&self) -> u8 {
+        ((self.vcp_supplemental >> 13) & 0b0111) as u8
+    }
+
+    /// VCP truncated in number of elevation cuts — bit 14 of
+    /// `vcp_sequencing` (HW 9) per ICD Note 15. Set when this VCP is
+    /// part of an active VCP Sequence and truncated.
+    pub(crate) fn truncated(&self) -> bool {
+        self.vcp_sequencing & 0b0100_0000_0000_0000 != 0
+    }
+
+    /// VCP is part of an active VCP Sequence — bit 13 of
+    /// `vcp_sequencing` per ICD Note 15.
+    pub(crate) fn sequence_active(&self) -> bool {
+        self.vcp_sequencing & 0b0010_0000_0000_0000 != 0
+    }
+
+    /// Doppler velocity resolution in m/s. ICD HW 6 upper byte
+    /// encodes 2 → 0.5 m/s, 4 → 1.0 m/s.
+    pub(crate) fn doppler_velocity_resolution_m_per_s(&self) -> f32 {
+        match self.doppler_velocity_resolution {
+            2 => 0.5,
+            4 => 1.0,
+            _ => f32::NAN,
+        }
+    }
+
+    /// xradar-parity pulse-width string ("short" / "long" / `""`
+    /// for unknown). ICD HW 6 lower byte: 2 → short, 4 → long.
+    pub(crate) fn pulse_width_str(&self) -> &'static str {
+        match self.pulse_width {
+            2 => "short",
+            4 => "long",
+            _ => "",
+        }
+    }
+
     pub(crate) fn read(reader: &mut SliceReader<'_>) -> Result<Self> {
         let message_size_halfwords = reader.read_u16_be()?;
         let pattern_type = reader.read_u16_be()?;
@@ -200,6 +309,62 @@ impl ElevationCut {
     /// uses this same formula.
     pub(crate) fn elevation_angle_degrees(&self) -> f32 {
         binary_angle_degrees(self.elevation_angle_raw)
+    }
+
+    /// `f64` flavour for the adapter's `metadata.sweep_fixed_angles`
+    /// path which stores fixed angles as f64.
+    pub(crate) fn elevation_angle_degrees_f64(&self) -> f64 {
+        f64::from(self.elevation_angle_degrees())
+    }
+
+    /// Per ICD Note 17, bit 0 of `supplemental_data` (E15): SAILS
+    /// cut. Bits 1-3 carry the SAILS sequence number.
+    pub(crate) fn is_sails_cut(&self) -> bool {
+        self.supplemental_data & 0b0001 != 0
+    }
+
+    pub(crate) fn sails_sequence_number(&self) -> u8 {
+        ((self.supplemental_data >> 1) & 0b0111) as u8
+    }
+
+    /// Bit 4 of `supplemental_data`: MRLE cut. Bits 5-7 carry the
+    /// MRLE sequence number.
+    pub(crate) fn is_mrle_cut(&self) -> bool {
+        self.supplemental_data & 0b0001_0000 != 0
+    }
+
+    pub(crate) fn mrle_sequence_number(&self) -> u8 {
+        ((self.supplemental_data >> 5) & 0b0111) as u8
+    }
+
+    /// Bit 9 of `supplemental_data`: MPDA cut.
+    pub(crate) fn is_mpda_cut(&self) -> bool {
+        self.supplemental_data & 0b0010_0000_0000 != 0
+    }
+
+    /// Bit 10 of `supplemental_data`: BASE TILT cut.
+    pub(crate) fn is_base_tilt_cut(&self) -> bool {
+        self.supplemental_data & 0b0100_0000_0000 != 0
+    }
+
+    /// E3 super-resolution control bits (ICD Table XI E3 upper
+    /// byte). Bits per xradar's `pack_super_resolution`:
+    /// 0 = half-degree azimuth, 1 = quarter-km reflectivity,
+    /// 2 = doppler to 300 km, 3 = dual-pol to 300 km.
+    pub(crate) fn super_resolution_half_degree_azimuth(&self) -> bool {
+        self.super_resolution_control & 0b0001 != 0
+    }
+
+    pub(crate) fn super_resolution_quarter_km_reflectivity(&self) -> bool {
+        self.super_resolution_control & 0b0010 != 0
+    }
+
+    pub(crate) fn super_resolution_doppler_to_300km(&self) -> bool {
+        self.super_resolution_control & 0b0100 != 0
+    }
+
+    pub(crate) fn super_resolution_dual_pol_to_300km(&self) -> bool {
+        self.super_resolution_control & 0b1000 != 0
     }
 }
 
@@ -323,6 +488,169 @@ mod tests {
         bytes.truncate(11 * 2 + 2 * ELEVATION_CUT_HALFWORDS * 2);
         let mut r = SliceReader::new(&bytes);
         assert!(Msg5::read(&mut r).is_err());
+    }
+
+    #[test]
+    fn vcp_supplemental_bit_extractors_match_icd_note_16() {
+        let cuts = vec![ElevationCut {
+            elevation_angle_raw: 0,
+            channel_configuration: 0,
+            waveform_type: 1,
+            super_resolution_control: 0,
+            surveillance_prf_number: 1,
+            surveillance_pulse_count: 0,
+            azimuth_rate_raw: 0,
+            reflectivity_threshold_raw: 0,
+            velocity_threshold_raw: 0,
+            spectrum_width_threshold_raw: 0,
+            differential_reflectivity_threshold_raw: 0,
+            differential_phase_threshold_raw: 0,
+            correlation_coefficient_threshold_raw: 0,
+            sector1_edge_angle_raw: 0,
+            sector1_doppler_prf_number: 0,
+            sector1_doppler_pulse_count: 0,
+            supplemental_data: 0,
+            sector2_edge_angle_raw: 0,
+            sector2_doppler_prf_number: 0,
+            sector2_doppler_pulse_count: 0,
+            ebc_angle_raw: 0,
+            sector3_edge_angle_raw: 0,
+            sector3_doppler_prf_number: 0,
+            sector3_doppler_pulse_count: 0,
+            reserved: 0,
+        }];
+        let mut msg = Msg5 {
+            message_size_halfwords: 0,
+            pattern_type: 0,
+            pattern_number: 212,
+            number_of_elevation_cuts: 1,
+            vcp_version: 0,
+            clutter_map_group_number: 0,
+            doppler_velocity_resolution: 2,
+            pulse_width: 2,
+            vcp_sequencing: 0,
+            vcp_supplemental: 0b0001 | (0b010 << 1), // SAILS + 2 SAILS cuts
+            elevation_cuts: cuts.clone(),
+        };
+        assert!(msg.sails_enabled());
+        assert_eq!(msg.sails_cuts(), 2);
+        assert!(!msg.mrle_enabled());
+
+        msg.vcp_supplemental = 0b0001_0000 | (0b011 << 5); // MRLE + 3 MRLE cuts
+        assert!(!msg.sails_enabled());
+        assert!(msg.mrle_enabled());
+        assert_eq!(msg.mrle_cuts(), 3);
+
+        msg.vcp_supplemental = 0b1000_0000_0000; // bit 11: MPDA
+        assert!(msg.mpda_enabled());
+        msg.vcp_supplemental = 0b0001_0000_0000_0000 | (0b001 << 13); // bit 12: BASE TILT, bits 13-15: 1
+        assert!(msg.base_tilt_enabled());
+        assert_eq!(msg.base_tilt_count(), 1);
+    }
+
+    #[test]
+    fn vcp_sequencing_truncated_and_active_bits() {
+        let mut msg = Msg5 {
+            message_size_halfwords: 0,
+            pattern_type: 0,
+            pattern_number: 212,
+            number_of_elevation_cuts: 1,
+            vcp_version: 0,
+            clutter_map_group_number: 0,
+            doppler_velocity_resolution: 2,
+            pulse_width: 2,
+            vcp_sequencing: 0,
+            vcp_supplemental: 0,
+            elevation_cuts: vec![],
+        };
+        msg.vcp_sequencing = 0b0010_0000_0000_0000; // bit 13
+        assert!(msg.sequence_active());
+        assert!(!msg.truncated());
+        msg.vcp_sequencing = 0b0100_0000_0000_0000; // bit 14
+        assert!(msg.truncated());
+        assert!(!msg.sequence_active());
+    }
+
+    #[test]
+    fn elevation_cut_supplemental_bit_extractors_match_icd_note_17() {
+        let mut cut = ElevationCut {
+            elevation_angle_raw: 0,
+            channel_configuration: 0,
+            waveform_type: 1,
+            super_resolution_control: 0,
+            surveillance_prf_number: 1,
+            surveillance_pulse_count: 0,
+            azimuth_rate_raw: 0,
+            reflectivity_threshold_raw: 0,
+            velocity_threshold_raw: 0,
+            spectrum_width_threshold_raw: 0,
+            differential_reflectivity_threshold_raw: 0,
+            differential_phase_threshold_raw: 0,
+            correlation_coefficient_threshold_raw: 0,
+            sector1_edge_angle_raw: 0,
+            sector1_doppler_prf_number: 0,
+            sector1_doppler_pulse_count: 0,
+            supplemental_data: 0,
+            sector2_edge_angle_raw: 0,
+            sector2_doppler_prf_number: 0,
+            sector2_doppler_pulse_count: 0,
+            ebc_angle_raw: 0,
+            sector3_edge_angle_raw: 0,
+            sector3_doppler_prf_number: 0,
+            sector3_doppler_pulse_count: 0,
+            reserved: 0,
+        };
+        cut.supplemental_data = 0b0001 | (0b010 << 1); // SAILS cut, sequence 2
+        assert!(cut.is_sails_cut());
+        assert_eq!(cut.sails_sequence_number(), 2);
+        assert!(!cut.is_mrle_cut());
+
+        cut.supplemental_data = 0b0001_0000 | (0b011 << 5); // MRLE cut, sequence 3
+        assert!(!cut.is_sails_cut());
+        assert!(cut.is_mrle_cut());
+        assert_eq!(cut.mrle_sequence_number(), 3);
+
+        cut.supplemental_data = 0b0010_0000_0000; // bit 9: MPDA
+        assert!(cut.is_mpda_cut());
+
+        cut.supplemental_data = 0b0100_0000_0000; // bit 10: BASE TILT
+        assert!(cut.is_base_tilt_cut());
+    }
+
+    #[test]
+    fn super_resolution_control_bits() {
+        let mut cut = ElevationCut {
+            elevation_angle_raw: 0,
+            channel_configuration: 0,
+            waveform_type: 1,
+            super_resolution_control: 0,
+            surveillance_prf_number: 1,
+            surveillance_pulse_count: 0,
+            azimuth_rate_raw: 0,
+            reflectivity_threshold_raw: 0,
+            velocity_threshold_raw: 0,
+            spectrum_width_threshold_raw: 0,
+            differential_reflectivity_threshold_raw: 0,
+            differential_phase_threshold_raw: 0,
+            correlation_coefficient_threshold_raw: 0,
+            sector1_edge_angle_raw: 0,
+            sector1_doppler_prf_number: 0,
+            sector1_doppler_pulse_count: 0,
+            supplemental_data: 0,
+            sector2_edge_angle_raw: 0,
+            sector2_doppler_prf_number: 0,
+            sector2_doppler_pulse_count: 0,
+            ebc_angle_raw: 0,
+            sector3_edge_angle_raw: 0,
+            sector3_doppler_prf_number: 0,
+            sector3_doppler_pulse_count: 0,
+            reserved: 0,
+        };
+        cut.super_resolution_control = 0b1001; // half-deg azimuth + dual-pol 300km
+        assert!(cut.super_resolution_half_degree_azimuth());
+        assert!(!cut.super_resolution_quarter_km_reflectivity());
+        assert!(!cut.super_resolution_doppler_to_300km());
+        assert!(cut.super_resolution_dual_pol_to_300km());
     }
 
     #[test]

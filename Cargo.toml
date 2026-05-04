@@ -36,13 +36,10 @@ serde_json = "1.0"
 hdf5 = { package = "hdf5-metno", version = "0.12" }
 netcdf = "0.12"
 
-# NEXRAD Level 2 backend
-# `parallel` enables rayon-based LDM decompression inside nexrad-data — the
-# single feature that gives a ~7× decode-time win on multi-LDM-chunk files.
-# We deliberately stay off the `default = ["full"]` set so we don't pull in
-# `image` (render), `reqwest`+`tokio` (aws), and friends.
-nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["model", "decode", "data", "chrono", "parallel"] }
-nexrad-model = { version = "1.0.0-rc.2", features = ["chrono"] }
+# NEXRAD Level 2 backend — `nexrad` and `nexrad-model` are dev-only
+# now (see `radish/Cargo.toml` `[dev-dependencies]`); the runtime
+# decoder lives at `radish::backends::nexrad::decode` and pulls
+# only `bzip2` + `rayon` declared below.
 
 # Sigmet/IRIS RAW backend (Vaisala SIGMET binary, Vaisala ICD 2620002AA).
 # No upstream Rust crate exists; we port struct definitions from xradar's
@@ -51,16 +48,20 @@ nexrad-model = { version = "1.0.0-rc.2", features = ["chrono"] }
 byteorder = "1.5"
 bytemuck = { version = "1.20", features = ["derive"] }
 
-# Parallel sweep adaptation in radish::backends::{nexrad,sigmet}::adapter.
-# Already in the dep tree transitively via nexrad-data/parallel; declared
-# explicitly so the import is grep-able and the version is pinned.
+# Parallel sweep adaptation in radish::backends::{nexrad,sigmet}::adapter
+# and parallel LDM decompression in `nexrad::decode::record::decompress_all`.
 rayon = "1.10"
 
 # bzip2 decompression for NEXRAD Level 2 LDM records, used by the
-# in-tree internal decoder at radish::backends::nexrad::decode.
-# Already in the lock via nexrad-data; declared explicitly so the
-# import is grep-able and the version is pinned.
+# in-tree decoder at `radish::backends::nexrad::decode`.
 bzip2 = "0.6"
+
+# Dev-only: `nexrad` (1.0.0-rc.4 with `parallel` for the rayon-based
+# LDM decode) is the side-by-side parity reference for
+# `radish/tests/test_nexrad_internal_parity.rs`. We deliberately
+# stay off the `default = ["full"]` set so test builds don't pull
+# `image` (render), `reqwest`+`tokio` (aws), and friends.
+nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["model", "decode", "data", "chrono", "parallel"] }
 
 # Python bindings.
 pyo3 = { version = "0.22", features = ["extension-module"] }

@@ -36,6 +36,30 @@ pub(crate) struct Scan {
     pub(crate) rda_status: Option<Msg2>,
 }
 
+impl Scan {
+    /// Earliest / latest collection_time across every sweep. `None`
+    /// if no radial in the volume carries a timestamp. Matches
+    /// upstream's `Scan::time_range()` shape so the adapter can
+    /// drop in.
+    pub(crate) fn time_range(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        let mut earliest: Option<DateTime<Utc>> = None;
+        let mut latest: Option<DateTime<Utc>> = None;
+        for sweep in &self.sweeps {
+            if let Some((s, e)) = sweep.time_range() {
+                earliest = Some(match earliest {
+                    Some(prev) => prev.min(s),
+                    None => s,
+                });
+                latest = Some(match latest {
+                    Some(prev) => prev.max(e),
+                    None => e,
+                });
+            }
+        }
+        earliest.zip(latest)
+    }
+}
+
 /// One elevation sweep — a contiguous run of radials with the same
 /// `elevation_number` bracketed by ICD radial_status start / end
 /// markers (§3.2.4.17 Table XVII-A).
@@ -160,6 +184,15 @@ impl OwnedCfp {
             gate_bytes: &self.gate_bytes,
         }
         .iter()
+    }
+
+    /// Iterate the CFP block as `CfpMomentValue` (the adapter's
+    /// preferred shape — `Status(_)` collapses the three filter
+    /// states; `Value(f32)` carries decoded power dB).
+    pub(crate) fn iter_moment_value(
+        &self,
+    ) -> impl Iterator<Item = super::products::CfpMomentValue> + '_ {
+        self.iter().map(super::products::CfpMomentValue::from)
     }
 }
 

@@ -16,8 +16,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hdf5 = { workspace = true }
 netcdf = { workspace = true }
-nexrad = { workspace = true }
-nexrad-model = { workspace = true }
 byteorder = { workspace = true }
 bytemuck = { workspace = true }
 bzip2 = { workspace = true }
@@ -37,6 +35,9 @@ sha2 = "0.10"
 # Parameterized tests for the message-iteration loop's boundary-resync
 # state space (under-read / exact / over-read / past-buffer).
 rstest = "0.21"
+# Side-by-side parity reference for `tests/test_nexrad_internal_parity.rs`.
+# Not a runtime dep; the production decode path is fully in-tree.
+nexrad = { workspace = true }
 
 [[bench]]
 name = "nexrad"

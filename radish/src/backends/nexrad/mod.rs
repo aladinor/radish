@@ -11,20 +11,15 @@
 
 use std::path::Path;
 
-use nexrad::decode::messages::rda_status_data::Message as RdaStatusMessage;
-use nexrad::decode::messages::MessageContents;
-
 use crate::{backends::RadarBackend, RadishError, Result, SweepData, VolumeData, VolumeMetadata};
 
 mod adapter;
 mod attrs;
-// Internal byte-level NEXRAD decoder. Plan 0003 lands this
-// incrementally — Phase 1+2 stages reader / record / header /
-// message-iteration; Phase 3+4 fill in MSG_31 / MSG_2 / MSG_5
-// parsers; Phase 7 cuts over the runtime read path. Until then
-// some helpers (e.g. `read_i32_be`, `MissingCoveragePattern`) are
-// unused; flagging the whole module with `#[allow(dead_code)]`
-// avoids polluting individual files with the attribute.
+// Internal byte-level NEXRAD decoder. Phase 7 wires it into the
+// runtime read path; some helpers (e.g. `read_i32_be`) remain
+// unused inside the decoder's own scaffold but are kept for
+// completeness — `#[allow(dead_code)]` keeps the module quiet
+// without polluting individual files.
 #[allow(dead_code)]
 mod decode;
 mod mapping;
@@ -80,8 +75,8 @@ impl RadarBackend for NexradBackend {
     /// object. If the buffer is gzip-compressed (older `*.gz` archive
     /// volumes), the upstream `File::decompress()` handles it transparently.
     fn read_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeData> {
-        let (scan, msg2) = decode_bytes(data)?;
-        adapter::convert_scan(scan, msg2, Path::new("<bytes>"))
+        let scan = decode_bytes(&data)?;
+        adapter::convert_scan(scan, Path::new("<bytes>"))
     }
 
     fn scan_file(&self, path: &Path) -> Result<VolumeMetadata> {
@@ -90,23 +85,23 @@ impl RadarBackend for NexradBackend {
         // MSG_5 (VCP) — but `radish::VolumeMetadata` also wants lat/lon and
         // per-sweep angles, which need at least one decompressed LDM chunk.
         // Re-evaluate when a user needs sub-100 ms scan.
-        let (scan, msg2) = decode_scan_and_msg2(path)?;
-        adapter::build_volume_metadata(&scan, msg2.as_ref(), path)
+        let scan = decode_path(path)?;
+        adapter::build_volume_metadata(&scan, path)
     }
 
     fn read_sweep(&self, path: &Path, sweep_idx: usize) -> Result<SweepData> {
-        let (scan, _) = decode_scan_and_msg2(path)?;
+        let scan = decode_path(path)?;
         let sweep = scan
-            .sweeps()
+            .sweeps
             .get(sweep_idx)
             .ok_or(RadishError::InvalidSweepIndex(sweep_idx))?;
-        let cut = scan.coverage_pattern().elevation_cuts().get(sweep_idx);
+        let cut = scan.coverage_pattern.elevation_cuts().get(sweep_idx);
         adapter::convert_sweep(sweep, sweep_idx, cut)
     }
 
     fn read_volume(&self, path: &Path) -> Result<VolumeData> {
-        let (scan, msg2) = decode_scan_and_msg2(path)?;
-        adapter::convert_scan(scan, msg2, path)
+        let scan = decode_path(path)?;
+        adapter::convert_scan(scan, path)
     }
 }
 
@@ -131,8 +126,8 @@ impl NexradBackend {
     /// rays than the VCP's expected count.
     pub fn read_chunks_volume(&self, chunks: Vec<Vec<u8>>) -> Result<VolumeData> {
         let combined = concat_chunks(chunks);
-        let (scan, msg2) = decode_bytes(combined)?;
-        adapter::convert_scan(scan, msg2, Path::new("<chunks>"))
+        let scan = decode_bytes(&combined)?;
+        adapter::convert_scan(scan, Path::new("<chunks>"))
     }
 }
 
@@ -149,65 +144,17 @@ fn concat_chunks(chunks: Vec<Vec<u8>>) -> Vec<u8> {
     out
 }
 
-/// Decode the file once and return both the high-level `Scan` (moments + VCP)
-/// and the optional first MSG_2 (RDA Status) message.
-///
-/// The upstream `File::scan()` silently drops MSG_2 — see
-/// `nexrad-data/src/volume/file.rs` line 137 (`_ => {}`). To populate the
-/// xradar-parity root attrs (`avset_enabled`, `rda_build_number`, etc.) we
-/// re-walk records sequentially and early-return at the first MSG_2. The cost
-/// is one extra LDM chunk decompression (~120 KB max) and one `messages()`
-/// call — bounded under 5 ms on typical fixtures, well below the noise floor
-/// of the wall-clock benchmark vs. xradar.
-fn decode_scan_and_msg2(
-    path: &Path,
-) -> Result<(nexrad_model::data::Scan, Option<RdaStatusMessage<'static>>)> {
-    decode_bytes(std::fs::read(path)?)
+/// Decode an Archive II buffer through the in-tree decoder. The
+/// returned `Scan` already carries the optional `rda_status` (first
+/// MSG_2 in the file) — the adapter doesn't need a separate
+/// MSG_2 walk anymore.
+fn decode_bytes(data: &[u8]) -> Result<decode::model::Scan> {
+    decode::decode_volume(data).map_err(|e| RadishError::Decode(e.to_string()))
 }
 
-/// Take ownership of an in-memory Archive II buffer, decompress (if gzipped),
-/// run the upstream `Scan` decode, and grab the first MSG_2. Same contract
-/// as [`decode_scan_and_msg2`], factored out so both the file path and the
-/// chunks path share the pipeline.
-fn decode_bytes(
-    data: Vec<u8>,
-) -> Result<(nexrad_model::data::Scan, Option<RdaStatusMessage<'static>>)> {
-    let file = nexrad::data::volume::File::new(data)
-        .decompress()
-        .map_err(|e| RadishError::Decode(e.to_string()))?;
-    let scan = file
-        .scan()
-        .map_err(|e| RadishError::Decode(e.to_string()))?;
-    let msg2 = first_msg2(&file).unwrap_or(None);
-    Ok((scan, msg2))
-}
-
-/// Walk records sequentially, decompressing only as far as needed, and return
-/// the first MSG_2 message. Returns `Ok(None)` if the file has no MSG_2 and
-/// propagates errors otherwise.
-fn first_msg2(file: &nexrad::data::volume::File) -> Result<Option<RdaStatusMessage<'static>>> {
-    use nexrad::data::volume::Record;
-    let records = file
-        .records()
-        .map_err(|e| RadishError::Decode(e.to_string()))?;
-    for record in records {
-        let record = if record.compressed() {
-            record
-                .decompress()
-                .map_err(|e| RadishError::Decode(e.to_string()))?
-        } else {
-            Record::new(record.data().to_vec())
-        };
-        let messages = record
-            .messages()
-            .map_err(|e| RadishError::Decode(e.to_string()))?;
-        for message in messages {
-            if let MessageContents::RDAStatusData(m) = message.into_contents() {
-                return Ok(Some(m.into_owned()));
-            }
-        }
-    }
-    Ok(None)
+/// Read the file from disk and decode through `decode_bytes`.
+fn decode_path(path: &Path) -> Result<decode::model::Scan> {
+    decode_bytes(&std::fs::read(path)?)
 }
 
 #[cfg(test)]

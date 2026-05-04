@@ -6,11 +6,9 @@
 //! `xradar/io/backends/nexrad_level2.py`. If a value diverges, the user-facing
 //! `xr.DataTree` `.attrs` will diverge — that's the contract.
 
-use nexrad::decode::messages::rda_status_data::Message as RdaStatusMessage;
-use nexrad_model::data::{
-    ChannelConfiguration, ElevationCut, PulseWidth, Sweep, VolumeCoveragePattern, WaveformType,
-};
-
+use crate::backends::nexrad::decode::messages::msg2::Msg2;
+use crate::backends::nexrad::decode::messages::msg5::{ElevationCut, Msg5};
+use crate::backends::nexrad::decode::model::Sweep;
 use crate::{NexradSweepAttrs, NexradVolumeAttrs};
 
 /// xradar's `_WAVEFORM_TYPES` lookup. We match xradar **by raw byte**, not by
@@ -43,37 +41,9 @@ pub(super) fn channel_config_str_from_raw(raw: u8) -> String {
     }
 }
 
-/// Map the upstream `WaveformType` enum back to its MSG_5_ELEV E3 raw byte.
-/// The upstream `Scan::scan()` decode is bijective on known values
-/// (see `nexrad-data/src/volume/file.rs::scan` lines 192-199), so this round-
-/// trips losslessly. For `Unknown` we lose the original code; emit 0
-/// (xradar would emit `_WAVEFORM_TYPES[0] = "not_applicable"`).
-pub(super) fn waveform_to_raw(w: WaveformType) -> u8 {
-    match w {
-        WaveformType::CS => 1,
-        WaveformType::CDW => 2,
-        WaveformType::CDWO => 3,
-        WaveformType::B => 4,
-        WaveformType::SPP => 5,
-        WaveformType::Unknown => 0,
-    }
-}
-
-/// Map the upstream `ChannelConfiguration` enum back to its MSG_5_ELEV E2 raw
-/// byte. Same rationale as `waveform_to_raw`. For `Unknown` we emit 3
-/// (xradar's table is empty there, so it falls through to `str(3)` = `"3"`).
-pub(super) fn channel_config_to_raw(c: ChannelConfiguration) -> u8 {
-    match c {
-        ChannelConfiguration::ConstantPhase => 0,
-        ChannelConfiguration::RandomPhase => 1,
-        ChannelConfiguration::SZ2Phase => 2,
-        ChannelConfiguration::Unknown => 3,
-    }
-}
-
 /// xradar's `_get_dynamic_scan_type`. SAILS and MRLE are mutually exclusive
 /// per ICD 2620002AA Note 16.
-pub(super) fn dynamic_scan_type(vcp: &VolumeCoveragePattern) -> String {
+pub(super) fn dynamic_scan_type(vcp: &Msg5) -> String {
     if vcp.sails_enabled() {
         let n = vcp.sails_cuts();
         if n == 0 {
@@ -90,19 +60,6 @@ pub(super) fn dynamic_scan_type(vcp: &VolumeCoveragePattern) -> String {
         }
     } else {
         "standard".to_string()
-    }
-}
-
-/// xradar emits `vcp_pulse_width` as `"short"`, `"long"`, or `str(code)`. The
-/// upstream `PulseWidth::Unknown` doesn't carry the original code, so we emit
-/// an empty string for that case — xradar would have emitted `"0"` here, but
-/// `PulseWidth::Unknown` only fires when the raw code is *neither* 2 nor 4,
-/// which is unusual; the divergence isn't load-bearing.
-pub(super) fn pulse_width_str(p: PulseWidth) -> &'static str {
-    match p {
-        PulseWidth::Short => "short",
-        PulseWidth::Long => "long",
-        PulseWidth::Unknown => "",
     }
 }
 
@@ -129,18 +86,14 @@ fn pack_super_resolution(cut: &ElevationCut) -> u8 {
 
 /// Build the per-sweep attrs from a single MSG_5 elevation cut.
 ///
-/// We round-trip the upstream typed enums back through their MSG_5_ELEV raw
-/// bytes (E2 / E3) and feed those into xradar's `_WAVEFORM_TYPES` /
-/// `_CHANNEL_CONFIGS` lookups. Going through the raw byte is the only way to
-/// reproduce xradar's emission verbatim — its tables don't agree with the ICD
-/// and the typed enum loses the numeric identity needed for `str(code)` fall-
-/// through cases.
+/// xradar emits waveform / channel-config strings keyed off the raw
+/// E3 / E2 bytes. Our internal decoder keeps those raw bytes
+/// alongside their bit-packed siblings — no round-trip through a
+/// typed enum needed.
 pub(super) fn sweep_attrs_from_cut(cut: &ElevationCut) -> NexradSweepAttrs {
     NexradSweepAttrs {
-        waveform_type: waveform_type_str_from_raw(waveform_to_raw(cut.waveform_type())),
-        channel_config: channel_config_str_from_raw(channel_config_to_raw(
-            cut.channel_configuration(),
-        )),
+        waveform_type: waveform_type_str_from_raw(cut.waveform_type),
+        channel_config: channel_config_str_from_raw(cut.channel_configuration),
         super_resolution: pack_super_resolution(cut),
         sails_cut: cut.is_sails_cut(),
         sails_sequence_number: cut.sails_sequence_number(),
@@ -176,21 +129,21 @@ fn decode_rda_scan_data_flags(raw: u16) -> (bool, bool) {
 /// metadata-only `scan_file` or a full `read_volume` — neither needs
 /// per-ray moment decode.
 pub(super) fn volume_attrs(
-    vcp: &VolumeCoveragePattern,
-    msg2: Option<&RdaStatusMessage<'_>>,
+    vcp: &Msg5,
+    msg2: Option<&Msg2>,
     sweeps: &[Sweep],
     actual_elevation_cuts: u32,
 ) -> NexradVolumeAttrs {
     let (avset_enabled, ebc_enabled, super_res_status, rda_build_number, operational_mode) =
         match msg2 {
             Some(m) => {
-                let (avset, ebc) = decode_rda_scan_data_flags(m.raw_rda_scan_and_data_flags());
+                let (avset, ebc) = decode_rda_scan_data_flags(m.rda_scan_and_data_flags);
                 (
                     avset,
                     ebc,
-                    m.raw_super_resolution_status(),
-                    m.raw_rda_build_number(),
-                    m.raw_operational_mode(),
+                    m.super_resolution_status,
+                    m.rda_build_number,
+                    m.operational_mode,
                 )
             }
             None => (false, false, 0, 0, 0),
@@ -230,9 +183,9 @@ pub(super) fn volume_attrs(
         num_base_tilts: vcp.base_tilt_count(),
         vcp_truncated: vcp.truncated(),
         vcp_sequence_active: vcp.sequence_active(),
-        number_elevation_cuts: vcp.number_of_elevation_cuts() as u32,
-        doppler_velocity_resolution: vcp.doppler_velocity_resolution(),
-        vcp_pulse_width: pulse_width_str(vcp.pulse_width()).to_string(),
+        number_elevation_cuts: u32::from(vcp.number_of_elevation_cuts_u8()),
+        doppler_velocity_resolution: vcp.doppler_velocity_resolution_m_per_s(),
+        vcp_pulse_width: vcp.pulse_width_str().to_string(),
         avset_enabled,
         ebc_enabled,
         super_res_status,
@@ -246,7 +199,11 @@ pub(super) fn volume_attrs(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, Utc};
+
     use super::*;
+    use crate::backends::nexrad::decode::messages::msg31::moment::MomentDescriptor;
+    use crate::backends::nexrad::decode::model::{OwnedMoment, Radial};
 
     #[test]
     fn waveform_type_from_raw_matches_xradar_table() {
@@ -273,84 +230,23 @@ mod tests {
     }
 
     #[test]
-    fn waveform_to_raw_round_trips_known_variants() {
-        // Bijective on known ICD values 1-5, defaults to 0 for Unknown.
-        assert_eq!(waveform_to_raw(WaveformType::CS), 1);
-        assert_eq!(waveform_to_raw(WaveformType::CDW), 2);
-        assert_eq!(waveform_to_raw(WaveformType::CDWO), 3);
-        assert_eq!(waveform_to_raw(WaveformType::B), 4);
-        assert_eq!(waveform_to_raw(WaveformType::SPP), 5);
-        assert_eq!(waveform_to_raw(WaveformType::Unknown), 0);
-    }
-
-    #[test]
-    fn channel_config_to_raw_round_trips_known_variants() {
-        assert_eq!(
-            channel_config_to_raw(ChannelConfiguration::ConstantPhase),
-            0
-        );
-        assert_eq!(channel_config_to_raw(ChannelConfiguration::RandomPhase), 1);
-        assert_eq!(channel_config_to_raw(ChannelConfiguration::SZ2Phase), 2);
-        assert_eq!(channel_config_to_raw(ChannelConfiguration::Unknown), 3);
-    }
-
-    #[test]
     fn sweep_attrs_emit_xradar_strings_for_batch_and_staggered() {
-        // The bug that motivated this round-trip: a real KLOT volume has a
-        // sweep with `WaveformType::B` (raw=4 per ICD), and xradar emits
-        // `"staggered_pulse_pair"` — not `"batch"` — for that raw byte.
-        let cut_b = ElevationCut::new(
-            0.5,
-            ChannelConfiguration::ConstantPhase,
-            WaveformType::B,
-            18.0,
-            true,
-            true,
-            false,
-            false,
-            1,
-            17,
-            16.0,
-            -20.0,
-            12.0,
-            0.0,
-            0.0,
-            0.0,
-            false,
-            0,
-            false,
-            0,
-            false,
-            false,
-        );
+        // The bug motivating xradar parity: KLOT volumes have a sweep
+        // with raw waveform_type=4 (ICD "Batch") for which xradar emits
+        // `"staggered_pulse_pair"` — not `"batch"`. We match xradar.
+        let cut_b = zero_cut_with(|c| {
+            c.waveform_type = 4;
+            c.channel_configuration = 0;
+        });
         let attrs = sweep_attrs_from_cut(&cut_b);
         assert_eq!(attrs.waveform_type, "staggered_pulse_pair");
 
-        // CDWO (raw=3) → xradar emits "batch".
-        let cut_cdwo = ElevationCut::new(
-            0.5,
-            ChannelConfiguration::SZ2Phase,
-            WaveformType::CDWO,
-            18.0,
-            false,
-            false,
-            false,
-            false,
-            1,
-            17,
-            16.0,
-            -20.0,
-            12.0,
-            0.0,
-            0.0,
-            0.0,
-            false,
-            0,
-            false,
-            0,
-            false,
-            false,
-        );
+        // raw=3 ("Contiguous Doppler without ambiguity resolution" per
+        // ICD) → xradar emits "batch". Channel config 2 = SZ2Phase.
+        let cut_cdwo = zero_cut_with(|c| {
+            c.waveform_type = 3;
+            c.channel_configuration = 2;
+        });
         let attrs = sweep_attrs_from_cut(&cut_cdwo);
         assert_eq!(attrs.waveform_type, "batch");
         assert_eq!(attrs.channel_config, "sz2_phase_coding");
@@ -359,55 +255,25 @@ mod tests {
     #[test]
     fn dynamic_scan_type_sails_with_count() {
         // SAILS+1 → "SAILS x 1"; SAILS+0 → bare "SAILS"; not-SAILS → standard.
-        let cut = sample_cut();
-        let vcp = sample_vcp(true, 1, false, 0, vec![cut.clone()]);
+        let cuts = vec![sample_cut()];
+        let vcp = vcp_with_supplemental(supplemental_bits(true, 1, false, 0), cuts.clone());
         assert_eq!(dynamic_scan_type(&vcp), "SAILS x 1");
 
-        let vcp = sample_vcp(true, 0, false, 0, vec![cut.clone()]);
+        let vcp = vcp_with_supplemental(supplemental_bits(true, 0, false, 0), cuts.clone());
         assert_eq!(dynamic_scan_type(&vcp), "SAILS");
 
-        let vcp = sample_vcp(false, 0, true, 2, vec![cut.clone()]);
+        let vcp = vcp_with_supplemental(supplemental_bits(false, 0, true, 2), cuts.clone());
         assert_eq!(dynamic_scan_type(&vcp), "MRLE x 2");
 
-        let vcp = sample_vcp(false, 0, false, 0, vec![cut]);
+        let vcp = vcp_with_supplemental(supplemental_bits(false, 0, false, 0), cuts);
         assert_eq!(dynamic_scan_type(&vcp), "standard");
     }
 
     #[test]
     fn pack_super_resolution_round_trip() {
-        // Half-deg azimuth + dual-pol 300 km enabled, others off → 0b1001 = 9.
-        let cut = ElevationCut::new(
-            0.5,
-            ChannelConfiguration::ConstantPhase,
-            WaveformType::CS,
-            18.0,
-            true,  // half_degree_azimuth
-            false, // quarter_km_reflectivity
-            false, // doppler_to_300km
-            true,  // dual_pol_to_300km
-            1,
-            17,
-            16.0,
-            -20.0,
-            12.0,
-            0.0,
-            0.0,
-            0.0,
-            false,
-            0,
-            false,
-            0,
-            false,
-            false,
-        );
+        // Half-deg azimuth (bit 0) + dual-pol 300 km (bit 3) → 0b1001.
+        let cut = zero_cut_with(|c| c.super_resolution_control = 0b1001);
         assert_eq!(pack_super_resolution(&cut), 0b1001);
-    }
-
-    #[test]
-    fn pulse_width_str_table() {
-        assert_eq!(pulse_width_str(PulseWidth::Short), "short");
-        assert_eq!(pulse_width_str(PulseWidth::Long), "long");
-        assert_eq!(pulse_width_str(PulseWidth::Unknown), "");
     }
 
     #[test]
@@ -425,7 +291,7 @@ mod tests {
 
     #[test]
     fn volume_attrs_without_msg2_zeroes_rda_fields() {
-        let vcp = sample_vcp(false, 0, false, 0, vec![sample_cut()]);
+        let vcp = vcp_with_supplemental(0, vec![sample_cut()]);
         let attrs = volume_attrs(&vcp, None, &[], 5);
         assert_eq!(attrs.dynamic_scan_type, "standard");
         assert!(!attrs.avset_enabled);
@@ -447,14 +313,15 @@ mod tests {
     /// (or sources from `sweeps[0]` for every entry) is caught here.
     #[test]
     fn volume_attrs_populates_one_sweep_attr_per_sweep_from_matching_cut() {
-        // Three cuts with distinct, observable signatures: vary the
-        // commanded angle and the SAILS bit so each cut is uniquely
-        // identifiable from the resulting `NexradSweepAttrs` (via
-        // `sails_cut`).
-        let cut_a = cut_with(0.5, false);
-        let cut_b = cut_with(0.9, true);
-        let cut_c = cut_with(1.5, false);
-        let vcp = sample_vcp(true, 1, false, 0, vec![cut_a, cut_b, cut_c]);
+        // Three cuts with distinct, observable signatures via the
+        // SAILS bit so each entry is uniquely identifiable.
+        let cut_a = cut_with_sails(false);
+        let cut_b = cut_with_sails(true);
+        let cut_c = cut_with_sails(false);
+        let vcp = vcp_with_supplemental(
+            supplemental_bits(true, 1, false, 0),
+            vec![cut_a, cut_b, cut_c],
+        );
         let sweeps = vec![empty_sweep(1), empty_sweep(2), empty_sweep(3)];
 
         let attrs = volume_attrs(&vcp, None, &sweeps, 3);
@@ -471,8 +338,7 @@ mod tests {
     /// truncating the output.
     #[test]
     fn volume_attrs_pads_with_default_when_cuts_shorter_than_sweeps() {
-        // 1 cut, 4 sweeps. Entries 1..4 must be defaults.
-        let vcp = sample_vcp(false, 0, false, 0, vec![sample_cut()]);
+        let vcp = vcp_with_supplemental(0, vec![sample_cut()]);
         let sweeps = vec![
             empty_sweep(1),
             empty_sweep(2),
@@ -497,11 +363,10 @@ mod tests {
 
     /// HIGH-priority: pin both branches of `Sweep::time_range`.
     /// `None` for empty sweeps (no radials), `Some((start, end))` with
-    /// `start <= end` for sweeps with timestamped radials. We use
-    /// `f64` Unix seconds to match the public axis convention.
+    /// `start <= end` for sweeps with timestamped radials.
     #[test]
     fn volume_attrs_sweep_time_ranges_some_and_none_branches() {
-        let vcp = sample_vcp(false, 0, false, 0, vec![sample_cut(), sample_cut()]);
+        let vcp = vcp_with_supplemental(0, vec![sample_cut(), sample_cut()]);
         let sweeps = vec![
             empty_sweep(1), // → None
             sweep_with_timestamps(
@@ -520,127 +385,140 @@ mod tests {
         assert!(attrs.sweep_time_ranges[0].is_none(), "no radials → None");
 
         let (start, end) = attrs.sweep_time_ranges[1].expect("Some");
-        // 1700000000.000 → 1700000005.500. Allow microsecond noise from
-        // the `timestamp_micros() / 1e6` round-trip.
         assert!((start - 1_700_000_000.0).abs() < 1e-3, "start = {start}");
         assert!((end - 1_700_000_005.5).abs() < 1e-3, "end = {end}");
         assert!(start <= end, "time_range invariant: start <= end");
     }
 
-    fn cut_with(angle_deg: f64, sails: bool) -> ElevationCut {
-        ElevationCut::new(
-            angle_deg,
-            ChannelConfiguration::ConstantPhase,
-            WaveformType::CS,
-            18.0,
-            true,
-            true,
-            false,
-            false,
-            1,
-            17,
-            16.0,
-            -20.0,
-            12.0,
-            0.0,
-            0.0,
-            0.0,
-            sails,
-            if sails { 1 } else { 0 },
-            false,
-            0,
-            false,
-            false,
-        )
+    /// Pack the four MSG_5 supplemental-data bits into the HW 10
+    /// layout per ICD Note 16: bit 0 = SAILS enabled, bits 1-3 =
+    /// SAILS cut count, bit 4 = MRLE enabled, bits 5-7 = MRLE cut count.
+    fn supplemental_bits(sails: bool, sails_cuts: u8, mrle: bool, mrle_cuts: u8) -> u16 {
+        let mut bits = 0u16;
+        if sails {
+            bits |= 0b0001;
+        }
+        bits |= u16::from(sails_cuts & 0b0111) << 1;
+        if mrle {
+            bits |= 0b0001_0000;
+        }
+        bits |= u16::from(mrle_cuts & 0b0111) << 5;
+        bits
     }
 
-    fn empty_sweep(elevation_number: u8) -> Sweep {
-        Sweep::new(elevation_number, Vec::new())
-    }
-
-    /// Build a sweep whose radials carry the given collection
-    /// timestamps (milliseconds since Unix epoch, matching upstream
-    /// `Radial::collection_timestamp`). Other radial fields are
-    /// arbitrary defaults — only the timestamps drive
-    /// [`Sweep::time_range`].
-    fn sweep_with_timestamps(elevation_number: u8, timestamps_ms: &[i64]) -> Sweep {
-        use nexrad_model::data::{MomentData, Radial, RadialStatus};
-        let radials: Vec<Radial> = timestamps_ms
-            .iter()
-            .enumerate()
-            .map(|(i, ts)| {
-                let reflectivity =
-                    MomentData::from_fixed_point(1, 2_000, 250, 8, 2.0, 66.0, vec![10]);
-                Radial::new(
-                    *ts,
-                    i as u16,
-                    (i as f32) * 1.0,
-                    0.5,
-                    RadialStatus::ScanStart,
-                    elevation_number,
-                    0.5,
-                    Some(reflectivity),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            })
-            .collect();
-        Sweep::new(elevation_number, radials)
+    /// Construct an all-zero `ElevationCut` with the given mutator
+    /// applied. Keeps test fixtures focused on the field the test
+    /// actually exercises.
+    fn zero_cut_with(mutate: impl FnOnce(&mut ElevationCut)) -> ElevationCut {
+        let mut cut = ElevationCut {
+            elevation_angle_raw: 0,
+            channel_configuration: 0,
+            waveform_type: 1,                 // CS
+            super_resolution_control: 0b0011, // half-deg azimuth + 1/4-km reflectivity
+            surveillance_prf_number: 1,
+            surveillance_pulse_count: 17,
+            azimuth_rate_raw: 0,
+            reflectivity_threshold_raw: 0,
+            velocity_threshold_raw: 0,
+            spectrum_width_threshold_raw: 0,
+            differential_reflectivity_threshold_raw: 0,
+            differential_phase_threshold_raw: 0,
+            correlation_coefficient_threshold_raw: 0,
+            sector1_edge_angle_raw: 0,
+            sector1_doppler_prf_number: 0,
+            sector1_doppler_pulse_count: 0,
+            supplemental_data: 0,
+            sector2_edge_angle_raw: 0,
+            sector2_doppler_prf_number: 0,
+            sector2_doppler_pulse_count: 0,
+            ebc_angle_raw: 0,
+            sector3_edge_angle_raw: 0,
+            sector3_doppler_prf_number: 0,
+            sector3_doppler_pulse_count: 0,
+            reserved: 0,
+        };
+        mutate(&mut cut);
+        cut
     }
 
     fn sample_cut() -> ElevationCut {
-        ElevationCut::new(
-            0.5,
-            ChannelConfiguration::ConstantPhase,
-            WaveformType::CS,
-            18.0,
-            true,
-            true,
-            false,
-            false,
-            1,
-            17,
-            16.0,
-            -20.0,
-            12.0,
-            0.0,
-            0.0,
-            0.0,
-            false,
-            0,
-            false,
-            0,
-            false,
-            false,
-        )
+        zero_cut_with(|_| {})
     }
 
-    fn sample_vcp(
-        sails: bool,
-        sails_cuts: u8,
-        mrle: bool,
-        mrle_cuts: u8,
-        cuts: Vec<ElevationCut>,
-    ) -> VolumeCoveragePattern {
-        VolumeCoveragePattern::new(
-            212,
-            1,
-            0.5,
-            PulseWidth::Short,
-            sails,
-            sails_cuts,
-            mrle,
-            mrle_cuts,
-            false,
-            false,
-            0,
-            false,
-            false,
-            cuts,
-        )
+    /// `sails=true` → SAILS cut bit set + sequence number 1
+    /// (matches the original test fixture's signal).
+    fn cut_with_sails(sails: bool) -> ElevationCut {
+        zero_cut_with(|c| {
+            if sails {
+                c.supplemental_data = 0b0001 | (1 << 1); // SAILS + sequence=1
+            }
+        })
+    }
+
+    fn vcp_with_supplemental(vcp_supplemental: u16, cuts: Vec<ElevationCut>) -> Msg5 {
+        let n_cuts = cuts.len() as u16;
+        Msg5 {
+            message_size_halfwords: 0,
+            pattern_type: 1,
+            pattern_number: 212,
+            number_of_elevation_cuts: n_cuts,
+            vcp_version: 1,
+            clutter_map_group_number: 1,
+            doppler_velocity_resolution: 2, // 0.5 m/s
+            pulse_width: 2,                 // short
+            vcp_sequencing: 0,
+            vcp_supplemental,
+            elevation_cuts: cuts,
+        }
+    }
+
+    fn empty_sweep(elevation_number: u8) -> Sweep {
+        Sweep {
+            elevation_number,
+            radials: Vec::new(),
+        }
+    }
+
+    /// Build a sweep whose radials carry the given collection
+    /// timestamps (milliseconds since Unix epoch). Other radial
+    /// fields are arbitrary defaults — only timestamps drive
+    /// [`Sweep::time_range`].
+    fn sweep_with_timestamps(elevation_number: u8, timestamps_ms: &[i64]) -> Sweep {
+        let radials: Vec<Radial> = timestamps_ms
+            .iter()
+            .enumerate()
+            .map(|(i, ts)| Radial {
+                azimuth_number: i as u16,
+                azimuth_angle_degrees: i as f32,
+                elevation_number,
+                elevation_angle_degrees: 0.5,
+                radial_status: 0,
+                collection_time: DateTime::<Utc>::from_timestamp_millis(*ts),
+                reflectivity: Some(OwnedMoment {
+                    descriptor: MomentDescriptor {
+                        gate_count: 1,
+                        range_to_first_gate_km: 2.0,
+                        gate_interval_km: 0.25,
+                        tover_db: 0.0,
+                        snr_threshold_db: 0.0,
+                        control_flags: 0,
+                        data_word_size_bits: 8,
+                        scale: 2.0,
+                        offset: 66.0,
+                    },
+                    gate_bytes: vec![10],
+                }),
+                velocity: None,
+                spectrum_width: None,
+                differential_reflectivity: None,
+                differential_phase: None,
+                correlation_coefficient: None,
+                clutter_filter_power: None,
+            })
+            .collect();
+        Sweep {
+            elevation_number,
+            radials,
+        }
     }
 }

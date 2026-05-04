@@ -1631,7 +1631,6 @@ dependencies = [
  "ndarray",
  "netcdf",
  "nexrad",
- "nexrad-model",
  "proptest",
  "radish-types",
  "rayon",

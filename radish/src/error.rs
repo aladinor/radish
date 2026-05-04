@@ -73,11 +73,3 @@ impl From<&str> for RadishError {
         RadishError::General(s.to_string())
     }
 }
-
-impl From<nexrad::Error> for RadishError {
-    fn from(e: nexrad::Error) -> Self {
-        // The upstream `nexrad::Error` enum is not part of our public API;
-        // collapse to a string so consumers can match on `RadishError::Decode`.
-        RadishError::Decode(e.to_string())
-    }
-}

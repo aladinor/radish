@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **NEXRAD: replaced `nexrad` / `nexrad-decode` / `nexrad-data` /
+  `nexrad-model` runtime dependencies with the in-tree decoder
+  at `radish::backends::nexrad::decode`** — Phase 7 of plan 0003.
+  `NexradBackend::{read_volume, scan_file, read_sweep,
+  read_bytes_volume, read_chunks_volume}` now route through
+  `decode::decode_volume`. The upstream `nexrad` crate stays as
+  a `[dev-dependencies]` reference for
+  `tests/test_nexrad_internal_parity.rs` only; `cargo tree -p
+  radish --edges normal` shows zero `nexrad-*` runtime deps.
+  No public API change. The bundled bug-fix benefit is on
+  `KILX20230629_154426_V06` where xradar reports 358 rays in
+  sweep_10 vs the on-wire-correct 360 — the in-tree decoder
+  matches `danielway/nexrad`'s 360 (xradar's stride bug
+  documented at
+  `xradar/io/backends/nexrad_level2.py:397`).
+
 ### Added
 
 - **NEXRAD: end-to-end `decode_volume(bytes) -> Scan` + parity

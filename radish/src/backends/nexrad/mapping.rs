@@ -7,10 +7,10 @@
 //! truth shared with future backends so an `xr.DataTree` produced by any
 //! backend has byte-identical per-DataArray attribute strings.
 
-use nexrad_model::data::Product;
 use radish_types::moments;
 
 use crate::backends::common::{meta_for, OdimMomentMeta};
+use crate::backends::nexrad::decode::products::Product;
 
 /// `CCORH` isn't in `radish_types::moments` (which mirrors the CfRadial2 short
 /// names, where this product is undefined). Keep it as a local constant for the
