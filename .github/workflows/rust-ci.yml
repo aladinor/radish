@@ -127,7 +127,7 @@ jobs:
       run: cargo tarpaulin --verbose --all-features --workspace --exclude radish-python --timeout 120 --out xml
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v6
       with:
         files: ./cobertura.xml
         fail_ci_if_error: false
@@ -139,15 +139,21 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v5
 
+    # Inline `cargo audit` instead of `rustsec/audit-check@v2` — that
+    # action has no Node 24-compatible release as of May 2026 and was
+    # the last source of Node.js 20 deprecation warnings on Rust CI.
+    # Direct invocation also makes the ignore-list visible in plain
+    # shell rather than buried in an action input.
+    #
+    # RUSTSEC-2025-0020 is a `pyo3::types::PyString::from_object`
+    # buffer-overflow advisory (patched in pyo3 0.24.1). We pin pyo3
+    # 0.22 because the upstream `nexrad` crate ecosystem hasn't moved
+    # yet, and our bindings in `python/src/lib.rs` don't construct
+    # `PyString` from raw `&str` — we round-trip through PyO3's safe
+    # `String`/`&str` conversions which already null-terminate.
+    # Reassess when we can bump pyo3.
+    - name: Install cargo-audit
+      run: cargo install --locked cargo-audit
+
     - name: Run security audit
-      uses: rustsec/audit-check@v2
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        # RUSTSEC-2025-0020 is a `pyo3::types::PyString::from_object` buffer-
-        # overflow advisory (patched in pyo3 0.24.1). We pin pyo3 0.22 because
-        # the upstream `nexrad` crate ecosystem hasn't moved yet, and our
-        # bindings in `python/src/lib.rs` don't construct `PyString` from
-        # raw `&str` — we round-trip through PyO3's safe `String`/`&str`
-        # conversions which already null-terminate. Reassess when we can
-        # bump pyo3.
-        ignore: RUSTSEC-2025-0020
+      run: cargo audit --ignore RUSTSEC-2025-0020
