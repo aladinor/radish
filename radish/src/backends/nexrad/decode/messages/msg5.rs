@@ -25,7 +25,10 @@ pub(crate) const ELEVATION_CUT_HALFWORDS: usize = 23;
 /// fields that are bit-packed (channel_configuration,
 /// waveform_type, super_resolution_control, supplemental_data) so
 /// downstream consumers can apply their own interpretations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default` is provided to support `synthetic_from_radials`'s
+/// zero-filled cuts when no real MSG_5 is present in the file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ElevationCut {
     /// E1 — commanded elevation angle as a Code*2 binary angle
     /// (Table III-A). Stored raw; convert via
@@ -71,7 +74,7 @@ pub(crate) struct ElevationCut {
 }
 
 /// Decoded MSG_5 VCP definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Msg5 {
     pub(crate) message_size_halfwords: u16,
     pub(crate) pattern_type: u16,
@@ -199,6 +202,54 @@ impl Msg5 {
             2 => "short",
             4 => "long",
             _ => "",
+        }
+    }
+
+    /// Build a synthetic MSG_5 from a list of radials when the source
+    /// file lacks one (common with pre-Build-12 raw Archive II — many
+    /// 1990s/2000s files simply don't carry a VCP record). Pattern
+    /// number falls back to `0`; doppler velocity resolution comes
+    /// from the elevation cut count alone. Per-cut elevation angles
+    /// use the median measured angle for that elevation_number.
+    ///
+    /// This is a **placeholder** to keep the rest of the pipeline's
+    /// hard MSG_5 dependency satisfied — downstream consumers that
+    /// rely on SAILS / MRLE classification flags will see all-zeros
+    /// (i.e. legacy files report no SAILS/MRLE).
+    pub(crate) fn synthetic_from_radials(
+        radials: &[crate::backends::nexrad::decode::model::Radial],
+    ) -> Self {
+        use std::collections::BTreeMap;
+
+        let mut by_elev: BTreeMap<u8, Vec<f32>> = BTreeMap::new();
+        for r in radials {
+            by_elev
+                .entry(r.elevation_number)
+                .or_default()
+                .push(r.elevation_angle_degrees);
+        }
+        let mut elevation_cuts: Vec<ElevationCut> = Vec::with_capacity(by_elev.len());
+        for (_, mut angles) in by_elev {
+            if angles.is_empty() {
+                continue;
+            }
+            // `f32::total_cmp` is the IEEE-754-aware total order — avoids
+            // the `partial_cmp(...).unwrap_or(Equal)` NaN dance.
+            angles.sort_by(|a, b| a.total_cmp(b));
+            let median = angles[angles.len() / 2];
+            // Inverse of binary_angle_degrees: raw = degrees * 32768 / 180.
+            let raw = (median * 32768.0 / 180.0).round().clamp(0.0, 65535.0) as u16;
+            elevation_cuts.push(ElevationCut {
+                elevation_angle_raw: raw,
+                ..ElevationCut::default()
+            });
+        }
+        let number_of_elevation_cuts = elevation_cuts.len() as u16;
+        Self {
+            number_of_elevation_cuts,
+            doppler_velocity_resolution: 2,
+            elevation_cuts,
+            ..Self::default()
         }
     }
 

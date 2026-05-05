@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use super::decode_volume;
 use super::messages::decode_messages;
 use super::record::{decompress_all, split_ldm_records};
 
@@ -372,4 +373,127 @@ fn typed_msg31_parser_on_klot_fixture_yields_plausible_radials() {
             );
         }
     }
+}
+
+/// Synthesize a minimal raw Archive II buffer with a single MSG_1
+/// frame and confirm `decode_volume` walks the raw-CTM path,
+/// produces one radial in one synthetic-VCP sweep, and the radial
+/// carries the expected azimuth + elevation + reflectivity.
+///
+/// This is the unit-level analogue of the fixture-gated
+/// `decodes_kvnx_2011_raw_archive_ii` test below — pinned at the
+/// raw-AR2 detection + MSG_1 → Radial path so a CI environment
+/// without 2011 corpus access still gates regressions.
+#[test]
+fn decodes_synthesized_raw_archive_ii_buffer() {
+    use super::header::SEGMENT_FRAME_SIZE;
+    use super::messages::msg1::MSG1_HEADER_BYTES;
+
+    // Frame: 28-byte combined TCM+Table-II header, then 100-byte
+    // MSG_1 header (no gate data — all pointers zero).
+    const LOGICAL_HEADER_HW: u16 = ((16 + MSG1_HEADER_BYTES) / 2) as u16;
+    let mut frame = vec![0u8; SEGMENT_FRAME_SIZE];
+    // Table II: HW1 = message_size, byte 15 = type 1 (MSG_1),
+    // segment_count = 1, segment_number = 1.
+    frame[12..14].copy_from_slice(&LOGICAL_HEADER_HW.to_be_bytes());
+    frame[15] = 1;
+    frame[24..26].copy_from_slice(&1u16.to_be_bytes());
+    frame[26..28].copy_from_slice(&1u16.to_be_bytes());
+
+    // MSG_1 body starts at byte 28 of the frame.
+    let body = &mut frame[28..28 + MSG1_HEADER_BYTES];
+    body[0..4].copy_from_slice(&12_345_678_i32.to_be_bytes()); // collection_time_ms
+    body[4..6].copy_from_slice(&15_000_i16.to_be_bytes()); // julian date
+    body[6..8].copy_from_slice(&0_i16.to_be_bytes()); // unambiguous range
+    body[8..10].copy_from_slice(&8_192_i16.to_be_bytes()); // azimuth = 45°
+    body[10..12].copy_from_slice(&73_i16.to_be_bytes()); // azimuth_number
+    body[12..14].copy_from_slice(&3_i16.to_be_bytes()); // radial_status = ScanStart
+    body[14..16].copy_from_slice(&182_i16.to_be_bytes()); // elevation ≈ 1.0°
+    body[16..18].copy_from_slice(&1_i16.to_be_bytes()); // elevation_number
+                                                        // Pointers all zero (no gate data).
+
+    // 24-byte AR2V volume header + the frame.
+    let mut buf = b"AR2V0006.001-XYZWXYZWXYZW".to_vec();
+    buf.truncate(24);
+    buf.extend_from_slice(&frame);
+
+    let scan = decode_volume(&buf).expect("decode raw AR2V");
+    assert_eq!(scan.sweeps.len(), 1, "synthetic VCP yields one sweep");
+    let sweep = &scan.sweeps[0];
+    assert_eq!(sweep.radials.len(), 1, "one radial per synthetic frame");
+    let r = &sweep.radials[0];
+    assert!((r.azimuth_angle_degrees - 45.0).abs() < 1e-3);
+    assert!((r.elevation_angle_degrees - 1.0).abs() < 1e-2);
+    assert_eq!(r.elevation_number, 1);
+    assert_eq!(r.azimuth_number, 73);
+}
+
+/// Fixture-gated test: load a real pre-Build-12 raw Archive II file
+/// (KVNX 2011-05-20) and decode end-to-end via `decode_volume`,
+/// asserting full moment extraction. Set `RADISH_NEXRAD_LEGACY_FIXTURE`
+/// to the path of an uncompressed AR2V0006.020 file (the `.gz`
+/// decompressed). Ignored by default.
+///
+/// Pins the Build-11 MSG_31 layout fix (9 pointer slots + 68-byte
+/// header) end-to-end: the file decodes to 17 sweeps, ~8000 radials
+/// with reflectivity moments populated. A regression in
+/// `PointerLayout::detect` or `msg31::parse`'s body-relative pointer
+/// arithmetic surfaces here as either a panic, a missing-moment
+/// adapter error, or a zero-reflectivity volume.
+#[test]
+#[ignore = "needs RADISH_NEXRAD_LEGACY_FIXTURE"]
+fn decodes_kvnx_2011_raw_archive_ii() {
+    let Some(path) = std::env::var_os("RADISH_NEXRAD_LEGACY_FIXTURE").map(PathBuf::from) else {
+        eprintln!("skipping: RADISH_NEXRAD_LEGACY_FIXTURE not set");
+        return;
+    };
+    if !path.is_file() {
+        eprintln!("skipping: {} is not a file", path.display());
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("read legacy fixture");
+    eprintln!("legacy fixture: {} ({} bytes)", path.display(), bytes.len());
+
+    assert!(
+        super::record::is_raw_archive2(&bytes),
+        "fixture must be a raw Archive II file (no LDM size at offset 24)"
+    );
+    let scan = decode_volume(&bytes).expect("decode legacy fixture");
+    let total_radials: usize = scan.sweeps.iter().map(|s| s.radials.len()).sum();
+    eprintln!(
+        "decode summary: {} sweeps, {} radials",
+        scan.sweeps.len(),
+        total_radials,
+    );
+    assert!(
+        scan.sweeps.len() >= 5,
+        "expected >= 5 sweeps, got {}",
+        scan.sweeps.len()
+    );
+    assert!(
+        total_radials >= 100,
+        "expected >= 100 radials across the volume, got {total_radials}"
+    );
+    let radials_with_refl = scan
+        .sweeps
+        .iter()
+        .flat_map(|s| s.radials.iter())
+        .filter(|r| r.reflectivity.is_some())
+        .count();
+    eprintln!(
+        "legacy fixture decode summary: {} sweeps, {} radials, {} carry reflectivity",
+        scan.sweeps.len(),
+        total_radials,
+        radials_with_refl,
+    );
+    // Build-11 MSG_31 layout fix: every surveillance radial in a
+    // VCP-12 file (KVNX 2011-05-20) carries a REF block. Allow a
+    // small fraction of intermediate radials to be REF-less, but
+    // the overall ratio must be high — anything substantially below
+    // 50% means moment extraction has regressed.
+    assert!(
+        radials_with_refl * 2 >= total_radials,
+        "expected ≥50% of radials to carry reflectivity, \
+         got {radials_with_refl}/{total_radials}"
+    );
 }

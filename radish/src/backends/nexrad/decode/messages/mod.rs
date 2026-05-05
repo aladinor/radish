@@ -15,6 +15,7 @@
 //! particular parser, and we want the loop tested in isolation
 //! before parser bugs can confound the picture.
 
+pub(crate) mod msg1;
 pub(crate) mod msg2;
 pub(crate) mod msg31;
 pub(crate) mod msg5;
@@ -47,14 +48,16 @@ pub(crate) struct Message<'a> {
 /// Payload variants carried alongside the header.
 ///
 /// Typed variants land per-phase: `Msg31` in Phase 3, `Msg2` and
-/// `Msg5` in Phase 4. `Raw` / `Reassembled` remain for messages we
-/// don't decode (MSG_15 clutter filter map, MSG_18 adaptation data,
-/// `Skip(_)` types).
+/// `Msg5` in Phase 4, `Msg1` in plan 0006. `Raw` / `Reassembled`
+/// remain for messages we don't decode (MSG_15 clutter filter map,
+/// MSG_18 adaptation data, `Skip(_)` types).
 #[derive(Debug)]
 #[allow(dead_code)] // SegmentedFragment / Reassembled used by tests + later phases.
 pub(crate) enum MessagePayload<'a> {
     /// Raw bytes from the message header to the message boundary.
     Raw(&'a [u8]),
+    /// Decoded MSG_1 (legacy Digital Radar Data) message — pre-Build-12.
+    Msg1(Box<msg1::Msg1>),
     /// Decoded MSG_31 (Digital Radar Data Generic Format) message.
     Msg31(Box<msg31::Msg31<'a>>),
     /// Decoded MSG_2 (RDA Status Data) message.
@@ -106,7 +109,16 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
             // typed variants).
             let payload = match header.message_type {
                 MessageType::DigitalRadarDataGenericFormat => {
-                    let msg = msg31::parse(&mut reader, offset)?;
+                    // `msg31::parse` resolves block pointers as
+                    // offsets from the MSG_31 wire-body start
+                    // (= reader.position() right after the 28-byte
+                    // TCM + Table II header was consumed). This
+                    // matches `danielway/nexrad`'s `start_position`
+                    // and xradar's `block_pointer + 12 + LEN_MSG_HEADER`
+                    // arithmetic. **Not** the start of the message
+                    // including the TCM prefix.
+                    let body_start = reader.position();
+                    let msg = msg31::parse(&mut reader, body_start)?;
                     MessagePayload::Msg31(Box::new(msg))
                 }
                 _ => {
@@ -145,11 +157,33 @@ pub(crate) fn decode_messages(bytes: &[u8]) -> Result<Vec<Message<'_>>> {
             reader.try_skip_to(target)?;
             continue;
         }
-        let payload_size = logical_size - LOGICAL_HEADER_SIZE;
-        let payload_bytes = reader.take_bytes(payload_size)?;
-        // After header (28 bytes) + payload, advance to the next
-        // SEGMENT_FRAME_SIZE boundary.
-        reader.try_skip_to(target)?;
+        // Single-segment vs multi-segment payload sizing. Legacy
+        // MSG_1 (and MSG_18 in some files) under-declares
+        // `message_size_halfwords` relative to what the message
+        // actually occupies — the wire layout is "fixed 2432-byte
+        // frame, declared size is just the metadata header." For
+        // single-segment fixed-frame messages we give the parser
+        // the full frame content (2404 bytes after the 28-byte
+        // header) and let it stop at its real boundary; for
+        // multi-segment ones (MSG_5, MSG_15) the declared size is
+        // load-bearing (the accumulator concatenates per-segment
+        // payloads and the parser reads from the assembled buffer).
+        // Mirrors danielway/nexrad's `decode_messages` shape.
+        let payload_bytes = if header.segment_count > 1 {
+            let payload_size = logical_size - LOGICAL_HEADER_SIZE;
+            let bytes = reader.take_bytes(payload_size)?;
+            reader.try_skip_to(target)?;
+            bytes
+        } else {
+            let frame_content_size = SEGMENT_FRAME_SIZE - HEADER_SIZE;
+            let bytes = reader.take_bytes(frame_content_size)?;
+            // Already at the SEGMENT_FRAME_SIZE boundary after the
+            // take above (28 + 2404 == 2432) but call try_skip_to
+            // for symmetry + a no-op safety net if `target` ever
+            // diverges.
+            reader.try_skip_to(target)?;
+            bytes
+        };
 
         // Single-segment fixed-frame messages emit immediately;
         // multi-segment ones go through the accumulator. In both
@@ -186,19 +220,37 @@ fn parse_fixed_frame_payload<'a>(
     header: &MessageHeader,
     payload_bytes: &'a [u8],
 ) -> Result<MessagePayload<'a>> {
-    match header.message_type {
-        MessageType::RdaStatusData => {
-            let mut r = SliceReader::new(payload_bytes);
-            let m = msg2::Msg2::read(&mut r)?;
-            Ok(MessagePayload::Msg2(Box::new(m)))
+    // Pre-Build-12 raw Archive II files contain a lot of trailing
+    // zero-padding + scattered garbage frames whose Table II header
+    // bytes accidentally decode to known message types but with
+    // payload sizes too small for the typed parser. Fall back to
+    // Raw on any typed-parse error rather than aborting the whole
+    // walk — matches `danielway/nexrad`'s `warn!` + `try_skip_to`
+    // behaviour without the `tracing` dependency.
+    fn try_typed<'a, T>(
+        bytes: &'a [u8],
+        parse: impl FnOnce(&mut SliceReader<'a>) -> Result<T>,
+        wrap: impl FnOnce(T) -> MessagePayload<'a>,
+    ) -> MessagePayload<'a> {
+        let mut r = SliceReader::new(bytes);
+        match parse(&mut r) {
+            Ok(value) => wrap(value),
+            Err(_) => MessagePayload::Raw(bytes),
         }
-        MessageType::VolumeCoveragePattern => {
-            let mut r = SliceReader::new(payload_bytes);
-            let m = msg5::Msg5::read(&mut r)?;
-            Ok(MessagePayload::Msg5(Box::new(m)))
-        }
-        _ => Ok(MessagePayload::Raw(payload_bytes)),
     }
+
+    Ok(match header.message_type {
+        MessageType::DigitalRadarDataLegacy => try_typed(payload_bytes, msg1::Msg1::read, |m| {
+            MessagePayload::Msg1(Box::new(m))
+        }),
+        MessageType::RdaStatusData => try_typed(payload_bytes, msg2::Msg2::read, |m| {
+            MessagePayload::Msg2(Box::new(m))
+        }),
+        MessageType::VolumeCoveragePattern => try_typed(payload_bytes, msg5::Msg5::read, |m| {
+            MessagePayload::Msg5(Box::new(m))
+        }),
+        _ => MessagePayload::Raw(payload_bytes),
+    })
 }
 
 /// Dispatch a multi-segment reassembled payload to the right typed
@@ -479,6 +531,39 @@ mod tests {
         // combined header).
         buf[HEADER_SIZE] = marker;
         buf
+    }
+
+    /// Lenient-fallback path: a fixed-frame message whose Table II
+    /// header declares MSG_5 but whose payload is too small / garbage
+    /// to parse must NOT error out the whole decode walk — the
+    /// `parse_fixed_frame_payload` helper falls back to
+    /// `MessagePayload::Raw` so the loop continues. Pre-Build-12 raw
+    /// Archive II files have lots of garbage frames; without this
+    /// lenience `decode_volume` would die on the first one.
+    #[test]
+    fn fixed_frame_typed_parse_error_falls_back_to_raw() {
+        // Frame declares type=5 (MSG_5) with a logical size of 18
+        // halfwords (= 36 bytes total, only 20 bytes of payload).
+        // MSG_5's parser requires ≥22 bytes for its 11-halfword
+        // header, so it errors. The lenient handler turns the
+        // failure into Raw without aborting the walk.
+        let segment_size_hw: u16 = ((LOGICAL_HEADER_SIZE + 20) / 2) as u16;
+        let mut buf = synthesize_fixed_frame(5, 1, segment_size_hw, 1, 1, 0xAA);
+        // Put random non-MSG_5-shaped bytes into the payload area so
+        // a successful parse would be a coincidence.
+        buf[HEADER_SIZE..HEADER_SIZE + 20].copy_from_slice(&[0xFFu8; 20]);
+        // Append a real MSG_2 frame so we can confirm the walk
+        // continues past the lenient fallback.
+        buf.extend_from_slice(&synthesize_fixed_frame(2, 2, 60, 1, 1, 0xBB));
+
+        let messages = decode_messages(&buf).expect("decode walk");
+        assert_eq!(messages.len(), 2, "got {} messages", messages.len());
+        assert!(
+            matches!(messages[0].payload, MessagePayload::Raw(_)),
+            "garbage MSG_5 frame should fall back to Raw, got {:?}",
+            messages[0].payload
+        );
+        assert_eq!(messages[1].header.message_type, MessageType::RdaStatusData);
     }
 
     /// Reassembly sanity check: build a 2-segment MSG_15 (Clutter

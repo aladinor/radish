@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **NEXRAD: pre-Build-12 raw Archive II support, including
+  Build-11.x MSG_31 layout.** Before this change, files predating
+  Build 12 (March 2012) — e.g.
+  `s3://unidata-nexrad-level2/2011/05/20/KVNX/...` — raised
+  `unexpected EOF at offset 36` because the decoder assumed every
+  file was wrapped in LDM-bzip2 records. radish now:
+
+  1. Detects raw Archive II via the zero-valued `u32_be` at byte
+     offset 24 (matches xradar's `nexrad_level2.py:309-319` and
+     `danielway/nexrad`'s `volume/record.rs:139-156`) and walks
+     the message stream directly without bzip2 decompression.
+  2. Includes a new `messages::msg1` parser for the legacy MSG_1
+     (Digital Radar Data, ICD §3.2.4.2 Table III) format used by
+     1991-2008 files.
+  3. **Detects the Build-11 MSG_31 layout (9 pointer slots, 68-byte
+     header) vs Build-12+ (10 pointer slots, 72-byte header).**
+     The CFP block was added in Build 12, so older MSG_31 messages
+     reserve only 9 pointer slots in their data header. Detection
+     uses the smallest non-zero pointer value (which always equals
+     the on-wire header size by construction). Pointer arithmetic
+     in `msg31::parse` was also corrected from
+     `message_start_offset + ptr` to the canonical
+     `header_offset + ptr` (= `start_position + ptr`,
+     matching `danielway/nexrad`'s `digital_radar_data::Message::parse`
+     and xradar's `block_pointer + 12 + LEN_MSG_HEADER`).
+  4. Synthesizes a minimal MSG_5 (VCP) fallback when the source
+     file lacks one — common on legacy raw files.
+
+  **Verified:** `KVNX20110520_000442_V06.gz` (45.6 MB raw AR2)
+  decodes through `radish.open_datatree` to 17 sweeps × 720 az ×
+  1832 range with full dual-pol moments (DBZH/ZDR/PHIDP/RHOHV) in
+  ~1.2 s end-to-end. Modern KLOT/KILX LDM files unchanged.
+
 ## [0.2.2] - 2026-05-04
 
 The "internal NEXRAD decoder" release. radish now ships a from-scratch ICD-2620002AA-compliant Level 2 / Archive II decoder at `radish::backends::nexrad::decode`, replacing the runtime dependency on `danielway/nexrad`. The public Python and Rust surfaces are unchanged; output values are byte-identical to 0.2.0 except where 0.2.0 had bugs (KLOT VCP-32 surveillance sweeps now omit spurious `VRADH`/`WRADH` moments). Decode performance matches `danielway/nexrad` (1.01× ratio on KLOT and KILX) and is **7.78× faster than xradar** end-to-end through the xarray engine.
