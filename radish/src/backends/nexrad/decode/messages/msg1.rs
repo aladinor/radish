@@ -183,15 +183,25 @@ impl Msg1 {
         f32::from(self.elevation_angle_raw) * 180.0 / 32768.0
     }
 
-    /// Collection time as a `DateTime<Utc>`, derived from the
-    /// modified Julian date (days since 1970-01-01) and the
-    /// collection time (ms past midnight). Returns `None` if the
+    /// Collection time as a `DateTime<Utc>`. Returns `None` if the
     /// values fall outside the chrono-representable range.
+    ///
+    /// Per ICD 2620002R Table III §3.2.4.2, `modified_julian_date`
+    /// is **1-indexed days since 1970-01-01**: day 1 = 1970-01-01,
+    /// day 2 = 1970-01-02, … `collection_time_ms` is milliseconds
+    /// since midnight of that day. The `-1` below is the difference
+    /// between "1-indexed day-of-epoch" (ICD convention) and
+    /// "0-indexed seconds-since-epoch" (Unix convention). Matches
+    /// xradar's `(date - 1) * 86400e3 + ms` and `danielway/nexrad`'s
+    /// `volume/record.rs` byte-for-byte.
     pub(crate) fn collection_time(&self) -> Option<DateTime<Utc>> {
         let days = i64::from(self.modified_julian_date);
         let secs = i64::from(self.collection_time_ms / 1_000);
         let nanos = u32::try_from((self.collection_time_ms % 1_000).abs()).ok()? * 1_000_000;
-        let total_secs = days.checked_mul(86_400)?.checked_add(secs)?;
+        let total_secs = days
+            .checked_sub(1)?
+            .checked_mul(86_400)?
+            .checked_add(secs)?;
         Utc.timestamp_opt(total_secs, nanos).single()
     }
 
@@ -356,5 +366,24 @@ mod tests {
         bytes_10[42..44].copy_from_slice(&4_i16.to_be_bytes());
         let m10 = Msg1::read(&mut SliceReader::new(&bytes_10)).unwrap();
         assert!((m10.doppler_velocity_resolution_mps() - 1.0).abs() < 1e-6);
+    }
+
+    /// ICD §3.2.4.2: MSG_1's `modified_julian_date` is **1-indexed
+    /// days since 1970-01-01**, so day 1 with `collection_time_ms=0`
+    /// must decode to exactly the Unix epoch. Companion regression
+    /// test to `msg31_collection_time_day_1_decodes_to_unix_epoch`
+    /// for the legacy decode path.
+    #[test]
+    fn collection_time_day_1_decodes_to_unix_epoch() {
+        // Patch the synthetic header's collection_time (bytes 0..4)
+        // and modified_julian_date (bytes 4..6) to the day-1 / ms=0
+        // boundary case.
+        let mut bytes = synth_header(0, 0, 0, 0, 0);
+        bytes[0..4].copy_from_slice(&0_i32.to_be_bytes());
+        bytes[4..6].copy_from_slice(&1_i16.to_be_bytes());
+        let m = Msg1::read(&mut SliceReader::new(&bytes)).unwrap();
+        let dt = m.collection_time().expect("decoded");
+        assert_eq!(dt.timestamp(), 0, "day 1 + ms 0 must equal Unix epoch");
+        assert_eq!(dt.timestamp_subsec_nanos(), 0);
     }
 }
