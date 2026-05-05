@@ -96,8 +96,15 @@ impl RadarBackend for NexradBackend {
     /// Convenience entry point for the common case of "fetch the whole file
     /// from S3 / HTTP / fsspec, then decode" — equivalent to xradar's
     /// `xradar.io.open_nexradlevel2_datatree(data)` when given one bytes
-    /// object. If the buffer is gzip-compressed (older `*.gz` archive
-    /// volumes), the upstream `File::decompress()` handles it transparently.
+    /// object.
+    ///
+    /// **The buffer must be already-decompressed AR2V bytes.** radish does
+    /// not handle gzip — for `.gz` archives use fsspec's transparent
+    /// decompression filter (`fsspec.open(uri, "rb", compression="gzip")`)
+    /// or call `gzip.decompress(raw)` manually before passing in. Keeps
+    /// the radish dependency surface minimal (no `flate2` crate) and
+    /// follows xradar's convention since their `open_nexradlevel2_datatree`
+    /// also expects pre-decompressed bytes when given a `bytes` input.
     fn read_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeData> {
         let scan = decode_bytes(&data)?;
         adapter::convert_scan(scan, Path::new("<bytes>"))
@@ -152,6 +159,48 @@ impl NexradBackend {
         let combined = concat_chunks(chunks);
         let scan = decode_bytes(&combined)?;
         adapter::convert_scan(scan, Path::new("<chunks>"))
+    }
+
+    /// Scan a NEXRAD Level 2 volume from a single in-memory byte buffer
+    /// for **metadata only** — the bytes-input twin of [`Self::scan_file`].
+    ///
+    /// Equivalent to `read_bytes_volume(data)` then dropping the per-ray
+    /// moment data, but skips the `convert_scan` adapter pass that
+    /// materializes the per-sweep `Array2<f32>` moments. ~3× faster
+    /// than `read_bytes_volume` on a typical fixture, matching the
+    /// speedup `scan_file` has over `read_volume`.
+    ///
+    /// **Compression-agnostic**: the buffer must be already-decompressed
+    /// AR2V bytes. radish does not handle gzip — use fsspec's transparent
+    /// decompression filter (`fsspec.open(uri, "rb",
+    /// compression="gzip")`) or `gzip.decompress(raw)` for `.gz`
+    /// archives. obstore users who want the same ergonomics can
+    /// register obstore as an fsspec backend
+    /// (`from obstore.fsspec import register`) — that gives
+    /// `fsspec.open(..., compression="gzip")` access to obstore's
+    /// faster S3 I/O without sacrificing transparent decompression.
+    pub fn scan_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeMetadata> {
+        let scan = decode_bytes(&data)?;
+        adapter::build_volume_metadata(&scan, Path::new("<bytes>"))
+    }
+
+    /// Scan metadata from a NEXRAD Level 2 chunk-stream volume — the
+    /// chunked-input twin of [`Self::scan_file`]. Same chunk-order
+    /// contract as [`Self::read_chunks_volume`] (`S` first, then
+    /// `I00..In`, then `E`), but stops after metadata extraction.
+    ///
+    /// Useful for the
+    /// [`unidata-nexrad-level2-chunks`](https://registry.opendata.aws/noaa-nexrad/)
+    /// S3 stream where you want to know the volume's VCP / instrument
+    /// / time coverage without paying for per-ray decode.
+    ///
+    /// Same compression-agnostic contract as
+    /// [`Self::scan_bytes_volume`]: chunks must be raw, already-
+    /// decompressed bytes from each S3 object.
+    pub fn scan_chunks_volume(&self, chunks: Vec<Vec<u8>>) -> Result<VolumeMetadata> {
+        let combined = concat_chunks(chunks);
+        let scan = decode_bytes(&combined)?;
+        adapter::build_volume_metadata(&scan, Path::new("<chunks>"))
     }
 }
 
@@ -274,5 +323,56 @@ mod tests {
             .nexrad
             .expect("chunks: nexrad attrs present");
         assert_eq!(na, nb);
+    }
+
+    /// Bytes-input metadata fast path: full bytes buffer through
+    /// `scan_bytes_volume` must produce metadata identical to the
+    /// path-based `scan_file` (modulo the internal source-path
+    /// placeholder). The acceptance criterion the downstream chain
+    /// (raw2zarr#244) needs to drop the xradar fallback.
+    #[test]
+    fn scan_bytes_volume_round_trips_match_scan_file() {
+        let path = match std::env::var("RADISH_NEXRAD_FIXTURE") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let bytes = std::fs::read(&path).expect("read fixture");
+
+        let backend = NexradBackend::new();
+        let from_path = backend.scan_file(Path::new(&path)).expect("scan_file");
+        let from_bytes = backend.scan_bytes_volume(bytes).expect("scan_bytes_volume");
+
+        assert_eq!(from_path.instrument_name, from_bytes.instrument_name);
+        assert_eq!(from_path.sweep_fixed_angles, from_bytes.sweep_fixed_angles);
+        // MSG_2 / MSG_5 attrs must match bit-identically — this is the
+        // surface raw2zarr#244 inspects per file.
+        assert_eq!(from_path.nexrad, from_bytes.nexrad);
+    }
+
+    /// Chunked-input metadata fast path. Three-way byte split mirrors
+    /// the existing `read_chunks_volume_round_trips_full_file` shape.
+    #[test]
+    fn scan_chunks_volume_round_trips_match_scan_file() {
+        let path = match std::env::var("RADISH_NEXRAD_FIXTURE") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let n = bytes.len();
+        let chunks = vec![
+            bytes[..n / 3].to_vec(),
+            bytes[n / 3..2 * n / 3].to_vec(),
+            bytes[2 * n / 3..].to_vec(),
+        ];
+
+        let backend = NexradBackend::new();
+        let from_path = backend.scan_file(Path::new(&path)).expect("scan_file");
+        let from_chunks = backend
+            .scan_chunks_volume(chunks)
+            .expect("scan_chunks_volume");
+
+        assert_eq!(from_path.instrument_name, from_chunks.instrument_name);
+        assert_eq!(from_path.sweep_fixed_angles, from_chunks.sweep_fixed_angles);
+        assert_eq!(from_path.nexrad, from_chunks.nexrad);
     }
 }

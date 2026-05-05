@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **NEXRAD: `radish.scan` accepts bytes / file-like / chunk streams**,
+  closing the input-shape asymmetry between `read_nexrad`
+  (path/bytes/file-like/chunks) and `scan_nexrad` (path-only). New
+  format-agnostic `radish.scan(filename_or_obj, backend=None)`
+  dispatcher mirrors `radish.open_datatree` — same input-shape
+  detection, returns `VolumeMetadata` instead of `xr.DataTree`.
+  Two new PyO3 friend functions exposed: `scan_nexrad_bytes(data)`
+  and `scan_nexrad_chunks(chunks)`. **Compression-agnostic**: caller
+  passes already-decompressed AR2V bytes; for `.gz` archives use
+  fsspec's `compression="gzip"` filter, `gzip.decompress(raw)`, or
+  obstore registered as an fsspec backend
+  (`from obstore.fsspec import register`). Closes the
+  fail-fallback-to-xradar pattern in raw2zarr v0.18.0 PR #244 — the
+  ~10× metadata-extraction speedup is now reachable on S3 input
+  through a single `fsspec.open(uri, 'rb').read() →
+  radish.scan(blob)` hop.
+
+### Changed
+
+- **`PyNexradVolumeAttrs` and `PyNexradSweepAttrs` now implement
+  `__eq__`** (via PyO3's `pyclass(eq)` derived from the underlying
+  Rust `PartialEq`). Lets users compare metadata across input
+  shapes (e.g. `radish.scan(path).nexrad_attrs ==
+  radish.scan(bytes).nexrad_attrs`) without walking every field —
+  useful for the parity checks bulk-ingest workflows do per file.
+
 ## [0.2.3] - 2026-05-04
 
 The "pre-Build-12 NEXRAD" release. Adds full support for NEXRAD Level 2 / Archive II files predating Build 12 (March 2012) — the format used by the entire 1991-2012 public archive on AWS / Unidata. `radish.scan(blob)` and `radish.open_datatree(blob)` now succeed on these files where they previously raised `unexpected EOF at offset 36`. Modern Build-12+ LDM files are unchanged (verified against KLOT, KILX). End-to-end smoke on `KVNX20110520_000442_V06.gz` (45.6 MB raw AR2): 17 sweeps × 720 az × 1832 range with full dual-pol moments (DBZH/ZDR/PHIDP/RHOHV) in ~780 ms. (#22)

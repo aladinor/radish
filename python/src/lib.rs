@@ -201,8 +201,13 @@ impl PyVolumeMetadata {
 
 /// Volume-level NEXRAD attrs surfaced from MSG_2 + MSG_5. Field names match
 /// xradar's `Dataset.attrs` keys for drop-in compatibility.
-#[pyclass(name = "NexradVolumeAttrs")]
-#[derive(Clone)]
+///
+/// `eq` derives `__eq__` from the underlying Rust `PartialEq` so users can
+/// `radish.scan(path).nexrad_attrs == radish.scan(bytes).nexrad_attrs` —
+/// useful for the parity checks bulk-ingest workflows do per file (e.g.
+/// raw2zarr#244's chain-equivalence test).
+#[pyclass(name = "NexradVolumeAttrs", eq)]
+#[derive(Clone, PartialEq)]
 pub struct PyNexradVolumeAttrs {
     inner: RustNexradVolumeAttrs,
 }
@@ -319,8 +324,12 @@ impl PyNexradVolumeAttrs {
 
 /// Per-sweep NEXRAD attrs from MSG_5 elevation cuts. Field names match
 /// xradar's per-sweep `Dataset.attrs` keys.
-#[pyclass(name = "NexradSweepAttrs")]
-#[derive(Clone)]
+///
+/// `eq` derives `__eq__` from the underlying Rust `PartialEq` so users
+/// can `attrs_a == attrs_b` rather than walking every field — symmetric
+/// with `PyNexradVolumeAttrs`.
+#[pyclass(name = "NexradSweepAttrs", eq)]
+#[derive(Clone, PartialEq)]
 pub struct PyNexradSweepAttrs {
     inner: RustNexradSweepAttrs,
 }
@@ -837,6 +846,46 @@ fn scan_nexrad(path: &str) -> PyResult<PyVolumeMetadata> {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to scan NEXRAD file: {e}")))
 }
 
+/// Scan a NEXRAD Level 2 volume's metadata from a single in-memory
+/// byte buffer.
+///
+/// The bytes-input twin of `scan_nexrad`. Internal building block —
+/// the public Python entry point is `radish.scan(data)` in
+/// `python/radish/_open.py`. Kept reachable as
+/// `radish._radish.scan_nexrad_bytes` so the dispatcher can import it
+/// without a Rust-only call path.
+///
+/// Pair with `radish.read_nexrad_bytes` for the full-decode
+/// equivalent. Returns ~3× faster on a typical fixture, matching the
+/// `scan_nexrad` vs `read_nexrad` ratio.
+///
+/// **Compression-agnostic**: caller passes already-decompressed AR2V
+/// bytes. radish does not handle gzip; for `.gz` archives use
+/// fsspec's `compression="gzip"` filter or `gzip.decompress(raw)`.
+#[pyfunction]
+fn scan_nexrad_bytes(data: Vec<u8>) -> PyResult<PyVolumeMetadata> {
+    NexradBackend::new()
+        .scan_bytes_volume(data)
+        .map(|inner| PyVolumeMetadata { inner })
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to scan NEXRAD bytes: {e}")))
+}
+
+/// Scan a NEXRAD Level 2 volume's metadata from a sequence of chunk
+/// byte buffers.
+///
+/// Mirrors `read_nexrad_chunks` but skips the per-ray decode. Same
+/// chunk-order contract: `S` first, then `I00..In`, then `E`.
+/// Useful for the `unidata-nexrad-level2-chunks` S3 stream when you
+/// only need VCP / instrument / time-coverage metadata without
+/// paying for per-ray decode.
+#[pyfunction]
+fn scan_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeMetadata> {
+    NexradBackend::new()
+        .scan_chunks_volume(chunks)
+        .map(|inner| PyVolumeMetadata { inner })
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to scan NEXRAD chunks: {e}")))
+}
+
 /// Read a NEXRAD Level 2 volume from a sequence of chunk byte buffers.
 ///
 /// Mirrors xradar's `open_nexradlevel2_datatree(list_of_bytes)` API for the
@@ -959,6 +1008,8 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_cfradial1, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad, m)?)?;
     m.add_function(wrap_pyfunction!(scan_nexrad, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_nexrad_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_nexrad_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(read_nexrad_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(read_sigmet, m)?)?;

@@ -26,11 +26,12 @@ from radish._radish import (
     read_sigmet,
     scan_cfradial1,
     scan_nexrad,
+    scan_nexrad_chunks,
     scan_sigmet,
 )
 
 # Canonical entry points: format-agnostic, input-shape-agnostic.
-from radish._open import detect_backend, open_dataset, open_datatree
+from radish._open import detect_backend, open_dataset, open_datatree, scan
 
 # Single source of truth: the version baked into the wheel by maturin
 # from `python/pyproject.toml`. Avoids the long-standing drift where
@@ -55,6 +56,7 @@ __all__ = [
     # Canonical entry points
     "open_datatree",
     "open_dataset",
+    "scan",
     "detect_backend",
     # Lower-level building blocks (per-format, path-only readers)
     "read_cfradial1",
@@ -62,6 +64,7 @@ __all__ = [
     "read_nexrad",
     "scan_nexrad",
     "read_nexrad_chunks",
+    "scan_nexrad_chunks",
     "read_sigmet",
     "scan_sigmet",
 ]

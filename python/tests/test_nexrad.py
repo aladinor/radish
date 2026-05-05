@@ -634,3 +634,68 @@ def test_radish_matches_xradar_structure(nexrad_fixture):
                     assert rs[v].attrs.get(key) == xs[v].attrs[key], (
                         f"{k}.{v}.attrs[{key!r}]: {rs[v].attrs.get(key)!r} != {xs[v].attrs[key]!r}"
                     )
+
+
+
+def test_scan_path_bytes_filelike_chunks_all_yield_same_metadata(nexrad_fixture):
+    """Phase 4 of plan 0005: `radish.scan` accepts the same 4 input shapes
+    as `radish.open_datatree`, all returning identical `VolumeMetadata`.
+
+    This is the core acceptance check for the bytes/file-like/chunks input
+    path that closes the asymmetry between `radish.scan_nexrad(path)` and
+    `radish.open_datatree(filename_or_obj)`. Pinning strict equality on
+    `attributes` and `nexrad_attrs` (not just instrument_name +
+    sweep_fixed_angles) per the downstream issue's verification plan.
+    """
+    md_path = radish.scan(nexrad_fixture)
+
+    with open(nexrad_fixture, "rb") as f:
+        blob = f.read()
+    md_bytes = radish.scan(blob)
+
+    with open(nexrad_fixture, "rb") as f:
+        md_file = radish.scan(f)
+
+    # Three-way byte split → chunk-list input.
+    n = len(blob)
+    chunks = [blob[: n // 3], blob[n // 3 : 2 * n // 3], blob[2 * n // 3 :]]
+    md_chunks = radish.scan(chunks)
+
+    # Load-bearing scalar fields.
+    for md in (md_bytes, md_file, md_chunks):
+        assert md.instrument_name == md_path.instrument_name
+        assert md.sweep_fixed_angles == md_path.sweep_fixed_angles
+
+    # Strict equality from the downstream issue's verification plan —
+    # full attrs dict + per-sweep MSG_5 list bit-identical (the fields
+    # raw2zarr#244's chain inspects on every file).
+    assert md_path.attributes == md_bytes.attributes
+    assert md_path.attributes == md_file.attributes
+    assert md_path.attributes == md_chunks.attributes
+
+    assert md_path.nexrad_attrs == md_bytes.nexrad_attrs
+    assert md_path.nexrad_attrs == md_file.nexrad_attrs
+    assert md_path.nexrad_attrs == md_chunks.nexrad_attrs
+
+    assert (
+        md_path.nexrad_attrs.sweep_attrs == md_bytes.nexrad_attrs.sweep_attrs
+    )
+
+
+def test_scan_rejects_unsupported_input_types():
+    """`radish.scan` rejects shapes the dispatcher doesn't recognise —
+    same contract as `open_datatree`. Generators and arbitrary objects
+    must raise a clear error rather than silently degrading."""
+    with pytest.raises(TypeError, match="Unsupported input type"):
+        radish.scan(12345)  # int — not path-like, not bytes-like
+    with pytest.raises(TypeError, match="Unsupported input type"):
+        radish.scan(iter([b"chunk1", b"chunk2"]))  # generator
+
+
+def test_scan_explicit_backend_override(nexrad_fixture):
+    """`radish.scan(obj, backend="nexrad")` skips the auto-detect and
+    routes directly. Both the canonical name and the alias must work."""
+    md_canonical = radish.scan(nexrad_fixture, backend="nexrad_level2")
+    md_alias = radish.scan(nexrad_fixture, backend="nexrad")
+    md_auto = radish.scan(nexrad_fixture)
+    assert md_canonical.instrument_name == md_alias.instrument_name == md_auto.instrument_name

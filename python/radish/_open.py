@@ -28,6 +28,11 @@ from radish._radish import (
     read_nexrad_chunks,
     read_sigmet,
     read_sigmet_bytes,
+    scan_cfradial1,
+    scan_nexrad,
+    scan_nexrad_bytes,
+    scan_nexrad_chunks,
+    scan_sigmet,
 )
 
 # Type aliases for input shapes the dispatcher recognises.
@@ -186,6 +191,25 @@ _DISPATCH: Dict[Tuple[str, InputShape], Callable[[Any], Any]] = {
     ("sigmet", SHAPE_FILELIKE): lambda obj: read_sigmet_bytes(obj.read()),
 }
 
+# Metadata-only twin of `_DISPATCH`. Returns `VolumeMetadata` instead
+# of `VolumeData` — same input-shape detection, ~3× faster on the
+# Rust side because it skips per-ray moment materialization.
+#
+# cfradial1 / sigmet bytes/file-like rows are intentionally absent:
+# cfradial1 has no in-memory netCDF open path (libnetcdf doesn't
+# expose one cleanly), and sigmet's metadata-only path doesn't yet
+# have a `scan_sigmet_bytes` PyO3 entry. Falling through to the
+# clear-message ValueError in `_scan_volume` is the right behaviour
+# until those rows can be added.
+_SCAN_DISPATCH: Dict[Tuple[str, InputShape], Callable[[Any], Any]] = {
+    ("nexrad_level2", SHAPE_PATH): lambda obj: scan_nexrad(os.fspath(obj)),
+    ("nexrad_level2", SHAPE_BYTES): lambda obj: scan_nexrad_bytes(bytes(obj)),
+    ("nexrad_level2", SHAPE_FILELIKE): lambda obj: scan_nexrad_bytes(obj.read()),
+    ("nexrad_level2", SHAPE_CHUNKS): lambda obj: scan_nexrad_chunks(_materialize_chunks(obj)),
+    ("cfradial1", SHAPE_PATH): lambda obj: scan_cfradial1(os.fspath(obj)),
+    ("sigmet", SHAPE_PATH): lambda obj: scan_sigmet(os.fspath(obj)),
+}
+
 
 def _read_volume(input_obj: Any, backend: Optional[str]):
     """Pick the right Rust reader for `(backend, shape)` and decode."""
@@ -209,6 +233,34 @@ def _read_volume(input_obj: Any, backend: Optional[str]):
             f"an in-memory open. Pass a path or use NEXRAD bytes/chunks instead.)"
         )
     return reader(input_obj)
+
+
+def _scan_volume(input_obj: Any, backend: Optional[str]):
+    """Pick the right Rust scanner for `(backend, shape)` and extract metadata.
+
+    Metadata-only twin of :func:`_read_volume`. Same shape-detection
+    + backend-sniff path; different dispatch table that calls the
+    `scan_*` PyO3 entries instead of the `read_*` ones. Returns
+    `VolumeMetadata` (not `VolumeData`) — no per-ray moment data.
+    """
+    shape = _classify_shape(input_obj)
+    if backend is None:
+        backend = _sniff_backend(input_obj, shape)
+    if backend is None:
+        raise ValueError(
+            f"radish could not auto-detect a backend for input shape {shape!r}. "
+            f"Pass `backend='nexrad'` or `backend='cfradial1'` explicitly."
+        )
+    scanner = _SCAN_DISPATCH.get((backend, shape))
+    if scanner is None:
+        raise ValueError(
+            f"radish.scan: backend {backend!r} does not support input "
+            f"shape {shape!r}. (cfradial1/sigmet bytes/chunks scan paths "
+            f"are not implemented yet — fall back to "
+            f"`radish.open_datatree(obj).attrs` if you need metadata "
+            f"from those formats over an in-memory buffer.)"
+        )
+    return scanner(input_obj)
 
 
 def open_datatree(
@@ -274,6 +326,99 @@ def open_dataset(
     return RadishBackendEntrypoint()._sweep_to_dataset(sweep, volume.metadata)
 
 
+def scan(
+    filename_or_obj: Any,
+    backend: Optional[str] = None,
+) -> "Any":  # radish.VolumeMetadata
+    """Scan a radar volume's metadata without per-ray decode.
+
+    Format-agnostic dispatcher mirroring :func:`open_datatree` — accepts
+    the same heterogeneous input shapes (path, bytes, file-like, chunk
+    list) and returns a :class:`radish.VolumeMetadata` (instrument
+    name, lat/lon, time coverage, sweep fixed angles, plus
+    format-specific extras like NEXRAD's MSG_2/MSG_5 attrs).
+    Equivalent to :func:`open_datatree` minus the per-sweep
+    ``Array2<f32>`` materialization — ~3× faster on the same input.
+
+    Parameters
+    ----------
+    filename_or_obj
+        Same input shapes as :func:`open_datatree`: a path-like
+        (``str`` / ``os.PathLike``), raw ``bytes`` / ``bytearray`` /
+        ``memoryview``, a file-like with ``.read()``, or a ``list`` /
+        ``tuple`` of bytes/paths (NEXRAD chunk stream). Generators
+        are rejected — wrap with ``list(...)`` first.
+
+        **Compression**: radish is compression-agnostic. Bytes-shaped
+        inputs must be already-decompressed AR2V bytes. For ``.gz``
+        archives, use fsspec's transparent decompression filter
+        (``fsspec.open(uri, "rb", compression="gzip")``) or
+        ``gzip.decompress(raw)`` before passing in.
+
+    backend
+        ``"nexrad_level2"`` (or alias ``"nexrad"``), ``"cfradial1"``,
+        or ``"sigmet"``. ``None`` (default) auto-detects from the
+        input.
+
+    Returns
+    -------
+    radish.VolumeMetadata
+
+    Examples
+    --------
+    The canonical use case is fast metadata extraction at scale on
+    cloud storage. Pre-fetch bytes once via fsspec (or obstore), then
+    let radish parse them — no S3 client bundled in radish-rs::
+
+        import fsspec, radish
+
+        # Local file
+        md = radish.scan("KXXX...V06")
+
+        # S3 via fsspec — auto-decompresses .gz transparently
+        with fsspec.open(
+            "s3://noaa-nexrad-level2/2011/05/20/KVNX/KVNX20110520_000442_V06.gz",
+            "rb",
+            compression="gzip",
+            anon=True,
+        ) as f:
+            md = radish.scan(f)
+
+        # Equivalently — call .read() yourself, pass bytes
+        with fsspec.open(uri, "rb", compression="gzip", anon=True) as f:
+            md = radish.scan(f.read())
+
+        # obstore — no built-in decompression; caller decompresses
+        import gzip
+        import obstore as obs
+        store = obs.store.S3Store("noaa-nexrad-level2", region="us-east-1", anonymous=True)
+        raw = obs.get(store, "2011/05/20/KVNX/KVNX20110520_000442_V06.gz").bytes()
+        md = radish.scan(gzip.decompress(raw))
+
+        # obstore-as-fsspec backend — best of both worlds
+        # (obstore's S3 perf + fsspec's transparent compression filter)
+        from obstore.fsspec import register
+        register()  # makes obstore the default for s3:// in fsspec
+        with fsspec.open(uri, "rb", compression="gzip", anon=True) as f:
+            md = radish.scan(f.read())
+
+        # Chunk stream (unidata-nexrad-level2-chunks)
+        chunks = [open(p, "rb").read() for p in [s_chunk, i01, ..., e_chunk]]
+        md = radish.scan(chunks)
+
+    Notes
+    -----
+    For S3-hosted bulk-ingest workflows, ``radish.scan(s3_bytes)`` is
+    ~10× faster than the closest xradar equivalent
+    (``NEXRADLevel2File(path, loaddata=False)`` + fsspec). On a
+    KLOT V06 fixture the per-file timing is ~150 ms (radish) vs
+    ~1,432 ms (xradar). The savings compound on multi-year backfills
+    — see the radish CHANGELOG for measured numbers.
+    """
+    backend = _normalize_backend(backend)
+    return _scan_volume(filename_or_obj, backend)
+
+
 # ---- internals -----------------------------------------------------------
 
 
@@ -331,4 +476,4 @@ def _build_datatree(volume: Any, fmt: str):
     return RadishBackendEntrypoint()._volume_to_datatree(volume, fmt)
 
 
-__all__ = ["open_datatree", "open_dataset", "detect_backend"]
+__all__ = ["open_datatree", "open_dataset", "scan", "detect_backend"]
