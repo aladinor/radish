@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-05-04
+
+The "pre-Build-12 NEXRAD" release. Adds full support for NEXRAD Level 2 / Archive II files predating Build 12 (March 2012) — the format used by the entire 1991-2012 public archive on AWS / Unidata. `radish.scan(blob)` and `radish.open_datatree(blob)` now succeed on these files where they previously raised `unexpected EOF at offset 36`. Modern Build-12+ LDM files are unchanged (verified against KLOT, KILX). End-to-end smoke on `KVNX20110520_000442_V06.gz` (45.6 MB raw AR2): 17 sweeps × 720 az × 1832 range with full dual-pol moments (DBZH/ZDR/PHIDP/RHOHV) in ~780 ms. (#22)
+
 ### Added
 
 - **NEXRAD: pre-Build-12 raw Archive II support, including
