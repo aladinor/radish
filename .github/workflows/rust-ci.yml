@@ -28,7 +28,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
@@ -41,24 +41,24 @@ jobs:
       # "the configured Python interpreter version (3.14) is newer than
       # PyO3's maximum supported version (3.13)". Pin a compatible
       # interpreter for the workspace build.
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.13'
 
     - name: Cache cargo registry
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo/registry
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Cache cargo index
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Cache cargo build
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: target
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
@@ -96,14 +96,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 
     - name: Set up Python 3.13
       # See `Set up Python 3.13` comment in the `test` job above.
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.13'
 
@@ -127,7 +127,7 @@ jobs:
       run: cargo tarpaulin --verbose --all-features --workspace --exclude radish-python --timeout 120 --out xml
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v6
       with:
         files: ./cobertura.xml
         fail_ci_if_error: false
@@ -137,17 +137,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
+
+    # Inline `cargo audit` instead of `rustsec/audit-check@v2` — that
+    # action has no Node 24-compatible release as of May 2026 and was
+    # the last source of Node.js 20 deprecation warnings on Rust CI.
+    # Direct invocation also makes the ignore-list visible in plain
+    # shell rather than buried in an action input.
+    #
+    # RUSTSEC-2025-0020 is a `pyo3::types::PyString::from_object`
+    # buffer-overflow advisory (patched in pyo3 0.24.1). We pin pyo3
+    # 0.22 because the upstream `nexrad` crate ecosystem hasn't moved
+    # yet, and our bindings in `python/src/lib.rs` don't construct
+    # `PyString` from raw `&str` — we round-trip through PyO3's safe
+    # `String`/`&str` conversions which already null-terminate.
+    # Reassess when we can bump pyo3.
+    - name: Install cargo-audit
+      run: cargo install --locked cargo-audit
 
     - name: Run security audit
-      uses: rustsec/audit-check@v2
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        # RUSTSEC-2025-0020 is a `pyo3::types::PyString::from_object` buffer-
-        # overflow advisory (patched in pyo3 0.24.1). We pin pyo3 0.22 because
-        # the upstream `nexrad` crate ecosystem hasn't moved yet, and our
-        # bindings in `python/src/lib.rs` don't construct `PyString` from
-        # raw `&str` — we round-trip through PyO3's safe `String`/`&str`
-        # conversions which already null-terminate. Reassess when we can
-        # bump pyo3.
-        ignore: RUSTSEC-2025-0020
+      run: cargo audit --ignore RUSTSEC-2025-0020
