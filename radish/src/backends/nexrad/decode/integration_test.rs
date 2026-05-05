@@ -429,20 +429,17 @@ fn decodes_synthesized_raw_archive_ii_buffer() {
 }
 
 /// Fixture-gated test: load a real pre-Build-12 raw Archive II file
-/// (KVNX 2011-05-20) and decode end-to-end via `decode_volume`. Set
-/// `RADISH_NEXRAD_LEGACY_FIXTURE` to the path of an uncompressed
-/// AR2V0006.020 file (the `.gz` decompressed). Ignored by default.
+/// (KVNX 2011-05-20) and decode end-to-end via `decode_volume`,
+/// asserting full moment extraction. Set `RADISH_NEXRAD_LEGACY_FIXTURE`
+/// to the path of an uncompressed AR2V0006.020 file (the `.gz`
+/// decompressed). Ignored by default.
 ///
-/// **Scope of plan 0006**: this fixture validates that the raw-AR2
-/// detection (no LDM size prefix at byte 24) + the lenient
-/// fixed-frame typed-parse path don't crash the decoder, and that
-/// an MSG_31-bearing pre-Build-12 file produces a reasonable sweep
-/// + radial count. The 2011 KVNX file uses Build-11.x MSG_31 with
-/// data-header / block-pointer layout differences from the Build-12+
-/// modern format radish was originally written against; **moment
-/// extraction (REF/VEL/etc.) for these files is a known gap**.
-/// Tracked separately — plan 0006 deliberately stops at "the file
-/// no longer panics; metadata-fast-path through `radish.scan` works."
+/// Pins the Build-11 MSG_31 layout fix (9 pointer slots + 68-byte
+/// header) end-to-end: the file decodes to 17 sweeps, ~8000 radials
+/// with reflectivity moments populated. A regression in
+/// `PointerLayout::detect` or `msg31::parse`'s body-relative pointer
+/// arithmetic surfaces here as either a panic, a missing-moment
+/// adapter error, or a zero-reflectivity volume.
 #[test]
 #[ignore = "needs RADISH_NEXRAD_LEGACY_FIXTURE"]
 fn decodes_kvnx_2011_raw_archive_ii() {
@@ -477,9 +474,26 @@ fn decodes_kvnx_2011_raw_archive_ii() {
         total_radials >= 100,
         "expected >= 100 radials across the volume, got {total_radials}"
     );
+    let radials_with_refl = scan
+        .sweeps
+        .iter()
+        .flat_map(|s| s.radials.iter())
+        .filter(|r| r.reflectivity.is_some())
+        .count();
     eprintln!(
-        "legacy fixture decode summary: {} sweeps, {} radials",
+        "legacy fixture decode summary: {} sweeps, {} radials, {} carry reflectivity",
         scan.sweeps.len(),
-        total_radials
+        total_radials,
+        radials_with_refl,
+    );
+    // Build-11 MSG_31 layout fix: every surveillance radial in a
+    // VCP-12 file (KVNX 2011-05-20) carries a REF block. Allow a
+    // small fraction of intermediate radials to be REF-less, but
+    // the overall ratio must be high — anything substantially below
+    // 50% means moment extraction has regressed.
+    assert!(
+        radials_with_refl * 2 >= total_radials,
+        "expected ≥50% of radials to carry reflectivity, \
+         got {radials_with_refl}/{total_radials}"
     );
 }

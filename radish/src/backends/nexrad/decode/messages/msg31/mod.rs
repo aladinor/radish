@@ -2,24 +2,20 @@
 //!
 //! Parsing strategy:
 //!
-//! 1. Read the 32-byte fixed data header + 10 × `u32` pointers
-//!    (`header.rs`).
-//! 2. For each non-zero pointer, seek the reader to that offset
-//!    (which is **relative to the start of the message** — i.e. to
-//!    the 12-byte TCM prefix's first byte) and decode the block at
-//!    that index per ICD Table XVII-A:
-//!    * indices 0..3 → VOL / ELV / RAD info blocks
-//!    * indices 3..9 → REF / VEL / SW / ZDR / PHI / RHO moment blocks
-//!    * index 9 → CFP block
-//! 3. Pointer order in the file is _not guaranteed_ (per ICD); we
-//!    sort and walk in order so the reader always advances forward.
-//!
-//! Layout note: every block starts with a 4-byte `DataBlockId`
-//! (`b'D'` + 3-byte ASCII name). `info_blocks::DataBlockId::read`
-//! consumes those 4 bytes; the per-block parsers then read their
-//! payload. We do **not** trust the `DataBlockId.name`
-//! programmatically — block routing is by **pointer index** per
-//! ICD Table XVII-A, with the name preserved only for debugging.
+//! 1. Read the data header — 32 fixed bytes plus 9 (Build-11) or 10
+//!    (Build-12+) `u32` pointers; see `header::DataHeader::read` and
+//!    `header::PointerLayout`.
+//! 2. For each non-zero pointer (capped to `data_block_count` and the
+//!    detected slot count), seek the reader to `body_start + ptr`,
+//!    read the 4-byte `DataBlockId`, and route by **name** to the
+//!    matching block parser. Pointer offsets are byte offsets from
+//!    the start of the MSG_31 wire body (i.e. immediately after the
+//!    28-byte combined TCM and Table II header). Slot indices in
+//!    ICD Table XVII-A are advisory only — real files pack the
+//!    valid blocks contiguously into the leading slots regardless
+//!    of which ICD type each slot would conventionally hold.
+//! 3. Pointer order in the file is not guaranteed; we sort and walk
+//!    in order so the forward-only reader always advances.
 
 pub(crate) mod cfp;
 pub(crate) mod header;
@@ -30,9 +26,9 @@ use crate::backends::nexrad::decode::error::{NexradDecodeError, Result};
 use crate::backends::nexrad::decode::reader::SliceReader;
 
 use cfp::CfpBlock;
+use header::DataHeader;
 #[cfg(test)]
-use header::TOTAL_HEADER_SIZE;
-use header::{DataHeader, POINTER_COUNT};
+use header::MODERN_HEADER_SIZE;
 use info_blocks::{DataBlockId, ElevationBlock, RadialBlock, VolumeBlock};
 use moment::MomentBlock;
 
@@ -54,27 +50,23 @@ pub(crate) struct Msg31<'a> {
     pub(crate) cfp: Option<CfpBlock<'a>>,
 }
 
-/// Parse a single MSG_31 message. The reader must be positioned at
-/// the first byte of the data header — i.e. immediately after the
-/// 28-byte combined TCM + Table II header.
+/// Parse a single MSG_31 message. `body_start` is the offset of
+/// the MSG_31 wire body in the input buffer (= `reader.position()`
+/// at the call site, equivalently `tcm_start + 28` since the caller
+/// has already consumed the 12-byte TCM prefix + 16-byte Table II
+/// header). The argument is kept rather than reassigned from
+/// `reader.position()` inside so the caller stays in control of
+/// which position is canonical.
 ///
-/// `message_start_offset` is the offset of the **MSG_31 wire body**
-/// in the input buffer — i.e. `reader.position()` at the call site,
-/// equivalently `tcm_start + 28`. Block pointers in the on-wire
-/// header are byte offsets relative to this position (matching
-/// `danielway/nexrad`'s `start_position` semantics in
-/// `digital_radar_data::Message::parse`, and `xradar`'s
-/// `block_pointer + 12 + LEN_MSG_HEADER` arithmetic at
-/// `nexrad_level2.py:877`). The argument is kept (rather than
-/// reassigned from `reader.position()` inside) so the caller stays
-/// in control of which position is canonical.
-pub(crate) fn parse<'a>(
-    reader: &mut SliceReader<'a>,
-    message_start_offset: usize,
-) -> Result<Msg31<'a>> {
+/// Block pointers in the on-wire header are byte offsets relative
+/// to `body_start`, matching `danielway/nexrad`'s `start_position`
+/// (`digital_radar_data::Message::parse`) and xradar's
+/// `block_pointer + 12 + LEN_MSG_HEADER` arithmetic
+/// (`nexrad_level2.py:877`).
+pub(crate) fn parse<'a>(reader: &mut SliceReader<'a>, body_start: usize) -> Result<Msg31<'a>> {
     debug_assert_eq!(
         reader.position(),
-        message_start_offset,
+        body_start,
         "reader must be positioned at the MSG_31 wire body start \
          (= post TCM + Table II header) — see parse() docstring",
     );
@@ -92,12 +84,11 @@ pub(crate) fn parse<'a>(
     // into the 8 valid pointer slots. Routing by index would
     // mislabel ZDR's gate bytes as VEL.
     //
-    // Cap to the on-wire pointer-slot count (9 for Build-11, 10 for
-    // Build-12+ — exposed by `DataHeader::pointer_slot_count`),
-    // then to `data_block_count`, drop zero slots, and sort by
-    // ptr so the forward-only reader walks forward.
-    let slot_cap = usize::from(header.pointer_slot_count).min(POINTER_COUNT);
-    let valid_len = (header.data_block_count as usize).min(slot_cap);
+    // Cap to the on-wire pointer-slot count (9 for Build-11, 10
+    // for Build-12+ — `header.layout.pointer_count()`), then to
+    // `data_block_count`, drop zero slots, and sort by ptr so the
+    // forward-only reader walks forward.
+    let valid_len = (header.data_block_count as usize).min(header.layout.pointer_count());
     let mut sorted_pointers: Vec<u32> = header
         .pointers
         .iter()
@@ -119,7 +110,7 @@ pub(crate) fn parse<'a>(
     let mut cfp: Option<CfpBlock<'a>> = None;
 
     for ptr in sorted_pointers {
-        let target = message_start_offset.checked_add(ptr as usize).ok_or(
+        let target = body_start.checked_add(ptr as usize).ok_or(
             NexradDecodeError::InvalidPointerOffset {
                 block: "<unknown>",
                 offset: ptr,
@@ -172,14 +163,14 @@ pub(crate) fn parse<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use header::{PTR_ELV, PTR_REF};
+    use header::{POINTER_COUNT, PTR_ELV, PTR_REF};
 
     /// Build a minimal MSG_31 payload (header + REF block only).
     /// `message_start_offset` here is 0 since the synthetic input
     /// has no TCM/Table-II header in front.
     fn synth_msg31_with_ref_only(num_gates: u16) -> Vec<u8> {
         let header_offset = 0usize;
-        let ref_offset = TOTAL_HEADER_SIZE;
+        let ref_offset = MODERN_HEADER_SIZE;
         // REF block: 4-byte DataBlockId + 24-byte descriptor + N gates
         let mut buf = Vec::new();
 
@@ -192,7 +183,7 @@ mod tests {
         buf.push(0); // compression
         buf.push(0); // spare
         buf.extend_from_slice(
-            &((TOTAL_HEADER_SIZE + 4 + 24 + num_gates as usize) as u16).to_be_bytes(),
+            &((MODERN_HEADER_SIZE + 4 + 24 + num_gates as usize) as u16).to_be_bytes(),
         ); // radial_length
         buf.push(2); // az_resolution
         buf.push(1); // radial_status
@@ -208,9 +199,9 @@ mod tests {
             let ptr = if idx == PTR_REF { ref_offset as u32 } else { 0 };
             buf.extend_from_slice(&ptr.to_be_bytes());
         }
-        debug_assert_eq!(buf.len(), TOTAL_HEADER_SIZE);
+        debug_assert_eq!(buf.len(), MODERN_HEADER_SIZE);
 
-        // REF block at offset TOTAL_HEADER_SIZE.
+        // REF block at offset MODERN_HEADER_SIZE.
         buf.extend_from_slice(b"DREF"); // DataBlockId
                                         // Descriptor (24 bytes)
         buf.extend_from_slice(&0u32.to_be_bytes()); // reserved
@@ -227,7 +218,7 @@ mod tests {
         for n in 0..num_gates {
             buf.push((2 + n) as u8);
         }
-        debug_assert_eq!(buf.len(), TOTAL_HEADER_SIZE + 4 + 24 + num_gates as usize);
+        debug_assert_eq!(buf.len(), MODERN_HEADER_SIZE + 4 + 24 + num_gates as usize);
         let _ = header_offset;
         buf
     }
@@ -266,7 +257,7 @@ mod tests {
         let header_offset = 0usize;
 
         // ELV block (8 bytes payload + 4 byte id) at the lower offset.
-        let elv_offset = TOTAL_HEADER_SIZE;
+        let elv_offset = MODERN_HEADER_SIZE;
         // REF block (28-byte descriptor + 4 byte id + 4 gates) at the higher offset.
         let ref_offset = elv_offset + 4 + 8;
 
@@ -349,7 +340,7 @@ mod tests {
     #[test]
     fn parse_routes_by_block_name_not_slot_index() {
         let header_offset = 0usize;
-        let zdr_offset = TOTAL_HEADER_SIZE; // first block right after the 72-byte data header
+        let zdr_offset = MODERN_HEADER_SIZE; // first block right after the 72-byte data header
 
         let mut buf = Vec::new();
         // Header — minimal valid radial.
@@ -381,7 +372,7 @@ mod tests {
             let ptr = if idx == 4 { zdr_offset as u32 } else { 0 };
             buf.extend_from_slice(&ptr.to_be_bytes());
         }
-        debug_assert_eq!(buf.len(), TOTAL_HEADER_SIZE);
+        debug_assert_eq!(buf.len(), MODERN_HEADER_SIZE);
 
         // ZDR block — `DZDR` id + 24-byte descriptor + 2 gates.
         buf.extend_from_slice(b"DZDR");
@@ -419,7 +410,7 @@ mod tests {
     #[test]
     fn parse_skips_unknown_block_names_for_forward_compat() {
         let header_offset = 0usize;
-        let unk_offset = TOTAL_HEADER_SIZE;
+        let unk_offset = MODERN_HEADER_SIZE;
 
         let mut buf = Vec::new();
         buf.extend_from_slice(b"KLOT");
