@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-05-04
+
+The "metadata-fast-path on bytes / streams" release. Closes the input-shape asymmetry between `read_nexrad` (path/bytes/file-like/chunks) and `scan_nexrad` (path-only) that 0.2.3 left in place. After 0.2.3, `radish.open_datatree(blob)` worked on pre-Build-12 NEXRAD via raw Archive II + Build-11 MSG_31 support, but the **metadata-only** fast path still required a temp-file workaround for S3 / fsspec / obstore inputs. 0.2.4 closes that gap with a new format-agnostic `radish.scan(filename_or_obj, backend=None)` dispatcher and the underlying `scan_nexrad_bytes` / `scan_nexrad_chunks` PyO3 functions. End-to-end on a modern KLOT V06 (5.8 MB): `radish.scan(blob)` ≈ 80 ms, vs `radish.open_datatree(blob)` ≈ 200 ms — the 2.5× speedup is now reachable on bytes input, matching what was already available on path input. (#21)
+
 ### Added
 
 - **NEXRAD: `radish.scan` accepts bytes / file-like / chunk streams**,
