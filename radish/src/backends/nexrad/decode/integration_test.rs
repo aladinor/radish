@@ -340,6 +340,20 @@ fn typed_msg31_parser_on_klot_fixture_yields_plausible_radials() {
             "sample {i} collection_time_ms out of range: {}",
             m.header.collection_time_ms
         );
+        // Pin the absolute date the production conversion decodes
+        // to. Calls `msg31_collection_time` directly (the same path
+        // `Radial::from_msg31` uses) rather than re-deriving the
+        // formula inline — re-derivation would silently pass if
+        // the production formula and the test were wrong in the
+        // same direction. Pre-fix this returned 2025-12-11; post-fix
+        // it matches the V06 filename's encoded date.
+        let dt = super::model::msg31_collection_time(&m.header).expect("collection_time decoded");
+        assert_eq!(
+            dt.date_naive(),
+            chrono::NaiveDate::from_ymd_opt(2025, 12, 10).unwrap(),
+            "sample {i} date should be 2025-12-10 (V06 filename truth), not \
+             2025-12-11 — that was the +1-day bug fixed in 0.2.5",
+        );
         // Plausible radial physical fields.
         assert!(
             (0.0..=360.0).contains(&m.header.azimuth_angle_degrees),
@@ -495,5 +509,20 @@ fn decodes_kvnx_2011_raw_archive_ii() {
         radials_with_refl * 2 >= total_radials,
         "expected ≥50% of radials to carry reflectivity, \
          got {radials_with_refl}/{total_radials}"
+    );
+
+    // Pin the absolute date — the V06 filename encodes 2011-05-20,
+    // and post-0.2.5 this MSG_31 path (Build-11.x) decodes to that
+    // date. Pre-0.2.5 the same code returned 2011-05-21, off by
+    // +1 day because of the missing `-1` on the 1-indexed
+    // `modified_julian_date`.
+    let (start, _end) = scan
+        .time_range()
+        .expect("KVNX volume must produce a non-empty time range");
+    assert_eq!(
+        start.date_naive(),
+        chrono::NaiveDate::from_ymd_opt(2011, 5, 20).unwrap(),
+        "time_range start date should be 2011-05-20 (filename: \
+         KVNX20110520_000442_V06), not 2011-05-21 (the +1-day bug)",
     );
 }

@@ -334,15 +334,25 @@ fn legacy_descriptor(
 }
 
 /// Build a `DateTime<Utc>` from the MSG_31 header's
-/// `modified_julian_date` (days since 1970-01-01) and
-/// `collection_time_ms` (ms past midnight). Returns `None` if the
-/// values fall outside the chrono-representable range.
-fn msg31_collection_time(h: &DataHeader) -> Option<DateTime<Utc>> {
-    // Julian Date - 2440586.5 = days since 1970-01-01 00:00 UTC.
+/// `modified_julian_date` and `collection_time_ms`. Returns `None`
+/// if the values fall outside the chrono-representable range.
+///
+/// Per ICD 2620002R Table III §3.2.4.17, `modified_julian_date` is
+/// **1-indexed days since 1970-01-01**: day 1 = 1970-01-01,
+/// day 2 = 1970-01-02, … `collection_time_ms` is milliseconds since
+/// midnight of that day. The `-1` below is the difference between
+/// "1-indexed day-of-epoch" (ICD convention) and "0-indexed
+/// seconds-since-epoch" (Unix convention). Matches xradar's
+/// `(date - 1) * 86400e3 + ms` (`nexrad_level2.py`) and
+/// `danielway/nexrad`'s `volume/record.rs` byte-for-byte.
+pub(crate) fn msg31_collection_time(h: &DataHeader) -> Option<DateTime<Utc>> {
     let days = i64::from(h.modified_julian_date);
     let secs = i64::from(h.collection_time_ms / 1_000);
     let nanos = (h.collection_time_ms % 1_000) * 1_000_000;
-    let total_secs = days.checked_mul(86_400)?.checked_add(secs)?;
+    let total_secs = days
+        .checked_sub(1)?
+        .checked_mul(86_400)?
+        .checked_add(secs)?;
     Utc.timestamp_opt(total_secs, nanos).single()
 }
 
@@ -589,5 +599,76 @@ mod tests {
             radials: vec![],
         };
         assert!(sweep.elevation_angle_degrees().is_none());
+    }
+
+    /// Build a minimal `DataHeader` carrying just the date+time fields
+    /// needed by `msg31_collection_time` — every other field is zero
+    /// or default. Used by the timestamp regression tests below.
+    fn header_with_date(modified_julian_date: u16, collection_time_ms: u32) -> DataHeader {
+        use super::super::messages::msg31::header::PointerLayout;
+        DataHeader {
+            radar_identifier: *b"KLOT",
+            collection_time_ms,
+            modified_julian_date,
+            azimuth_number: 1,
+            azimuth_angle_degrees: 0.0,
+            compression_indicator: 0,
+            radial_length: 0,
+            azimuth_resolution_spacing: 2,
+            radial_status: 0,
+            elevation_number: 1,
+            cut_sector_number: 0,
+            elevation_angle_degrees: 0.0,
+            radial_spot_blanking_status: 0,
+            azimuth_indexing_mode: 0,
+            data_block_count: 0,
+            pointers: [0; 10],
+            layout: PointerLayout::Modern,
+        }
+    }
+
+    /// ICD §3.2.4.17: `modified_julian_date` is **1-indexed days
+    /// since 1970-01-01**, so day 1 with `collection_time_ms=0` must
+    /// decode to exactly the Unix epoch. Catches off-by-one in either
+    /// direction (no `-1` → +1 day; double-`-1` → -1 day).
+    #[test]
+    fn msg31_collection_time_day_1_decodes_to_unix_epoch() {
+        let h = header_with_date(1, 0);
+        let dt = msg31_collection_time(&h).expect("decoded");
+        assert_eq!(dt.timestamp(), 0);
+        assert_eq!(dt.timestamp_subsec_nanos(), 0);
+    }
+
+    /// Property test: for any valid (modified_julian_date, ms),
+    /// decoded date equals `1970-01-01 + (jd - 1) days`. Catches
+    /// future "fixes" that re-introduce off-by-one in a different
+    /// direction (`-2`, `+1`, dropping the `-1` again, etc.) by
+    /// testing the spec relationship rather than a single fixture.
+    #[test]
+    fn msg31_collection_time_property_jd_to_date_relationship() {
+        use proptest::prelude::*;
+        proptest!(|(jd in 1u16..50_000, ms in 0u32..86_400_000)| {
+            let h = header_with_date(jd, ms);
+            let dt = msg31_collection_time(&h).expect("decoded");
+            let expected = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .unwrap()
+                .checked_add_days(chrono::Days::new(u64::from(jd) - 1))
+                .unwrap();
+            prop_assert_eq!(dt.date_naive(), expected);
+        });
+    }
+
+    /// Pin the absolute date for the bug-report's KLOT 2025-12-13
+    /// fixture. Pre-fix this would have decoded to 2025-12-14 (off
+    /// by +86,400 s); post-fix it matches the V06 filename truth and
+    /// xradar's reference implementation.
+    #[test]
+    fn msg31_collection_time_klot_2025_12_13_fixture_pins_filename_truth() {
+        let h = header_with_date(20_436, 64_872_367);
+        let dt = msg31_collection_time(&h).expect("decoded");
+        // 2025-12-13T18:01:12.367Z → unix ms 1_765_648_872_367.
+        assert_eq!(dt.timestamp_millis(), 1_765_648_872_367);
+        let expected = chrono::NaiveDate::from_ymd_opt(2025, 12, 13).unwrap();
+        assert_eq!(dt.date_naive(), expected);
     }
 }

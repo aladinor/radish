@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **NEXRAD: every ray timestamp was off by exactly +1 day** — every
+  sweep, every ray, every NEXRAD Level 2 file across radish-rs
+  versions **0.2.2, 0.2.3, and 0.2.4**. ICD 2620002R Table III
+  §3.2.4.17 specifies the MSG_31 / MSG_1 ray-header
+  `modified_julian_date` field as **1-indexed days since
+  1970-01-01** (day 1 = 1970-01-01), but radish computed
+  `days * 86_400 + secs` (no `-1`), placing day 1 of the epoch at
+  1970-01-02 instead of 1970-01-01. Every decoded timestamp was
+  exactly +86_400_000 ms ahead of truth. Moment data
+  (DBZH/VRADH/ZDR/PHIDP/RHOHV) was unaffected — only the time axis.
+
+  **Affected APIs:** `radish.scan_nexrad`, `radish.scan`,
+  `radish.scan_nexrad_chunks`, `radish.open_datatree`,
+  `radish.open_dataset`, `radish.read_nexrad`,
+  `radish.read_nexrad_chunks` — all share the same date decoder, so
+  all of them were wrong. The bug surfaced in
+  `metadata.time_coverage_start` / `time_coverage_end`,
+  `nexrad_attrs.sweep_time_ranges[i]`, and per-sweep `time` xarray
+  coordinates.
+
+  **Severity:** critical for any consumer using the time axis.
+  Time-series Zarr / icechunk stores keyed on `vcp_time` filed
+  every record under the wrong date; joins with NWP / RAP / HRRR
+  model output landed in the wrong analysis cycle; nowcasting
+  pipelines mistimed adjacent sites.
+
+  **Fix:** insert `-1` in both date-conversion call sites
+  (`decode/model.rs::msg31_collection_time` and
+  `decode/messages/msg1.rs::Msg1::collection_time`) so
+  `unix_secs = (days - 1) * 86_400 + collection_time_ms / 1000`,
+  matching xradar's `nexrad_level2.py:open_sweeps_as_dict` and
+  danielway/nexrad's `volume/record.rs` byte-for-byte.
+
+  **Verified:** the bug-report's reproducer
+  (`s3://unidata-nexrad-level2/2025/12/13/KLOT/KLOT20251213_180112_V06`)
+  now decodes to `time_coverage_start = 2025-12-13T18:01:12Z`
+  matching the V06 filename truth. Plus 4 new regression tests:
+  three unit tests pinning the day-1 boundary + the KLOT
+  filename-truth fixture value, plus tightened integration tests
+  on the KLOT 2025-12-10 + KVNX 2011 fixtures asserting the
+  decoded date matches the filename-encoded one. Filed by the
+  raw2zarr maintainer at
+  `https://github.com/aladinor/raw2zarr` — they currently
+  mitigate with an in-process `-86400` shim that this fix lets
+  them remove. Thanks to the filer for the precise reproducer
+  + cross-implementation comparison against xradar and
+  danielway/nexrad.
+
 ## [0.2.4] - 2026-05-04
 
 The "metadata-fast-path on bytes / streams" release. Closes the input-shape asymmetry between `read_nexrad` (path/bytes/file-like/chunks) and `scan_nexrad` (path-only) that 0.2.3 left in place. After 0.2.3, `radish.open_datatree(blob)` worked on pre-Build-12 NEXRAD via raw Archive II + Build-11 MSG_31 support, but the **metadata-only** fast path still required a temp-file workaround for S3 / fsspec / obstore inputs. 0.2.4 closes that gap with a new format-agnostic `radish.scan(filename_or_obj, backend=None)` dispatcher and the underlying `scan_nexrad_bytes` / `scan_nexrad_chunks` PyO3 functions. End-to-end on a modern KLOT V06 (5.8 MB): `radish.scan(blob)` ≈ 80 ms, vs `radish.open_datatree(blob)` ≈ 200 ms — the 2.5× speedup is now reachable on bytes input, matching what was already available on path input. (#21)
