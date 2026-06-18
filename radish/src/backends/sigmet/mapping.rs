@@ -18,9 +18,9 @@
 use crate::backends::common::{meta_for, OdimMomentMeta};
 
 use super::calibration::{
-    Decoder, DECODE_DBZ_2BYTE, DECODE_DBZ_8BIT, DECODE_NONE, DECODE_PHIDP_2BYTE, DECODE_PHIDP_8BIT,
-    DECODE_RHOHV_2BYTE, DECODE_RHOHV_8BIT, DECODE_VEL_2BYTE, DECODE_VEL_8BIT, DECODE_WIDTH_2BYTE,
-    DECODE_WIDTH_8BIT, DECODE_ZDR_2BYTE, DECODE_ZDR_8BIT,
+    Decoder, DECODE_DBZ_2BYTE, DECODE_DBZ_8BIT, DECODE_KDP_2BYTE, DECODE_KDP_8BIT, DECODE_NONE,
+    DECODE_PHIDP_2BYTE, DECODE_PHIDP_8BIT, DECODE_RHOHV_2BYTE, DECODE_RHOHV_8BIT, DECODE_VEL_2BYTE,
+    DECODE_VEL_8BIT, DECODE_WIDTH_2BYTE, DECODE_WIDTH_8BIT, DECODE_ZDR_2BYTE, DECODE_ZDR_8BIT,
 };
 
 /// How a Sigmet/IRIS data type surfaces in the resulting xarray Dataset.
@@ -140,7 +140,7 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         iris_name: "DB_KDP",
         output_name: "KDP",
         bytes_per_bin: 1,
-        decoder: DECODE_NONE,
+        decoder: DECODE_KDP_8BIT,
         mapping: MomentMapping::Odim,
     },
     SigmetMoment {
@@ -156,7 +156,7 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         iris_name: "DB_SQI",
         output_name: "SQIH",
         bytes_per_bin: 1,
-        decoder: DECODE_NONE,
+        decoder: DECODE_RHOHV_8BIT,
         mapping: MomentMapping::Odim,
     },
     SigmetMoment {
@@ -213,7 +213,7 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         iris_name: "DB_KDP2",
         output_name: "KDP",
         bytes_per_bin: 2,
-        decoder: DECODE_NONE,
+        decoder: DECODE_KDP_2BYTE,
         mapping: MomentMapping::Odim,
     },
     SigmetMoment {

@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sigmet/IRIS: `time` coordinate was a 1970 epoch offset** — every
+  decoded `.RAW` volume placed its rays at `1970-01-01T00:00:08`
+  instead of the absolute acquisition time (e.g.
+  `2022-06-01T00:02:48.818`). The adapter passed only the per-ray
+  `RAY_HEADER` offset (seconds within the sweep) into the coordinate
+  builder, never adding the sweep's absolute `YMDS_TIME` start time;
+  `read_ymds_time` also discarded the milliseconds field. Both are
+  fixed, so the IRIS `time` axis now matches xradar's
+  `open_iris_datatree` to the millisecond. Reported via raw2zarr's
+  IRIS backend, which could not key its `vcp_time` axis on radish
+  until this was resolved. (#28)
+
+- **Sigmet/IRIS: power/phase moments were over-masked vs xradar** —
+  radish masked the IRIS `raw == 0` sentinel for *every* moment,
+  dropping ~75–94% of `DBZH`/`DBTH`/`ZDR`/`PHIDP` cells where xradar
+  keeps the below-threshold values (100% finite). The per-gate decoders
+  now mirror xradar's per-type policy exactly: `decode_array` types
+  (reflectivity, ZDR, width, PHIDP, and all 2-byte variants) are never
+  masked, and `RHOHV`/`SQI` fall to `NaN` only where `sqrt` of a
+  negative naturally does. (#28)
+
+- **Sigmet/IRIS: velocity (`VRADH`) dropped its no-data gates** —
+  radish returned `NaN` at the ~84% of velocity gates with `raw == 0`,
+  while xradar reports `0.0` m/s there. xradar's `DB_VEL` `mask: 0.0`
+  does not surface as `NaN`: `np.ma.masked_equal` leaves the underlying
+  datum, so the masked value collapses to `0.0`. radish's `DB_VEL`
+  8-bit decoder now matches (`raw == 0 → 0.0`), verified byte-for-byte
+  against `open_iris_datatree`. (#28)
+
+- **Sigmet/IRIS: KDP was a raw passthrough; nyquist was hardcoded 0** —
+  `DB_KDP`/`DB_KDP2` emitted raw byte values instead of decoded KDP, and
+  the 8-bit VEL/WIDTH Nyquist scale was `0.0` because the radar
+  wavelength was never parsed. `TASK_MISC_INFO.wavelength` is now read,
+  `DB_KDP` decodes via xradar's exponential transform
+  (`-0.25·sign·600^((127-|d|)/126)/λ`), and the Nyquist velocity is
+  derived as `wavelength·prf/40000`. With these fixes every moment
+  xradar emits (`DBZH`, `DBTH`, `VRADH`, `ZDR`, `RHOHV`, `KDP`,
+  `PHIDP`, `WRADH`, `SQIH`) now matches xradar's decoded values to
+  floating-point precision. (#28)
+
 ## [0.2.5] - 2026-05-05
 
 The "every NEXRAD timestamp was +1 day" fix-only release. ICD 2620002R Table III §3.2.4.17 specifies the per-radial `modified_julian_date` field as 1-indexed days since 1970-01-01, but radish 0.2.2 through 0.2.4 computed `days * 86_400 + secs` (no `-1`), shifting every emitted timestamp by exactly +86,400,000 ms — every sweep, every ray, every file. xradar's `nexrad_level2.py:open_sweeps_as_dict` and danielway/nexrad's `volume/record.rs` both subtract 1; only radish disagreed. Filed by the raw2zarr maintainer, who currently mitigates with an in-process `-86400` shim that 0.2.5 lets them remove. (#26) Plus CI maintenance: GitHub Actions bumped to Node 24-compatible versions before the deprecation deadline (#25).
