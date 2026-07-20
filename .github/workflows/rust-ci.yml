@@ -142,18 +142,17 @@ jobs:
     # Inline `cargo audit` instead of `rustsec/audit-check@v2` — that
     # action has no Node 24-compatible release as of May 2026 and was
     # the last source of Node.js 20 deprecation warnings on Rust CI.
-    # Direct invocation also makes the ignore-list visible in plain
-    # shell rather than buried in an action input.
+    # Direct invocation also keeps any future ignore-list visible in
+    # plain shell rather than buried in an action input.
     #
-    # RUSTSEC-2025-0020 is a `pyo3::types::PyString::from_object`
-    # buffer-overflow advisory (patched in pyo3 0.24.1). We pin pyo3
-    # 0.22 because the upstream `nexrad` crate ecosystem hasn't moved
-    # yet, and our bindings in `python/src/lib.rs` don't construct
-    # `PyString` from raw `&str` — we round-trip through PyO3's safe
-    # `String`/`&str` conversions which already null-terminate.
-    # Reassess when we can bump pyo3.
+    # No `--ignore` entries: every advisory is fixed outright. The
+    # previous `--ignore RUSTSEC-2025-0020` justified pinning pyo3 0.22
+    # on the grounds that "the upstream `nexrad` crate ecosystem hasn't
+    # moved yet" — that was stale. `cargo tree -i pyo3` shows pyo3 is
+    # pulled only by `numpy` and by us; `nexrad` is a dev-dependency
+    # that doesn't depend on pyo3 at all. Nothing pinned us to 0.22.
     - name: Install cargo-audit
       run: cargo install --locked cargo-audit
 
     - name: Run security audit
-      run: cargo audit --ignore RUSTSEC-2025-0020
+      run: cargo audit

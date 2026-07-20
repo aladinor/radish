@@ -56,7 +56,7 @@ use radish::{
 /// per-volume and never grows with sweep count.
 ///
 /// All angle and altitude fields use FM301 units (degrees, metres).
-#[pyclass(name = "VolumeMetadata")]
+#[pyclass(name = "VolumeMetadata", from_py_object)]
 #[derive(Clone)]
 pub struct PyVolumeMetadata {
     inner: RustVolumeMetadata,
@@ -206,7 +206,7 @@ impl PyVolumeMetadata {
 /// `radish.scan(path).nexrad_attrs == radish.scan(bytes).nexrad_attrs` —
 /// useful for the parity checks bulk-ingest workflows do per file (e.g.
 /// raw2zarr#244's chain-equivalence test).
-#[pyclass(name = "NexradVolumeAttrs", eq)]
+#[pyclass(name = "NexradVolumeAttrs", eq, from_py_object)]
 #[derive(Clone, PartialEq)]
 pub struct PyNexradVolumeAttrs {
     inner: RustNexradVolumeAttrs,
@@ -328,7 +328,7 @@ impl PyNexradVolumeAttrs {
 /// `eq` derives `__eq__` from the underlying Rust `PartialEq` so users
 /// can `attrs_a == attrs_b` rather than walking every field — symmetric
 /// with `PyNexradVolumeAttrs`.
-#[pyclass(name = "NexradSweepAttrs", eq)]
+#[pyclass(name = "NexradSweepAttrs", eq, from_py_object)]
 #[derive(Clone, PartialEq)]
 pub struct PyNexradSweepAttrs {
     inner: RustNexradSweepAttrs,
@@ -387,7 +387,7 @@ impl PyNexradSweepAttrs {
 /// Volume-level Sigmet/IRIS attrs (`TaskConfiguration` + `IngestHeader`).
 /// Field names match xradar's `Dataset.attrs` keys for drop-in compatibility
 /// with `xradar.io.open_iris_datatree`.
-#[pyclass(name = "SigmetVolumeAttrs")]
+#[pyclass(name = "SigmetVolumeAttrs", from_py_object)]
 #[derive(Clone)]
 pub struct PySigmetVolumeAttrs {
     inner: RustSigmetVolumeAttrs,
@@ -442,7 +442,7 @@ impl PySigmetVolumeAttrs {
 /// FM301 0-d data variables (`sweep_mode`, `sweep_fixed_angle`) inside
 /// the per-sweep xarray Dataset; this typed accessor is the
 /// lower-level path.
-#[pyclass(name = "SigmetSweepAttrs")]
+#[pyclass(name = "SigmetSweepAttrs", from_py_object)]
 #[derive(Clone)]
 pub struct PySigmetSweepAttrs {
     inner: RustSigmetSweepAttrs,
@@ -536,7 +536,7 @@ impl PyMomentData {
         let arr = self.data.take().ok_or_else(|| {
             PyRuntimeError::new_err("MomentData.data() has already been consumed")
         })?;
-        Ok(PyArray2::from_owned_array_bound(py, arr))
+        Ok(PyArray2::from_owned_array(py, arr))
     }
 
     fn __repr__(&self) -> String {
@@ -659,7 +659,7 @@ impl PySweepData {
     /// can rely on the order.
     #[getter]
     fn azimuth<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.azimuth)
+        PyArray1::from_slice(py, &self.coordinates.azimuth)
     }
 
     /// Per-ray elevation angles (degrees, float32 ndarray of length
@@ -667,14 +667,14 @@ impl PySweepData {
     /// sweeps they're the swept axis.
     #[getter]
     fn elevation<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.elevation)
+        PyArray1::from_slice(py, &self.coordinates.elevation)
     }
 
     /// Per-gate range-axis values in metres (float32 ndarray of length
     /// `num_gates`).
     #[getter]
     fn range<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.range)
+        PyArray1::from_slice(py, &self.coordinates.range)
     }
 
     /// Per-ray timestamps as fractional seconds since the Unix epoch
@@ -682,7 +682,7 @@ impl PySweepData {
     /// `pandas.to_datetime(times, unit="s").values` if needed.
     #[getter]
     fn time<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.time)
+        PyArray1::from_slice(py, &self.coordinates.time)
     }
 
     fn __repr__(&self) -> String {
