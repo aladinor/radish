@@ -289,6 +289,59 @@ def test_mixed_era_radials_land_on_one_common_grid():
     np.testing.assert_array_equal(out, [[162], [162]])
 
 
+def test_same_width_different_scale_is_refused():
+    """Adversarial regression: two radials at the same word size but
+    different scale/offset used to stack into one array with no error,
+    so the single scale_factor/add_offset the inspector hands back
+    decoded half of it onto the wrong physical grid."""
+    coarse = _block(b"DZDR", 8, 16.0, 128.0, [128, 144, 160])  # 0,1,2 dB
+    fine = _block(b"DZDR", 8, 8.0, 64.0, [64, 72, 80])  # 0,1,2 dB
+    record = _radial(1.0, [coarse]) + _radial(2.0, [fine])
+
+    with pytest.raises(radish.MomentEncodingError, match="mixes on-wire"):
+        radish.decode_record_moment(record, "ZDR", (2, 3), np.uint8)
+
+    # An explicit target grid must still work — that is the remap's job.
+    out = radish.decode_record_moment(record, "ZDR", (2, 3), np.uint16, scale=16.0, offset=128.0)
+    physical = out / 16.0 - 128.0 / 16.0
+    np.testing.assert_array_equal(physical, [[0, 1, 2], [0, 1, 2]])
+
+
+def test_same_width_different_scale_is_refused_across_records():
+    coarse = _block(b"DZDR", 8, 16.0, 128.0, [128])
+    fine = _block(b"DZDR", 8, 8.0, 64.0, [64])
+    span = _ldm(_radial(1.0, [coarse])) + _ldm(_radial(2.0, [fine]))
+    with pytest.raises(radish.MomentEncodingError, match="mixes on-wire"):
+        radish.decode_sweep_moment(span, "ZDR", (2, 1), np.uint8)
+
+
+@pytest.mark.parametrize(
+    "azimuths",
+    [[0.0, -0.0, 5.0], [1.0, float("nan"), 0.5], [1.0, -float("nan"), 0.5]],
+    ids=["signed-zero", "nan", "negative-nan"],
+)
+def test_azimuth_sort_matches_numpy_argsort_exactly(azimuths):
+    """The docs tell callers to reorder coordinates with
+    np.argsort(kind="stable"); f32::total_cmp does NOT match it on
+    signed zero or NaN, which would misalign rows against coordinates."""
+    span = _ldm(b"".join(_radial(az, [_ref([i + 1])]) for i, az in enumerate(azimuths)))
+    shape = (len(azimuths), 1)
+    unsorted = radish.decode_sweep_moment(span, "REF", shape, np.uint8)
+    sorted_rows = radish.decode_sweep_moment(span, "REF", shape, np.uint8, sort_by_azimuth=True)
+    order = np.argsort(np.asarray(azimuths, dtype=np.float32), kind="stable")
+    np.testing.assert_array_equal(unsorted[order], sorted_rows)
+
+
+def test_oversized_span_is_refused_without_allocating_every_record():
+    """Adversarial regression: per-record buffers were all allocated
+    before the total row count was checked, so peak memory was
+    records x rays x gates — ~1.5 GiB from 2 MiB of input."""
+    stream = b"".join(_radial(float(i), [_ref([1])]) for i in range(4))
+    span = _ldm(stream) * 8
+    with pytest.raises(radish.MomentEncodingError, match="MSG_31 radials"):
+        radish.decode_sweep_moment(span, "REF", (4, 1), np.uint8)
+
+
 def test_inexact_remap_is_refused_rather_than_approximated():
     record = _radial(30.0, [_zdr8([10])])
     with pytest.raises(radish.MomentEncodingError, match="not an exact integer"):
@@ -557,6 +610,13 @@ def test_sweep0_is_bit_identical_to_xradar(nexrad_fixture):
     order = np.argsort(enc["azimuth"][:nrays], kind="stable")
     sweep0 = xradar.io.open_nexradlevel2_datatree(nexrad_fixture)["sweep_0"].ds
 
+    # Ray alignment is a property of the sweep, not of any one moment —
+    # compute it once so it can't read as if it varied per moment. The
+    # two decoders can disagree on ray *count* (see
+    # test_radish_keeps_the_radial_xradar_drops), so compare the rays
+    # they both produced rather than assuming aligned indices.
+    shared = _shared_rays(enc["azimuth"][:nrays][order], sweep0["azimuth"].values)
+
     compared = 0
     for name, moment in enc["moments"].items():
         odim = NEXRAD_TO_ODIM[name]
@@ -567,14 +627,10 @@ def test_sweep0_is_bit_identical_to_xradar(nexrad_fixture):
         mine = radish.decode_sweep_moment(span, name, (enc["radial_count"], var.shape[1]), dtype)[
             :nrays
         ][order]
-        theirs = _xradar_raw(var, dtype)
-
-        # Match on azimuth: the two decoders can disagree on ray *count*
-        # (see test_radish_keeps_the_radial_xradar_drops), so compare the
-        # rays they both produced rather than assuming aligned indices.
-        shared = _shared_rays(enc["azimuth"][:nrays][order], sweep0["azimuth"].values)
         np.testing.assert_array_equal(
-            mine[shared], theirs, err_msg=f"{name} -> {odim} diverged from xradar"
+            mine[shared],
+            _xradar_raw(var, dtype),
+            err_msg=f"{name} -> {odim} diverged from xradar",
         )
         compared += 1
 

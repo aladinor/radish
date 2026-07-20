@@ -1105,21 +1105,24 @@ fn raw_moment_to_py(
     raw: RawMoment,
     out_shape: (usize, usize),
 ) -> PyResult<PyObject> {
-    let shape_err = |e: ndarray::ShapeError| PyRuntimeError::new_err(e.to_string());
-    Ok(match raw {
-        RawMoment::U8(values) => PyArray2::from_owned_array_bound(
-            py,
-            Array2::from_shape_vec(out_shape, values).map_err(shape_err)?,
-        )
-        .into_any()
-        .unbind(),
-        RawMoment::U16(values) => PyArray2::from_owned_array_bound(
-            py,
-            Array2::from_shape_vec(out_shape, values).map_err(shape_err)?,
-        )
-        .into_any()
-        .unbind(),
-    })
+    /// The length always matches `out_shape` — both come from the same
+    /// `DemuxOptions` — so the error path is an invariant check, not a
+    /// user-input path.
+    fn to_py<T: numpy::Element>(
+        py: Python<'_>,
+        values: Vec<T>,
+        shape: (usize, usize),
+    ) -> PyResult<PyObject> {
+        let array = Array2::from_shape_vec(shape, values)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyArray2::from_owned_array_bound(py, array)
+            .into_any()
+            .unbind())
+    }
+    match raw {
+        RawMoment::U8(values) => to_py(py, values, out_shape),
+        RawMoment::U16(values) => to_py(py, values, out_shape),
+    }
 }
 
 /// Convert a `RecordInventory` into the plain dict the Python API

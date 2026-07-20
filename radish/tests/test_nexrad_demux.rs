@@ -219,7 +219,8 @@ fn kvnx_cross_era_zdr_lands_on_one_grid() {
             }
             for &raw in row {
                 assert_ne!(raw, u16::MAX, "{path:?}: fill leaked into a decoded row");
-                let physical = (f64::from(raw) - 418.0) / 32.0;
+                let physical =
+                    (f64::from(raw) - f64::from(target.offset)) / f64::from(target.scale);
                 assert!(
                     physical >= floor - 1e-9,
                     "{path:?}: {physical} fell below the source floor {floor}"

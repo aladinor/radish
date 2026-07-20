@@ -107,18 +107,28 @@
 //! apart should read `gate_count` from [`record_moment_encoding`] and
 //! slice — the raw words alone cannot distinguish them, on either grid.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use rayon::prelude::*;
 
 use crate::{RadishError, Result};
 
+use super::decode::error::NexradDecodeError;
 use super::decode::header::MessageType;
 use super::decode::messages::msg31::moment::MomentDescriptor;
 use super::decode::messages::msg31::Msg31;
 use super::decode::messages::{decode_messages, Message, MessagePayload};
-use super::decode::record::{decompress, split_ldm_records};
+use super::decode::record::{decompress, is_raw_archive2, raw_archive2_body, split_ldm_records};
+
+/// Wrap a decoder-layer error as a crate-level one. Used at every
+/// boundary between `decode::` and this module; a named fn keeps the
+/// seven call sites from drifting onto different variants.
+fn decode_err(error: NexradDecodeError) -> RadishError {
+    RadishError::Decode(error.to_string())
+}
 
 /// Which Message 31 moment to demultiplex.
 ///
@@ -341,11 +351,30 @@ impl RawMoment {
         self.len() == 0
     }
 
-    fn filled(word: OutputWord, len: usize, fill: u16) -> Self {
-        match word {
-            OutputWord::U8 => Self::U8(vec![fill as u8; len]),
-            OutputWord::U16 => Self::U16(vec![fill; len]),
+    /// Allocate `len` cells pre-filled with `fill`, **fallibly**.
+    ///
+    /// `vec![fill; len]` routes allocation failure to `handle_alloc_error`,
+    /// which aborts the process — and an abort cannot be turned back into
+    /// a Python exception. `DemuxOptions::validate` caps the element
+    /// count, but a cap in elements is not a cap in bytes and says
+    /// nothing about the memory a cgroup-limited worker actually has, so
+    /// reserve fallibly and report instead.
+    fn filled(word: OutputWord, len: usize, fill: u16) -> Result<Self> {
+        fn try_filled<T: Copy>(len: usize, fill: T) -> Result<Vec<T>> {
+            let mut v: Vec<T> = Vec::new();
+            v.try_reserve_exact(len).map_err(|_| {
+                RadishError::MomentEncoding(format!(
+                    "could not allocate {len} x {} bytes for the output array",
+                    std::mem::size_of::<T>()
+                ))
+            })?;
+            v.resize(len, fill);
+            Ok(v)
         }
+        Ok(match word {
+            OutputWord::U8 => Self::U8(try_filled(len, fill as u8)?),
+            OutputWord::U16 => Self::U16(try_filled(len, fill)?),
+        })
     }
 
     /// Copy `src` (a contiguous run of whole rows) into `self` starting
@@ -424,17 +453,6 @@ impl MomentEncoding {
         }
     }
 
-    fn fold(&mut self, d: &MomentDescriptor) {
-        self.radials_present += 1;
-        self.max_gate_count = self.max_gate_count.max(d.gate_count);
-        if d.data_word_size_bits != self.word_size
-            || d.scale != self.scale
-            || d.offset != self.offset
-        {
-            self.uniform = false;
-        }
-    }
-
     /// Merge another inventory's view of the same moment into this one.
     fn merge(&mut self, other: &Self) {
         self.radials_present += other.radials_present;
@@ -485,10 +503,14 @@ impl RecordInventory {
         self.modified_julian_date.push(h.modified_julian_date);
         for selector in MomentSelector::ALL {
             if let Some((descriptor, _)) = select_block(msg, selector) {
+                // Same shape as `append` below — one definition of what
+                // makes an encoding non-uniform, rather than a separate
+                // `fold` that had to be kept in lockstep with `merge`.
+                let seen = MomentEncoding::from_descriptor(descriptor);
                 self.moments
                     .entry(selector)
-                    .and_modify(|e| e.fold(descriptor))
-                    .or_insert_with(|| MomentEncoding::from_descriptor(descriptor));
+                    .and_modify(|e| e.merge(&seen))
+                    .or_insert(seen);
             }
         }
     }
@@ -521,8 +543,88 @@ struct Remap {
     bias: u32,
 }
 
+/// Identity of a block's on-wire encoding: `(word_size_bits, scale bits,
+/// offset bits)`. Compared bitwise so `f32` equality quirks can't make
+/// two different grids look the same.
+type EncodingKey = (u8, u32, u32);
+
+fn encoding_key(descriptor: &MomentDescriptor) -> EncodingKey {
+    (
+        descriptor.data_word_size_bits,
+        descriptor.scale.to_bits(),
+        descriptor.offset.to_bits(),
+    )
+}
+
+/// Resolves each block's transform while enforcing the single most
+/// important invariant of the whole module: **every value in one output
+/// array must land on one physical grid.**
+///
+/// With a `target`, blocks may differ — each is remapped onto the common
+/// grid, which is the entire point. Without one, the caller has been
+/// handed a single `scale_factor`/`add_offset` pair by the inspector, so
+/// two blocks with different `scale`/`offset` would silently decode half
+/// the array onto the wrong grid. Checking only `word_size` (as an
+/// earlier version did) is not enough: same width, different scale is
+/// exactly the case that slips through.
+///
+/// Doubles as a memo — one record's radials essentially always share an
+/// encoding, so `Remap::resolve`'s float work runs once per record
+/// rather than once per radial.
+#[derive(Debug, Default)]
+struct RemapPin {
+    pinned: Option<(EncodingKey, Remap)>,
+}
+
+impl RemapPin {
+    fn resolve(
+        &mut self,
+        descriptor: &MomentDescriptor,
+        selector: MomentSelector,
+        opts: &DemuxOptions,
+    ) -> Result<Remap> {
+        let key = encoding_key(descriptor);
+        match self.pinned {
+            Some((pinned_key, remap)) if pinned_key == key => Ok(remap),
+            Some((pinned_key, _)) if opts.target.is_none() => {
+                Err(mixed_encoding_error(selector, pinned_key, key))
+            }
+            _ => {
+                let remap = Remap::resolve(descriptor, selector, opts)?;
+                self.pinned = Some((key, remap));
+                Ok(remap)
+            }
+        }
+    }
+
+    /// The encoding this call settled on, for the cross-record check.
+    fn key(&self) -> Option<EncodingKey> {
+        self.pinned.map(|(key, _)| key)
+    }
+}
+
+fn mixed_encoding_error(
+    selector: MomentSelector,
+    (first_bits, first_scale, first_offset): EncodingKey,
+    (next_bits, next_scale, next_offset): EncodingKey,
+) -> RadishError {
+    RadishError::MomentEncoding(format!(
+        "{} mixes on-wire encodings within one call — (word_size={first_bits}, \
+         scale={}, offset={}) and (word_size={next_bits}, scale={}, offset={}). \
+         A single output array carries one scale_factor/add_offset, so these cannot \
+         share it. Pass scale=/offset= to remap both onto a common grid.",
+        selector.name(),
+        f32::from_bits(first_scale),
+        f32::from_bits(first_offset),
+        f32::from_bits(next_scale),
+        f32::from_bits(next_offset),
+    ))
+}
+
 impl Remap {
-    /// Whether this is a pure pass-through (mask only).
+    /// Pure pass-through — mask only, no affine step. Gates the memcpy
+    /// fast path in `write_row`; see the comment there for why it earns
+    /// its keep.
     fn is_identity(&self) -> bool {
         self.ratio == 1 && self.bias == 0
     }
@@ -668,6 +770,10 @@ struct RecordRows {
     /// `rows` is the authority on the row count either way.
     azimuth: Vec<f32>,
     rows: usize,
+    /// The on-wire encoding this record's blocks used, if it carried the
+    /// moment at all. `stitch` compares these across records so a
+    /// per-record check can't miss a disagreement *between* records.
+    encoding: Option<EncodingKey>,
 }
 
 impl RecordRows {
@@ -695,16 +801,22 @@ fn write_row(
     }
     let base = row * gates;
 
-    // Four (source width x output width) combinations, each a tight
-    // loop. `is_identity` skips the multiply-add entirely on the
-    // overwhelmingly common no-remap path.
+    // Two source widths x two output widths.
+    //
+    // The 8-bit identity branch is load-bearing, not redundant: with no
+    // remap the mask is `0xFF` (a no-op on a widened `u8`) and the
+    // multiply-add is 1/0, so the loop reduces to a widening copy that
+    // LLVM lowers to a memcpy for `u8` output. Routing it through
+    // `remap.apply` instead blocks that and measured a **2.1x
+    // regression on the whole call** for REF (0.071 -> 0.150 ms), which
+    // is why it survives looking like dead code.
     macro_rules! fill {
         ($out:expr, $ty:ty) => {{
             let dst_row = &mut $out[base..base + gates];
             if word_bytes == 1 {
                 if remap.is_identity() {
                     for (slot, &b) in dst_row.iter_mut().zip(gate_bytes) {
-                        *slot = (u32::from(b) & remap.mask) as $ty;
+                        *slot = b as $ty;
                     }
                 } else {
                     for (slot, &b) in dst_row.iter_mut().zip(gate_bytes) {
@@ -712,9 +824,18 @@ fn write_row(
                     }
                 }
             } else {
+                // Load with `u16::from_be_bytes` and stay in u16 lanes.
+                // Building the word as `(u32::from(hi) << 8) | u32::from(lo)`
+                // blocks LLVM's vectorised byteswap and measured ~4x
+                // slower on this loop — a 2x regression on the whole
+                // call for the 16-bit moments (ZDR/PHI). Safe because
+                // `Remap::resolve` proves `mask * ratio + bias` fits the
+                // output mask, hence u16, before we ever get here.
+                let (mask, ratio, bias) =
+                    (remap.mask as u16, remap.ratio as u16, remap.bias as u16);
                 for (slot, pair) in dst_row.iter_mut().zip(gate_bytes.chunks_exact(2)) {
-                    let raw = (u32::from(pair[0]) << 8) | u32::from(pair[1]);
-                    *slot = remap.apply(raw) as $ty;
+                    let raw = u16::from_be_bytes([pair[0], pair[1]]);
+                    *slot = ((raw & mask).wrapping_mul(ratio).wrapping_add(bias)) as $ty;
                 }
             }
             // Right-pad with the remap of raw 0, not `fill_value`.
@@ -772,15 +893,18 @@ fn parse_radials<'a>(messages: &'a [Message<'a>]) -> Result<Vec<&'a Msg31<'a>>> 
 /// of `dst`. `dst` must already be sized and pre-filled with
 /// `fill_value` — rows whose radial lacks the moment are simply left
 /// alone.
+/// Returns the encoding these radials settled on, so the sweep path can
+/// check that separate records agree with each other too.
 fn write_radials(
     dst: &mut RawMoment,
     start_row: usize,
     radials: &[&Msg31<'_>],
     opts: &DemuxOptions,
-) -> Result<()> {
+) -> Result<Option<EncodingKey>> {
+    let mut pin = RemapPin::default();
     for (offset, msg) in radials.iter().enumerate() {
         if let Some((descriptor, gate_bytes)) = select_block(msg, opts.moment) {
-            let remap = Remap::resolve(descriptor, opts.moment, opts)?;
+            let remap = pin.resolve(descriptor, opts.moment, opts)?;
             write_row(
                 dst,
                 start_row + offset,
@@ -791,7 +915,7 @@ fn write_radials(
             )?;
         }
     }
-    Ok(())
+    Ok(pin.key())
 }
 
 /// Walk one already-decompressed message stream and demultiplex the
@@ -805,8 +929,9 @@ fn demux_message_stream(
     stream: &[u8],
     opts: &DemuxOptions,
     want_azimuth: bool,
+    running_rows: &AtomicUsize,
 ) -> Result<RecordRows> {
-    let messages = decode_messages(stream).map_err(|e| RadishError::Decode(e.to_string()))?;
+    let messages = decode_messages(stream).map_err(decode_err)?;
     let radials = parse_radials(&messages)?;
 
     // Guard the allocation on the *radial* count, which is independent
@@ -814,10 +939,19 @@ fn demux_message_stream(
     // record with more radials than `rays` could otherwise wrap here and
     // index out of bounds further down.
     opts.check_rows_fit(radials.len())?;
+    // Then guard the *running* total across every record decoded so far.
+    // Each worker holds its own buffer until `stitch` runs, so without
+    // this the peak is `records x rays x gates` rather than the
+    // `rays x gates` the caller declared — enough to abort the process
+    // from a couple of megabytes of input. Checking here means we bail
+    // before this worker allocates, so the sum of live buffers can never
+    // exceed the declared output size.
+    let prior = running_rows.fetch_add(radials.len(), AtomicOrdering::Relaxed);
+    opts.check_rows_fit(prior + radials.len())?;
     let len = radials.len() * opts.gates; // bounded by check_rows_fit + validate
 
-    let mut data = RawMoment::filled(opts.word, len, opts.fill_value);
-    write_radials(&mut data, 0, &radials, opts)?;
+    let mut data = RawMoment::filled(opts.word, len, opts.fill_value)?;
+    let encoding = write_radials(&mut data, 0, &radials, opts)?;
     // Only materialise azimuths when a sort will actually consume them.
     let azimuth = if want_azimuth {
         radials
@@ -831,13 +965,14 @@ fn demux_message_stream(
         data,
         azimuth,
         rows: radials.len(),
+        encoding,
     })
 }
 
 /// Collect the per-radial headers and per-moment encodings of one
 /// already-decompressed message stream.
 fn inventory_message_stream(stream: &[u8]) -> Result<RecordInventory> {
-    let messages = decode_messages(stream).map_err(|e| RadishError::Decode(e.to_string()))?;
+    let messages = decode_messages(stream).map_err(decode_err)?;
     let mut inventory = RecordInventory::default();
     for msg in parse_radials(&messages)? {
         inventory.push_radial(msg);
@@ -855,7 +990,24 @@ fn stitch(
     let total: usize = per_record.iter().map(RecordRows::rows).sum();
     opts.check_rows_fit(total)?;
 
-    let mut out = RawMoment::filled(opts.word, opts.rays * opts.gates, opts.fill_value);
+    // Each record vetted its own blocks; this catches records that are
+    // each internally consistent but disagree with one another. Only
+    // matters with no target grid — with one, differing encodings are
+    // the case the remap exists to handle.
+    if opts.target.is_none() {
+        let mut seen: Option<EncodingKey> = None;
+        for record in &per_record {
+            match (seen, record.encoding) {
+                (Some(first), Some(next)) if first != next => {
+                    return Err(mixed_encoding_error(opts.moment, first, next));
+                }
+                (None, Some(next)) => seen = Some(next),
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = RawMoment::filled(opts.word, opts.rays * opts.gates, opts.fill_value)?;
     let mut azimuth = Vec::with_capacity(if sort_by_azimuth { total } else { 0 });
     let mut row = 0usize;
     for record in &per_record {
@@ -865,11 +1017,22 @@ fn stitch(
     }
 
     if sort_by_azimuth && total > 1 {
-        // Stable sort so equal azimuths keep record order — callers
-        // reproduce this permutation for their coordinate arrays with
-        // `np.argsort(azimuth, kind="stable")`.
+        // Stable sort matching `np.argsort(azimuth, kind="stable")`
+        // exactly, which callers are told to use to reorder their
+        // coordinate arrays. `f32::total_cmp` would *not* match: it
+        // orders -0.0 before +0.0 and puts negative NaN first, where
+        // numpy treats +/-0.0 as equal (so stability keeps record
+        // order) and sorts every NaN last.
         let mut order: Vec<usize> = (0..total).collect();
-        order.sort_by(|a, b| azimuth[*a].total_cmp(&azimuth[*b]));
+        order.sort_by(|a, b| {
+            let (x, y) = (azimuth[*a], azimuth[*b]);
+            match (x.is_nan(), y.is_nan()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            }
+        });
         out.permute_rows(&order, opts.gates);
     }
     Ok(out)
@@ -886,7 +1049,7 @@ fn stitch(
 /// See the module docs for the full output contract.
 pub fn decode_record_moment(record: &[u8], opts: &DemuxOptions) -> Result<RawMoment> {
     opts.validate()?;
-    let messages = decode_messages(record).map_err(|e| RadishError::Decode(e.to_string()))?;
+    let messages = decode_messages(record).map_err(decode_err)?;
     let radials = parse_radials(&messages)?;
     opts.check_rows_fit(radials.len())?;
 
@@ -894,9 +1057,35 @@ pub fn decode_record_moment(record: &[u8], opts: &DemuxOptions) -> Result<RawMom
     // into it. Going through `stitch` would allocate and memset a
     // second buffer and then memcpy — ~3x the memory traffic on the
     // path the module docs advertise at ~0.06 ms per record.
-    let mut out = RawMoment::filled(opts.word, opts.rays * opts.gates, opts.fill_value);
+    let mut out = RawMoment::filled(opts.word, opts.rays * opts.gates, opts.fill_value)?;
     write_radials(&mut out, 0, &radials, opts)?;
     Ok(out)
+}
+
+/// Walk a compressed span's records in parallel, applying `f` to each
+/// decompressed message stream and preserving record order.
+///
+/// The single home for the rayon record pipeline that `CLAUDE.md` names
+/// as a regression gate — previously spelled out once per sweep entry
+/// point, so a change could silently de-parallelise one of them. Also
+/// routes pre-Build-12 raw Archive II files (no LDM wrapper) the way
+/// `decode_volume` does, which the sweep entry points used to skip:
+/// without it a legacy file died in `split_ldm_records` with a generic
+/// decode error instead of reaching the MSG_1 refusal.
+fn par_map_streams<T, F>(span: &[u8], f: F) -> Result<Vec<T>>
+where
+    T: Send,
+    F: Fn(&[u8]) -> Result<T> + Sync + Send,
+{
+    if is_raw_archive2(span) {
+        let body = raw_archive2_body(span).map_err(decode_err)?;
+        return Ok(vec![f(body)?]);
+    }
+    split_ldm_records(span)
+        .map_err(decode_err)?
+        .par_iter()
+        .map(|record| f(&decompress(record).map_err(decode_err)?))
+        .collect()
 }
 
 /// Demultiplex one moment out of a **compressed** sweep-sized byte
@@ -918,14 +1107,13 @@ pub fn decode_sweep_moment(
     sort_by_azimuth: bool,
 ) -> Result<RawMoment> {
     opts.validate()?;
-    let records = split_ldm_records(span).map_err(|e| RadishError::Decode(e.to_string()))?;
-    let per_record: Vec<RecordRows> = records
-        .par_iter()
-        .map(|record| {
-            let payload = decompress(record).map_err(|e| RadishError::Decode(e.to_string()))?;
-            demux_message_stream(&payload, opts, sort_by_azimuth)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // Shared across workers so a span whose records sum to more rows
+    // than `rays` errors *before* N buffers exist. See
+    // `demux_message_stream`.
+    let running_rows = AtomicUsize::new(0);
+    let per_record = par_map_streams(span, |stream| {
+        demux_message_stream(stream, opts, sort_by_azimuth, &running_rows)
+    })?;
     stitch(per_record, opts, sort_by_azimuth)
 }
 
@@ -943,14 +1131,7 @@ pub fn record_moment_encoding(record: &[u8]) -> Result<RecordInventory> {
 /// [`decode_sweep_moment`] counterpart of [`record_moment_encoding`];
 /// same input framing, same rayon-parallel record walk.
 pub fn sweep_moment_encoding(span: &[u8]) -> Result<RecordInventory> {
-    let records = split_ldm_records(span).map_err(|e| RadishError::Decode(e.to_string()))?;
-    let per_record: Vec<RecordInventory> = records
-        .par_iter()
-        .map(|record| {
-            let payload = decompress(record).map_err(|e| RadishError::Decode(e.to_string()))?;
-            inventory_message_stream(&payload)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let per_record = par_map_streams(span, inventory_message_stream)?;
     let mut merged = RecordInventory::default();
     for inventory in per_record {
         merged.append(inventory);
@@ -1078,13 +1259,7 @@ mod tests {
     }
 
     fn ref_block(gates: Vec<u32>) -> Block {
-        Block {
-            name: b"DREF",
-            word_size: 8,
-            scale: 2.0,
-            offset: 66.0,
-            gates,
-        }
+        named_block(b"DREF", gates)
     }
 
     fn named_block(name: &'static [u8; 4], gates: Vec<u32>) -> Block {
@@ -1573,6 +1748,185 @@ mod tests {
             let _ = record_moment_encoding(&bytes);
             let _ = sweep_moment_encoding(&bytes);
         }
+    }
+
+    /// **Adversarial regression.** Two radials with the *same* word
+    /// size but different `scale`/`offset` used to stack into one array
+    /// with no error, so the single `scale_factor`/`add_offset` the
+    /// caller is handed decoded half of it onto the wrong physical
+    /// grid — silent wrong data, the exact failure this module exists
+    /// to prevent. Checking only `word_size` was not enough.
+    #[test]
+    fn same_width_different_scale_is_refused_without_a_target() {
+        // Both blocks encode 0.0/1.0/2.0 dB, on different grids.
+        let coarse = Block {
+            name: b"DZDR",
+            word_size: 8,
+            scale: 16.0,
+            offset: 128.0,
+            gates: vec![128, 144, 160],
+        };
+        let fine = Block {
+            name: b"DZDR",
+            word_size: 8,
+            scale: 8.0,
+            offset: 64.0,
+            gates: vec![64, 72, 80],
+        };
+        let mut record = radial(1.0, &[coarse]);
+        record.extend_from_slice(&radial(2.0, &[fine]));
+
+        let error = decode_record_moment(&record, &opts(MomentSelector::Zdr, 2, 3, OutputWord::U8))
+            .unwrap_err();
+        assert!(
+            matches!(error, RadishError::MomentEncoding(ref m) if m.contains("mixes on-wire")),
+            "got {error}"
+        );
+
+        // The same bytes with an explicit target grid must still work —
+        // that is precisely what the remap is for.
+        let mut o = opts(MomentSelector::Zdr, 2, 3, OutputWord::U16);
+        o.target = Some(TargetEncoding {
+            scale: 16.0,
+            offset: 128.0,
+        });
+        let out = decode_record_moment(&record, &o).unwrap();
+        assert_eq!(u16s(&out), &[128, 144, 160, 128, 144, 160]);
+    }
+
+    /// The same disagreement, but split across two LDM records so each
+    /// record is internally consistent. Caught by the cross-record
+    /// check in `stitch`, not the per-record pin.
+    #[test]
+    fn same_width_different_scale_is_refused_across_records() {
+        let coarse = Block {
+            name: b"DZDR",
+            word_size: 8,
+            scale: 16.0,
+            offset: 128.0,
+            gates: vec![128],
+        };
+        let fine = Block {
+            name: b"DZDR",
+            word_size: 8,
+            scale: 8.0,
+            offset: 64.0,
+            gates: vec![64],
+        };
+        let mut span = ldm_record(&radial(1.0, &[coarse]));
+        span.extend_from_slice(&ldm_record(&radial(2.0, &[fine])));
+
+        let error = decode_sweep_moment(
+            &span,
+            &opts(MomentSelector::Zdr, 2, 1, OutputWord::U8),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, RadishError::MomentEncoding(ref m) if m.contains("mixes on-wire")),
+            "got {error}"
+        );
+    }
+
+    /// **Adversarial regression.** Every record's rows used to be
+    /// allocated before the *total* was checked, so peak memory was
+    /// `records x rays x gates` rather than the `rays x gates` the
+    /// caller declared — ~1.5 GiB from 2 MiB of input, enough to abort
+    /// the process. The running total now trips before the buffers
+    /// exist.
+    #[test]
+    fn sweep_rejects_an_oversized_span_before_allocating_every_record() {
+        // 8 records x 4 radials, into an out_shape with room for 4.
+        let stream: Vec<u8> = (0..4)
+            .flat_map(|i| radial(i as f32, &[ref_block(vec![1])]))
+            .collect();
+        let mut span = Vec::new();
+        for _ in 0..8 {
+            span.extend_from_slice(&ldm_record(&stream));
+        }
+        let error = decode_sweep_moment(
+            &span,
+            &opts(MomentSelector::Ref, 4, 1, OutputWord::U8),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, RadishError::MomentEncoding(ref m) if m.contains("MSG_31 radials")),
+            "got {error}"
+        );
+    }
+
+    /// **Adversarial regression.** `f32::total_cmp` orders `-0.0`
+    /// before `+0.0` and puts negative NaN first; `np.argsort(kind=
+    /// "stable")` — which the docs tell callers to use for their
+    /// coordinate arrays — treats the zeros as equal and sorts NaN
+    /// last. Misaligned rows against coordinates either way.
+    #[test]
+    fn azimuth_sort_matches_numpy_on_signed_zero_and_nan() {
+        let cases: [(&str, [f32; 3], [u8; 3]); 3] = [
+            ("+0.0 then -0.0", [0.0, -0.0, 5.0], [1, 2, 3]),
+            ("negative NaN", [1.0, f32::NAN, 0.5], [3, 1, 2]),
+            ("positive NaN", [1.0, -f32::NAN, 0.5], [3, 1, 2]),
+        ];
+        for (label, azimuths, expected) in cases {
+            let stream: Vec<u8> = azimuths
+                .iter()
+                .enumerate()
+                .flat_map(|(i, &az)| radial(az, &[ref_block(vec![i as u32 + 1])]))
+                .collect();
+            let span = ldm_record(&stream);
+            let out = decode_sweep_moment(
+                &span,
+                &opts(MomentSelector::Ref, 3, 1, OutputWord::U8),
+                true,
+            )
+            .unwrap();
+            assert_eq!(u8s(&out), &expected, "{label}");
+        }
+    }
+
+    /// **Adversarial regression.** An `out_shape` that passes the
+    /// element cap can still exceed available memory; `vec![_; n]`
+    /// would abort the process, which PyO3 cannot convert into an
+    /// exception.
+    #[test]
+    fn an_unsatisfiable_allocation_errors_rather_than_aborting() {
+        let mut o = opts(MomentSelector::Ref, 1 << 30, 1, OutputWord::U16);
+        o.gates = 1;
+        // Just under MAX_OUTPUT_ELEMENTS, so `validate` lets it through
+        // and the allocator is the only thing left to say no.
+        assert!(o.validate().is_ok());
+        match decode_record_moment(&[], &o) {
+            Ok(_) => { /* machine had 2 GiB spare; nothing to assert */ }
+            Err(e) => assert!(
+                matches!(e, RadishError::MomentEncoding(ref m) if m.contains("could not allocate")),
+                "expected a graceful allocation error, got {e}"
+            ),
+        }
+    }
+
+    /// Pre-Build-12 raw Archive II files have no LDM wrapper. The sweep
+    /// entry points used to call `split_ldm_records` directly, so such a
+    /// file died with a generic decode error and never reached the
+    /// MSG_1 refusal — the message was unreachable on that path.
+    #[test]
+    fn sweep_path_routes_raw_archive2_to_the_legacy_refusal() {
+        let mut span = b"AR2V0006.001-XYZWXYZWXYZW"[..24].to_vec();
+        // No LDM size prefix: the next 4 bytes are the first message's
+        // zero-filled TCM header, which is exactly the `u32_be == 0`
+        // marker `is_raw_archive2` looks for.
+        span.extend_from_slice(&frame_other(1)); // a legacy MSG_1 frame
+        debug_assert_eq!(&span[24..28], &[0u8; 4]);
+        let error = decode_sweep_moment(
+            &span,
+            &opts(MomentSelector::Ref, 1, 1, OutputWord::U8),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, RadishError::Unsupported(ref m) if m.contains("open_datatree")),
+            "got {error}"
+        );
     }
 
     #[test]

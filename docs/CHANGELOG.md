@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is likewise an error — radish never silently truncates gates or drops
   radials.
 
+  Because one output array carries exactly one
+  `scale_factor`/`add_offset`, blocks that disagree on
+  `(word_size, scale, offset)` are refused unless a target grid is given
+  — including blocks of the same width whose `scale`/`offset` differ, and
+  including disagreements between separate LDM records in one sweep span.
+  `sort_by_azimuth=True` reproduces `np.argsort(azimuth, kind="stable")`
+  exactly, signed zero and NaN included, so callers can reorder their
+  coordinate arrays to match.
+
 - **KVNX cross-RDA-build fixtures** added to the test corpus
   (`radish/tests/fixtures/CORPUS.md`): `KVNX20200602_123502_V06` and
   `KVNX20200602_201830_V06`, the 8-bit and 16-bit ZDR eras either side of
@@ -48,6 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~90.75°, while radish returns all 720 at uniform 0.5° spacing — confirmed
   against a hand-rolled `bz2`/`struct` walk of the Message 31 headers and
   against radish's own independent volume reader. (#32)
+
+### Fixed
+
+- **KILX corpus documentation was inverted.** `CORPUS.md` and
+  `python/tests/conftest.py` described `sweep_10` of
+  `KILX20230629_154426_V06` as carrying 358 MSG_31 records with 360 being
+  an upstream bug. The file carries **360** — a full 1° circle — and 358
+  is what xradar reports. `radish/tests/test_nexrad_internal_parity.rs`
+  has always asserted the correct 360; only the prose was wrong.
+  Confirmed against radish's own reader, a hand-rolled `bz2`/`struct`
+  walk, and Py-ART. (#32)
 
 ## [0.2.5] - 2026-05-05
 

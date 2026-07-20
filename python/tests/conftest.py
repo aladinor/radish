@@ -45,11 +45,11 @@ def nexrad_fixture():
 
 @pytest.fixture
 def nexrad_kilx_fixture():
-    """Path to the KILX phantom-radial divergence fixture, or skip.
+    """Path to the KILX missing-radial divergence fixture, or skip.
 
-    Required by the regression test that pins ``sweep_10.num_rays == 358``
-    against the file's true MSG_31 record count (versus the upstream
-    `nexrad-decode 1.0.0-rc.3` 360-ray bug). See CORPUS.md.
+    ``sweep_10`` carries **360** MSG_31 records on the wire — a full 1°
+    circle — and radish produces all 360; xradar reports 358. Pinned by
+    ``radish/tests/test_nexrad_internal_parity.rs``. See CORPUS.md.
     """
     fdir = _nexrad_dir()
     if fdir is None:
