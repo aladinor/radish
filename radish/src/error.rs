@@ -53,6 +53,19 @@ pub enum RadishError {
     #[error("Decode error: {0}")]
     Decode(String),
 
+    /// The output encoding a caller requested is incompatible with what
+    /// the source data declares — a moment's on-wire
+    /// `word_size`/`scale`/`offset` cannot be represented exactly on the
+    /// requested grid, or the requested output shape doesn't fit the
+    /// data. Surfaces to Python as `radish.MomentEncodingError`.
+    ///
+    /// Deliberately distinct from [`RadishError::Decode`]: the bytes
+    /// parsed fine, it's the *request* that can't be honoured, and
+    /// silently approximating would put physically wrong values in the
+    /// caller's array.
+    #[error("Moment encoding error: {0}")]
+    MomentEncoding(String),
+
     /// Unsupported feature
     #[error("Unsupported feature: {0}")]
     Unsupported(String),

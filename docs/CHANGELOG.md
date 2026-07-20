@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Low-level NEXRAD per-moment decoders** — `radish.decode_record_moment`,
+  `radish.decode_sweep_moment`, `radish.record_moment_encoding`,
+  `radish.sweep_moment_encoding`, and the `radish.MomentEncodingError`
+  exception. These pull **one moment** out of **one LDM record** (or one
+  sweep-sized byte span) as the raw NEXRAD words, so chunked/lazy consumers
+  — zarr codecs, virtual/byte-range reference stores, partial-volume reads —
+  can decode exactly the bytes they need instead of a whole volume. A
+  120-radial × 1832-gate reflectivity block decodes in ~0.06 ms; the sweep
+  variant decompresses records in parallel via rayon (~5× on 8 cores).
+  Verified bit-identical to `xradar.io.open_nexradlevel2_datatree` on the
+  first cut of every fixture in the corpus. (#32)
+
+  Output arrays are native-endian; a non-native dtype (`">u2"`) is
+  **rejected** rather than silently satisfied, because an array that
+  compares equal element-wise but whose `.tobytes()` is byte-swapped is
+  exactly the corruption a zarr/reference-store caller would not notice.
+  An implausible `out_shape` is rejected too — the allocator would
+  otherwise `abort()`, which cannot be turned back into a Python
+  exception and would take a long-lived worker down with it.
+
+  The decoders read each Message 31 data block's own
+  `word_size`/`scale`/`offset` rather than assuming a fixed encoding —
+  NEXRAD moment encodings change across RDA builds (KVNX flipped ZDR from
+  `8-bit, scale=16, offset=128` to `16-bit, scale=32, offset=418` on
+  2020-06-02, so a decoder that assumes one encoding returns physically
+  wrong values for the other era). Pass `scale=`/`offset=` to remap onto a
+  common target grid; the remap is applied only when exactly representable
+  and `MomentEncodingError` is raised otherwise. An undersized `out_shape`
+  is likewise an error — radish never silently truncates gates or drops
+  radials.
+
+- **KVNX cross-RDA-build fixtures** added to the test corpus
+  (`radish/tests/fixtures/CORPUS.md`): `KVNX20200602_123502_V06` and
+  `KVNX20200602_201830_V06`, the 8-bit and 16-bit ZDR eras either side of
+  the 2020-06-02 upgrade outage. The earlier volume also pins a divergence
+  where xradar's first cut has 719 rays with a 1.0° azimuth hole at
+  ~90.75°, while radish returns all 720 at uniform 0.5° spacing — confirmed
+  against a hand-rolled `bz2`/`struct` walk of the Message 31 headers and
+  against radish's own independent volume reader. (#32)
+
 ## [0.2.5] - 2026-05-05
 
 The "every NEXRAD timestamp was +1 day" fix-only release. ICD 2620002R Table III §3.2.4.17 specifies the per-radial `modified_julian_date` field as 1-indexed days since 1970-01-01, but radish 0.2.2 through 0.2.4 computed `days * 86_400 + secs` (no `-1`), shifting every emitted timestamp by exactly +86,400,000 ms — every sweep, every ray, every file. xradar's `nexrad_level2.py:open_sweeps_as_dict` and danielway/nexrad's `volume/record.rs` both subtract 1; only radish disagreed. Filed by the raw2zarr maintainer, who currently mitigates with an in-process `-86400` shim that 0.2.5 lets them remove. (#26) Plus CI maintenance: GitHub Actions bumped to Node 24-compatible versions before the deprecation deadline (#25).

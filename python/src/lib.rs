@@ -31,18 +31,25 @@ use std::path::Path;
 
 use ndarray::Array2;
 use numpy::{PyArray1, PyArray2};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
+use pyo3::types::PyDict;
 
 use radish::{
     backends::{
-        auto_backend, auto_backend_for_bytes, CfRadial1Backend, NexradBackend, RadarBackend,
-        SigmetBackend,
+        auto_backend, auto_backend_for_bytes,
+        nexrad::demux::{
+            self, DemuxOptions, MomentSelector, OutputWord, RawMoment, RecordInventory,
+            TargetEncoding,
+        },
+        CfRadial1Backend, NexradBackend, RadarBackend, SigmetBackend,
     },
     Coordinates, MomentData as RustMomentData, NexradSweepAttrs as RustNexradSweepAttrs,
-    NexradVolumeAttrs as RustNexradVolumeAttrs, SigmetSweepAttrs as RustSigmetSweepAttrs,
-    SigmetVolumeAttrs as RustSigmetVolumeAttrs, SweepData as RustSweepData, SweepMetadata,
-    VolumeData as RustVolumeData, VolumeMetadata as RustVolumeMetadata,
+    NexradVolumeAttrs as RustNexradVolumeAttrs, RadishError,
+    SigmetSweepAttrs as RustSigmetSweepAttrs, SigmetVolumeAttrs as RustSigmetVolumeAttrs,
+    SweepData as RustSweepData, SweepMetadata, VolumeData as RustVolumeData,
+    VolumeMetadata as RustVolumeMetadata,
 };
 
 /// Volume-level metadata: site coordinates, time coverage, sweep
@@ -968,6 +975,351 @@ fn read_sigmet_bytes(data: Vec<u8>) -> PyResult<PyVolumeData> {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read Sigmet bytes: {e}")))
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Low-level NEXRAD per-moment decoders (issue #32)
+// ────────────────────────────────────────────────────────────────────
+
+// PyO3 0.22's `create_exception!` expands a `cfg(feature = "gil-refs")`
+// check that refers to *pyo3's* feature set, not ours, so rustc's
+// `unexpected_cfgs` lint fires on code we don't own. Scoped to this
+// module so the rest of the crate keeps the lint.
+#[allow(unexpected_cfgs)]
+mod exceptions {
+    pyo3::create_exception!(
+        _radish,
+        MomentEncodingError,
+        pyo3::exceptions::PyValueError,
+        "The requested output encoding cannot represent the source data exactly.\n\
+         \n\
+         Raised by `decode_record_moment` / `decode_sweep_moment` when a moment's\n\
+         on-wire `word_size`/`scale`/`offset` cannot be remapped losslessly onto\n\
+         the requested dtype and grid, or when the requested `out_shape` is too\n\
+         small to hold the data. radish refuses rather than silently returning\n\
+         values on the wrong grid. Subclasses `ValueError`."
+    );
+}
+
+use exceptions::MomentEncodingError;
+
+/// Translate a demux-layer `RadishError` into the right Python exception.
+///
+/// `MomentEncoding` is the "your request can't be honoured" case and gets
+/// its own catchable type; `Unsupported` (unknown moment name, legacy
+/// MSG_1 input) is a plain `ValueError`; anything else is a decode
+/// failure and stays `RuntimeError` like the rest of this module.
+fn demux_err(error: RadishError) -> PyErr {
+    match error {
+        RadishError::MomentEncoding(msg) => MomentEncodingError::new_err(msg),
+        RadishError::Unsupported(msg) => PyValueError::new_err(msg),
+        other => PyRuntimeError::new_err(other.to_string()),
+    }
+}
+
+/// Normalise anything numpy accepts as a dtype (`np.uint16`, `">u2"`,
+/// `np.dtype("uint8")`, …) into an [`OutputWord`].
+///
+/// Resolved through `numpy.dtype()` itself rather than the `numpy` crate's
+/// descriptor API so every spelling a caller might use works.
+///
+/// Output is always **native-endian**, so a non-native byte order is
+/// rejected rather than silently ignored. These decoders hand back raw
+/// transport words and their audience writes them straight into zarr
+/// chunks and reference stores — an array that compares equal
+/// element-wise but whose `.tobytes()` is byte-swapped is exactly the
+/// kind of silent corruption this module exists to avoid.
+fn output_word(py: Python<'_>, dtype: &Bound<'_, PyAny>) -> PyResult<OutputWord> {
+    let resolved = py
+        .import_bound("numpy")?
+        .getattr("dtype")?
+        .call1((dtype,))
+        // Only remap the errors that mean "that isn't a dtype". Anything
+        // else (MemoryError, KeyboardInterrupt raised from a caller's
+        // `__index__`, …) must propagate untouched.
+        .map_err(|e| {
+            if e.is_instance_of::<PyTypeError>(py) || e.is_instance_of::<PyValueError>(py) {
+                let mapped =
+                    PyTypeError::new_err(format!("{dtype:?} is not a valid numpy dtype: {e}"));
+                mapped.set_cause(py, Some(e));
+                mapped
+            } else {
+                e
+            }
+        })?;
+    let kind: String = resolved.getattr("kind")?.extract()?;
+    let itemsize: usize = resolved.getattr("itemsize")?.extract()?;
+    let byteorder: String = resolved.getattr("byteorder")?.extract()?;
+    // numpy reports "=" for native and "|" for not-applicable (1-byte),
+    // so `np.uint8` / ">u1" keep working.
+    if !matches!(byteorder.as_str(), "=" | "|") {
+        return Err(PyTypeError::new_err(format!(
+            "dtype {resolved} requests non-native byte order, but these decoders return \
+             native-endian raw words. Pass np.uint16 (or '=u2') and call \
+             .astype('>u2') / .byteswap() yourself if you need big-endian storage — \
+             otherwise .tobytes() would be silently byte-swapped."
+        )));
+    }
+    match (kind.as_str(), itemsize) {
+        ("u", 1) => Ok(OutputWord::U8),
+        ("u", 2) => Ok(OutputWord::U16),
+        _ => Err(PyTypeError::new_err(format!(
+            "dtype {resolved} is not supported — these decoders return the raw NEXRAD words, \
+             so the output dtype must be uint8 or uint16 (got kind={kind:?}, \
+             itemsize={itemsize}). Apply scale_factor/add_offset yourself to get floats."
+        ))),
+    }
+}
+
+/// Assemble the `DemuxOptions` shared by both decoders.
+fn demux_options(
+    py: Python<'_>,
+    moment: &str,
+    out_shape: (usize, usize),
+    dtype: &Bound<'_, PyAny>,
+    fill_value: u16,
+    scale: Option<f32>,
+    offset: Option<f32>,
+) -> PyResult<DemuxOptions> {
+    let target = match (scale, offset) {
+        (None, None) => None,
+        (Some(scale), Some(offset)) => Some(TargetEncoding { scale, offset }),
+        _ => {
+            return Err(PyValueError::new_err(
+                "scale and offset must be given together — they jointly define the target raw \
+                 grid (physical = (raw - offset) / scale)",
+            ))
+        }
+    };
+    Ok(DemuxOptions {
+        moment: moment.parse::<MomentSelector>().map_err(demux_err)?,
+        rays: out_shape.0,
+        gates: out_shape.1,
+        word: output_word(py, dtype)?,
+        fill_value,
+        target,
+    })
+}
+
+/// Hand a decoded `RawMoment` to numpy as a 2-D array, without copying.
+fn raw_moment_to_py(
+    py: Python<'_>,
+    raw: RawMoment,
+    out_shape: (usize, usize),
+) -> PyResult<PyObject> {
+    let shape_err = |e: ndarray::ShapeError| PyRuntimeError::new_err(e.to_string());
+    Ok(match raw {
+        RawMoment::U8(values) => PyArray2::from_owned_array_bound(
+            py,
+            Array2::from_shape_vec(out_shape, values).map_err(shape_err)?,
+        )
+        .into_any()
+        .unbind(),
+        RawMoment::U16(values) => PyArray2::from_owned_array_bound(
+            py,
+            Array2::from_shape_vec(out_shape, values).map_err(shape_err)?,
+        )
+        .into_any()
+        .unbind(),
+    })
+}
+
+/// Convert a `RecordInventory` into the plain dict the Python API
+/// documents.
+fn inventory_to_py(py: Python<'_>, inventory: RecordInventory) -> PyResult<PyObject> {
+    let out = PyDict::new_bound(py);
+    out.set_item("radial_count", inventory.radial_count)?;
+    out.set_item(
+        "azimuth",
+        PyArray1::from_slice_bound(py, &inventory.azimuth),
+    )?;
+    out.set_item(
+        "elevation",
+        PyArray1::from_slice_bound(py, &inventory.elevation),
+    )?;
+    out.set_item(
+        "azimuth_number",
+        PyArray1::from_slice_bound(py, &inventory.azimuth_number),
+    )?;
+    out.set_item(
+        "elevation_number",
+        PyArray1::from_slice_bound(py, &inventory.elevation_number),
+    )?;
+    out.set_item(
+        "collection_time_ms",
+        PyArray1::from_slice_bound(py, &inventory.collection_time_ms),
+    )?;
+    out.set_item(
+        "modified_julian_date",
+        PyArray1::from_slice_bound(py, &inventory.modified_julian_date),
+    )?;
+
+    let moments = PyDict::new_bound(py);
+    for (selector, encoding) in &inventory.moments {
+        let entry = PyDict::new_bound(py);
+        entry.set_item("word_size", encoding.word_size)?;
+        entry.set_item("scale", encoding.scale)?;
+        entry.set_item("offset", encoding.offset)?;
+        entry.set_item("gate_count", encoding.gate_count)?;
+        entry.set_item("max_gate_count", encoding.max_gate_count)?;
+        entry.set_item("first_gate_km", encoding.first_gate_km)?;
+        entry.set_item("gate_interval_km", encoding.gate_interval_km)?;
+        entry.set_item("radials_present", encoding.radials_present)?;
+        entry.set_item("uniform", encoding.uniform)?;
+        // CF attributes, precomputed so callers don't rederive them.
+        //
+        // ICD Table XVII-B defines `scale == 0` as "gate words are
+        // already in final units", so guard the division — emitting
+        // inf/nan here would silently poison the
+        // `array * scale_factor + add_offset` expression the docs tell
+        // callers to write.
+        let (scale_factor, add_offset) = if encoding.scale.is_normal() {
+            (
+                1.0 / f64::from(encoding.scale),
+                -f64::from(encoding.offset) / f64::from(encoding.scale),
+            )
+        } else {
+            (1.0, -f64::from(encoding.offset))
+        };
+        entry.set_item("scale_factor", scale_factor)?;
+        entry.set_item("add_offset", add_offset)?;
+        moments.set_item(selector.name(), entry)?;
+    }
+    out.set_item("moments", moments)?;
+    Ok(out.into_any().unbind())
+}
+
+/// Demultiplex one moment out of a single **decompressed** LDM record.
+///
+/// `record` is one LDM record's message stream — the bytes past the
+/// 4-byte control word, already bzip2-decompressed. Returns a
+/// `(rays, gates)` array of the **raw** NEXRAD words; apply
+/// `scale_factor` / `add_offset` yourself (both are in the dict returned
+/// by `record_moment_encoding`).
+///
+/// `moment` is a NEXRAD short name (`"REF"`, `"VEL"`, `"SW"`, `"ZDR"`,
+/// `"PHI"`, `"RHO"`, `"CFP"`); the ODIM names radish's volume readers
+/// emit (`"DBZH"`, `"VRADH"`, …) are accepted too.
+///
+/// One row per Message 31 radial in record order. Rows past the radial
+/// count, and rows where the moment is absent, are `fill_value`; a short
+/// moment is right-padded with raw `0` (xradar parity). A record holding
+/// no radials at all — the `S` chunk of a chunked volume, which carries
+/// only MSG_2/MSG_5 — yields an all-`fill_value` array rather than an
+/// error.
+///
+/// Pass `scale`/`offset` together to remap onto a target raw grid when
+/// the source encoding differs (NEXRAD moment encodings change across RDA
+/// builds). The remap is applied only when it is exactly representable;
+/// otherwise `MomentEncodingError` is raised. Without them, every block
+/// must already match the requested dtype width.
+#[pyfunction]
+#[pyo3(signature = (record, moment, out_shape, dtype, fill_value=0, scale=None, offset=None))]
+#[allow(clippy::too_many_arguments)]
+fn decode_record_moment(
+    py: Python<'_>,
+    record: PyBackedBytes,
+    moment: &str,
+    out_shape: (usize, usize),
+    dtype: &Bound<'_, PyAny>,
+    fill_value: u16,
+    scale: Option<f32>,
+    offset: Option<f32>,
+) -> PyResult<PyObject> {
+    let options = demux_options(py, moment, out_shape, dtype, fill_value, scale, offset)?;
+    // The decode is pure Rust over a GIL-independent buffer, so release
+    // the GIL — this primitive is called once per moment per record and
+    // must not serialise multi-threaded callers.
+    let raw = py
+        .allow_threads(|| demux::decode_record_moment(&record, &options))
+        .map_err(demux_err)?;
+    raw_moment_to_py(py, raw, out_shape)
+}
+
+/// Demultiplex one moment out of a **compressed** sweep-sized byte span.
+///
+/// `span` is `[i32 control word][bzip2 payload]` repeated, exactly as it
+/// appears in an Archive II file; a leading 24-byte `AR2V` volume header
+/// is skipped if present, so a whole-volume buffer works too. Records are
+/// decompressed and demultiplexed in parallel via rayon.
+///
+/// Same output contract, dtype rules, and `scale`/`offset` remap as
+/// `decode_record_moment`.
+///
+/// **Cost:** the span is decompressed on every call, so pulling N
+/// moments out of one span costs N bzip2 passes. On a 5.8 MB volume one
+/// moment takes ~134 ms while `radish.read_nexrad` decodes all of them
+/// in ~181 ms. Reach for this when you want one or two moments out of a
+/// sweep-sized span; use `radish.open_datatree` when you want
+/// everything, and `decode_record_moment` (which takes already-
+/// decompressed bytes, ~0.06 ms per record) for chunk-level work.
+///
+/// With `sort_by_azimuth=True` rows are stably sorted by azimuth angle
+/// before returning, trailing `fill_value` rows staying at the end.
+/// Reproduce the same permutation for your coordinate arrays with
+/// `np.argsort(sweep_moment_encoding(span)["azimuth"], kind="stable")`.
+#[pyfunction]
+#[pyo3(signature = (span, moment, out_shape, dtype, fill_value=0, scale=None, offset=None, sort_by_azimuth=false))]
+#[allow(clippy::too_many_arguments)]
+fn decode_sweep_moment(
+    py: Python<'_>,
+    span: PyBackedBytes,
+    moment: &str,
+    out_shape: (usize, usize),
+    dtype: &Bound<'_, PyAny>,
+    fill_value: u16,
+    scale: Option<f32>,
+    offset: Option<f32>,
+    sort_by_azimuth: bool,
+) -> PyResult<PyObject> {
+    let options = demux_options(py, moment, out_shape, dtype, fill_value, scale, offset)?;
+    let raw = py
+        .allow_threads(|| demux::decode_sweep_moment(&span, &options, sort_by_azimuth))
+        .map_err(demux_err)?;
+    raw_moment_to_py(py, raw, out_shape)
+}
+
+/// Inspect a single **decompressed** LDM record: per-radial headers plus
+/// the source encoding of every moment it carries.
+///
+/// Call this before `decode_record_moment` to size the output array and
+/// to learn whether a `scale`/`offset` remap is required. Returns a dict:
+///
+/// * `radial_count` — row count a demux of this input will produce
+/// * `azimuth`, `elevation`, `azimuth_number`, `elevation_number`,
+///   `collection_time_ms`, `modified_julian_date` — per-radial arrays in
+///   record order
+/// * `moments` — `{"ZDR": {"word_size": 8, "scale": 16.0, "offset": 128.0,
+///   "gate_count": …, "max_gate_count": …, "first_gate_km": …,
+///   "gate_interval_km": …, "radials_present": …, "uniform": True,
+///   "scale_factor": …, "add_offset": …}, …}`
+///
+/// `uniform=False` means at least one radial disagreed with the
+/// first-seen `(word_size, scale, offset)` — decoding that moment then
+/// *requires* an explicit `scale`/`offset` target. `max_gate_count` is
+/// the safe gate dimension; `scale_factor`/`add_offset` are the CF
+/// attributes for the first-seen encoding.
+#[pyfunction]
+fn record_moment_encoding(py: Python<'_>, record: PyBackedBytes) -> PyResult<PyObject> {
+    let inventory = py
+        .allow_threads(|| demux::record_moment_encoding(&record))
+        .map_err(demux_err)?;
+    inventory_to_py(py, inventory)
+}
+
+/// Inspect a **compressed** sweep-sized byte span — the
+/// `decode_sweep_moment` counterpart of `record_moment_encoding`.
+///
+/// Same input framing and same returned dict; per-radial arrays are
+/// concatenated across records in record order, and each moment's
+/// `radials_present` / `max_gate_count` / `uniform` are folded over the
+/// whole span.
+#[pyfunction]
+fn sweep_moment_encoding(py: Python<'_>, span: PyBackedBytes) -> PyResult<PyObject> {
+    let inventory = py
+        .allow_threads(|| demux::sweep_moment_encoding(&span))
+        .map_err(demux_err)?;
+    inventory_to_py(py, inventory)
+}
+
 /// Identify which radish backend (`"nexrad_level2"`, `"cfradial1"`, …)
 /// owns a file path. Wraps `radish::backends::auto_backend(path).name()`.
 ///
@@ -1017,5 +1369,18 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_sigmet_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(auto_backend_name, m)?)?;
     m.add_function(wrap_pyfunction!(auto_backend_name_for_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_record_moment, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_sweep_moment, m)?)?;
+    m.add_function(wrap_pyfunction!(record_moment_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(sweep_moment_encoding, m)?)?;
+    // `create_exception!` stamps `__module__ = "_radish"`, but the
+    // extension actually lives at `radish._radish` and the exception is
+    // re-exported from `radish`. Without this the class is unpicklable,
+    // so a dask/multiprocessing worker that raises it loses the typed
+    // exception when it crosses a process boundary — exactly the
+    // parallel workflow these decoders exist for.
+    let moment_encoding_error = m.py().get_type_bound::<MomentEncodingError>();
+    moment_encoding_error.setattr("__module__", "radish")?;
+    m.add("MomentEncodingError", moment_encoding_error)?;
     Ok(())
 }

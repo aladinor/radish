@@ -13,6 +13,7 @@ A Rust-powered library for reading weather radar data with Python bindings.
 # internal use; the public way to decode bytes is `radish.open_datatree(data)`).
 from radish._radish import (
     MomentData,
+    MomentEncodingError,
     NexradSweepAttrs,
     NexradVolumeAttrs,
     SigmetSweepAttrs,
@@ -20,14 +21,18 @@ from radish._radish import (
     SweepData,
     VolumeData,
     VolumeMetadata,
+    decode_record_moment,
+    decode_sweep_moment,
     read_cfradial1,
     read_nexrad,
     read_nexrad_chunks,
     read_sigmet,
+    record_moment_encoding,
     scan_cfradial1,
     scan_nexrad,
     scan_nexrad_chunks,
     scan_sigmet,
+    sweep_moment_encoding,
 )
 
 # Canonical entry points: format-agnostic, input-shape-agnostic.
@@ -67,4 +72,16 @@ __all__ = [
     "scan_nexrad_chunks",
     "read_sigmet",
     "scan_sigmet",
+    # Low-level NEXRAD per-moment decoders. These return the **raw**
+    # NEXRAD words for one moment out of one LDM record (or one
+    # sweep-sized byte span) so chunked/lazy consumers — zarr codecs,
+    # virtual reference stores, partial-volume reads — can decode
+    # exactly the bytes they need. Pair the decoders with the
+    # `*_moment_encoding` inspectors, which report each moment's
+    # word_size/scale/offset before you allocate.
+    "decode_record_moment",
+    "decode_sweep_moment",
+    "record_moment_encoding",
+    "sweep_moment_encoding",
+    "MomentEncodingError",
 ]

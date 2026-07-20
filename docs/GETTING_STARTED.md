@@ -218,6 +218,77 @@ sweep_0["DBZH"].plot()
 plt.show()
 ```
 
+### Python Usage (radish as a decode engine)
+
+If you're building a chunked or lazy reader — a zarr codec, a virtual /
+byte-range reference store, a partial-volume read — you usually want *one
+moment* out of *one NEXRAD LDM record*, not a whole volume. One record
+holds ~120 Message 31 radials with every moment interleaved into the same
+byte range, so the low-level decoders let you demultiplex just the bytes
+you need.
+
+The workflow is **inspect → allocate → decode**:
+
+```python
+import bz2, struct
+import numpy as np
+import radish
+
+raw = open("KLOT20251210_102338_V06", "rb").read()
+
+# Walk the LDM records yourself — you already know where your chunks are.
+pos, records = 24, []                      # 24 = AR2V volume header
+while pos + 4 <= len(raw):
+    (size,) = struct.unpack_from(">i", raw, pos)
+    size = abs(size)
+    if size == 0 or pos + 4 + size > len(raw):
+        break
+    records.append(raw[pos + 4 : pos + 4 + size])
+    pos += 4 + size
+
+record = bz2.decompress(records[5])
+
+# 1. Inspect: how many radials, and how is each moment encoded?
+enc = radish.record_moment_encoding(record)
+zdr = enc["moments"]["ZDR"]
+print(enc["radial_count"], zdr["word_size"], zdr["scale"], zdr["offset"])
+
+# 2. Allocate + 3. decode — ~0.08 ms for a 120 x 1832 block.
+array = radish.decode_record_moment(
+    record, "ZDR", (enc["radial_count"], zdr["max_gate_count"]),
+    np.uint8 if zdr["word_size"] == 8 else np.uint16,
+)
+
+# Raw words in, CF attributes out — apply them yourself (or hand them to
+# xarray as scale_factor/add_offset and let it decode lazily).
+physical = array * zdr["scale_factor"] + zdr["add_offset"]
+```
+
+**Encodings change across RDA builds.** KVNX flipped ZDR from
+`word_size=8, scale=16.0, offset=128.0` to `word_size=16, scale=32.0,
+offset=418.0` during a 2020-06-02 upgrade outage. Any array-shaped target
+pins a single dtype and a single `scale_factor`/`add_offset`, so pass an
+explicit target grid when you need volumes from both eras in one store:
+
+```python
+array = radish.decode_record_moment(
+    record, "ZDR", (rays, gates), np.uint16, scale=32.0, offset=418.0,
+)
+```
+
+The remap is applied only when it is exactly representable — here
+`raw16 = 2 * raw8 + 162`, lossless in physical units. Otherwise
+`radish.MomentEncodingError` (a `ValueError`) is raised rather than
+approximate values being returned. `enc["moments"][name]["uniform"]` is
+`False` when the input itself mixes encodings, which is your signal that a
+target grid is required.
+
+For a whole sweep-sized byte span (still compressed, control words and
+all) use `radish.decode_sweep_moment` / `radish.sweep_moment_encoding`,
+which decompress records in parallel. Note that each call decompresses the
+span, so if you want *every* moment you're better off with
+`radish.open_datatree`.
+
 ## Next Steps
 
 ### For Developers
