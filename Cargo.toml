@@ -64,8 +64,8 @@ bzip2 = "0.6"
 nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["model", "decode", "data", "chrono", "parallel"] }
 
 # Python bindings.
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
+pyo3 = { version = "0.29", features = ["extension-module"] }
+numpy = "0.29"
 
 [profile.release]
 opt-level = 3
