@@ -21,9 +21,47 @@ export RADISH_NEXRAD_FIXTURE_DIR="$HOME/.cache/radish/fixtures/nexrad"
 | Filename | Size | SHA-256 | Purpose |
 | --- | ---: | --- | --- |
 | `KLOT20251210_102338_V06` | 5,821,705 | `a5ed05d7dceaaceeb5adfb08601f10276a77a161ffdae7f302c49626e16cca81` | Modern happy-path baseline (Lincoln IL → reachable, light precip) |
-| `KILX20230629_154426_V06` | 10,398,582 | `715c3c18691f6efe87a27127d631add8d90fd92c66a019a17965b624757180da` | Missing-radial divergence file — `sweep_10` carries **360** MSG_31 records on the wire (a full 1° circle) and radish must produce all 360; xradar reports 358. Pinned by `radish/tests/test_nexrad_internal_parity.rs`. |
+| `KILX20230629_154426_V06` | 10,398,582 | `715c3c18691f6efe87a27127d631add8d90fd92c66a019a17965b624757180da` | Missing-radial divergence file — `sweep_10` carries **360** MSG_31 records on the wire (a full 1° circle) and radish must produce all 360; xradar reports 358. Independently confirmed by `danielway/nexrad`. See "The xradar LDM stride divergence" below. Pinned by `radish/tests/test_nexrad_internal_parity.rs`. |
 | `KVNX20200602_123502_V06` | 1,920,466 | `fde3fda1ca80e7fc3d2d859cc591ee7c4da7a80b17c2166a19f6f7047950bd1c` | **8-bit-era** half of the cross-RDA-build pair (see below). ZDR is `word_size=8, scale=16.0, offset=128.0`; no CFP block. Also the missing-radial divergence file: its first cut has 720 MSG_31 radials at uniform ~0.5° spacing, but xradar reports 719 with a 1.0° azimuth hole at ~90.75°. radish must produce 720. |
 | `KVNX20200602_201830_V06` | 4,063,422 | `cea716258763881b28f57483b65b144526e554bfe773aaa1df942c4a3024b855` | **16-bit-era** half of the pair. ZDR is `word_size=16, scale=32.0, offset=418.0`; CFP present. |
+
+### The xradar LDM stride divergence
+
+Three of the four fixtures expose an upstream xradar bug, so their
+documented ray counts are **radish's**, not xradar's.
+
+`xradar/io/backends/nexrad_level2.py:NEXRADRecordFile.init_record`
+hard-codes a 120-message stride between LDM-compressed records
+(`(recnum - 134) // 120`). NEXRAD ICD 2620010J §7.3.4 mandates a
+*variable* count — 120 MSG_31 plus **zero or more** MSG_2 — so any LDM
+record that interleaves MSG_2 overruns the budget and xradar drops the
+trailing MSG_31s at the record boundary.
+
+Observed drops (radish / `danielway/nexrad` -> xradar):
+
+| Fixture | Cut | Wire | xradar |
+| --- | --- | ---: | ---: |
+| `KILX20230629_154426_V06` | `sweep_10` | 360 | 358 |
+| `KVNX20200602_123502_V06` | `sweep_0` | 720 | 719 |
+| `KVNX20200602_123502_V06` | `sweep_1` | 720 | 719 |
+| `KVNX20200602_123502_V06` | `sweep_4` | 360 | 356 |
+| `KVNX20200602_201830_V06` | `sweep_3` | 720 | 719 |
+| `KVNX20200602_201830_V06` | `sweep_4` | 360 | 358 |
+| `KLOT20251210_102338_V06` | — | — | no drops |
+
+Every dropped radial sits at the tail of an LDM record, carries
+`radial_status=1`, and has a sequential `azimuth_number` — i.e. they are
+ordinary radials, not truncation artefacts.
+
+Filed upstream as [openradar/xradar#376][x376] with a fix in
+[openradar/xradar#377][x377]. Both were open at the time of writing; the
+fix is **not** in xradar 0.12.0 and **not** on their `main`. When #377
+merges, the xradar-parity tests in `python/tests/test_nexrad_demux.py`
+that assert the divergence should start failing — that is the signal to
+update them.
+
+[x376]: https://github.com/openradar/xradar/issues/376
+[x377]: https://github.com/openradar/xradar/pull/377
 
 ### The KVNX cross-RDA-build pair
 

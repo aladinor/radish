@@ -48,8 +48,20 @@ def nexrad_kilx_fixture():
     """Path to the KILX missing-radial divergence fixture, or skip.
 
     ``sweep_10`` carries **360** MSG_31 records on the wire — a full 1°
-    circle — and radish produces all 360; xradar reports 358. Pinned by
-    ``radish/tests/test_nexrad_internal_parity.rs``. See CORPUS.md.
+    circle. radish and ``danielway/nexrad`` (an independent Rust
+    implementation, wired up as a dev-dependency) both read all 360;
+    xradar reports 358.
+
+    On the wire, ``azimuth_number`` runs 1..360 contiguously in
+    elevation 11, with 119 and 120 present as messages 120 and 121 of
+    LDM record 49 — that record holds 122 messages (120 MSG_31 + 2
+    MSG_2). xradar's ``init_record`` hard-codes a 120-message LDM
+    stride, so it drops the trailing MSG_31s. Filed upstream as
+    openradar/xradar#376 with a fix in openradar/xradar#377, open at
+    the time of writing (not in 0.12.0, not on their ``main``).
+
+    Pinned by ``radish/tests/test_nexrad_internal_parity.rs``. See
+    CORPUS.md.
     """
     fdir = _nexrad_dir()
     if fdir is None:
