@@ -69,6 +69,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Confirmed against radish's own reader, a hand-rolled `bz2`/`struct`
   walk, and Py-ART. (#32)
 
+### Security
+
+- **All outstanding `cargo audit` advisories resolved; the Security Audit
+  CI job is green again with no `--ignore` entries.** It had been failing
+  on every branch — `main`'s last green run predates the advisories.
+
+  | Advisory | Crate | Resolution |
+  | --- | --- | --- |
+  | RUSTSEC-2026-0177 | pyo3 0.22.6 | pyo3 0.22 → 0.29 |
+  | RUSTSEC-2025-0020 | pyo3 0.22.6 | pyo3 0.22 → 0.29 (was previously ignored in CI) |
+  | RUSTSEC-2026-0204 | crossbeam-epoch 0.9.18 | `cargo update` → 0.9.20 |
+  | RUSTSEC-2026-0185 | quinn-proto 0.11.14 | `cargo update` → 0.11.16 (high, 7.5) |
+
+  The pyo3 bump also required `numpy` 0.22 → 0.29. The migration was
+  small: `PyArray2::from_owned_array_bound` → `from_owned_array`,
+  `PyArray1::from_slice_bound` → `from_slice`, and an explicit
+  `from_py_object` opt-in on the five `#[pyclass]` types that derive
+  `Clone` (pyo3 0.29 makes that derive opt-in; opting in preserves
+  today's behaviour exactly). No API or behaviour change for Python
+  callers.
+
+  The old ignore was justified on the grounds that "the upstream
+  `nexrad` crate ecosystem hasn't moved yet". That was stale —
+  `cargo tree -i pyo3` shows pyo3 is pulled only by `numpy` and by
+  radish itself, and `nexrad` is a dev-dependency that doesn't depend on
+  pyo3 at all.
+
 ## [0.2.5] - 2026-05-05
 
 The "every NEXRAD timestamp was +1 day" fix-only release. ICD 2620002R Table III §3.2.4.17 specifies the per-radial `modified_julian_date` field as 1-indexed days since 1970-01-01, but radish 0.2.2 through 0.2.4 computed `days * 86_400 + secs` (no `-1`), shifting every emitted timestamp by exactly +86,400,000 ms — every sweep, every ray, every file. xradar's `nexrad_level2.py:open_sweeps_as_dict` and danielway/nexrad's `volume/record.rs` both subtract 1; only radish disagreed. Filed by the raw2zarr maintainer, who currently mitigates with an in-process `-86400` shim that 0.2.5 lets them remove. (#26) Plus CI maintenance: GitHub Actions bumped to Node 24-compatible versions before the deprecation deadline (#25).

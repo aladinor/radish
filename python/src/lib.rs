@@ -63,7 +63,7 @@ use radish::{
 /// per-volume and never grows with sweep count.
 ///
 /// All angle and altitude fields use FM301 units (degrees, metres).
-#[pyclass(name = "VolumeMetadata")]
+#[pyclass(name = "VolumeMetadata", from_py_object)]
 #[derive(Clone)]
 pub struct PyVolumeMetadata {
     inner: RustVolumeMetadata,
@@ -213,7 +213,7 @@ impl PyVolumeMetadata {
 /// `radish.scan(path).nexrad_attrs == radish.scan(bytes).nexrad_attrs` —
 /// useful for the parity checks bulk-ingest workflows do per file (e.g.
 /// raw2zarr#244's chain-equivalence test).
-#[pyclass(name = "NexradVolumeAttrs", eq)]
+#[pyclass(name = "NexradVolumeAttrs", eq, from_py_object)]
 #[derive(Clone, PartialEq)]
 pub struct PyNexradVolumeAttrs {
     inner: RustNexradVolumeAttrs,
@@ -335,7 +335,7 @@ impl PyNexradVolumeAttrs {
 /// `eq` derives `__eq__` from the underlying Rust `PartialEq` so users
 /// can `attrs_a == attrs_b` rather than walking every field — symmetric
 /// with `PyNexradVolumeAttrs`.
-#[pyclass(name = "NexradSweepAttrs", eq)]
+#[pyclass(name = "NexradSweepAttrs", eq, from_py_object)]
 #[derive(Clone, PartialEq)]
 pub struct PyNexradSweepAttrs {
     inner: RustNexradSweepAttrs,
@@ -394,7 +394,7 @@ impl PyNexradSweepAttrs {
 /// Volume-level Sigmet/IRIS attrs (`TaskConfiguration` + `IngestHeader`).
 /// Field names match xradar's `Dataset.attrs` keys for drop-in compatibility
 /// with `xradar.io.open_iris_datatree`.
-#[pyclass(name = "SigmetVolumeAttrs")]
+#[pyclass(name = "SigmetVolumeAttrs", from_py_object)]
 #[derive(Clone)]
 pub struct PySigmetVolumeAttrs {
     inner: RustSigmetVolumeAttrs,
@@ -449,7 +449,7 @@ impl PySigmetVolumeAttrs {
 /// FM301 0-d data variables (`sweep_mode`, `sweep_fixed_angle`) inside
 /// the per-sweep xarray Dataset; this typed accessor is the
 /// lower-level path.
-#[pyclass(name = "SigmetSweepAttrs")]
+#[pyclass(name = "SigmetSweepAttrs", from_py_object)]
 #[derive(Clone)]
 pub struct PySigmetSweepAttrs {
     inner: RustSigmetSweepAttrs,
@@ -543,7 +543,7 @@ impl PyMomentData {
         let arr = self.data.take().ok_or_else(|| {
             PyRuntimeError::new_err("MomentData.data() has already been consumed")
         })?;
-        Ok(PyArray2::from_owned_array_bound(py, arr))
+        Ok(PyArray2::from_owned_array(py, arr))
     }
 
     fn __repr__(&self) -> String {
@@ -666,7 +666,7 @@ impl PySweepData {
     /// can rely on the order.
     #[getter]
     fn azimuth<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.azimuth)
+        PyArray1::from_slice(py, &self.coordinates.azimuth)
     }
 
     /// Per-ray elevation angles (degrees, float32 ndarray of length
@@ -674,14 +674,14 @@ impl PySweepData {
     /// sweeps they're the swept axis.
     #[getter]
     fn elevation<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.elevation)
+        PyArray1::from_slice(py, &self.coordinates.elevation)
     }
 
     /// Per-gate range-axis values in metres (float32 ndarray of length
     /// `num_gates`).
     #[getter]
     fn range<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.range)
+        PyArray1::from_slice(py, &self.coordinates.range)
     }
 
     /// Per-ray timestamps as fractional seconds since the Unix epoch
@@ -689,7 +689,7 @@ impl PySweepData {
     /// `pandas.to_datetime(times, unit="s").values` if needed.
     #[getter]
     fn time<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        PyArray1::from_slice_bound(py, &self.coordinates.time)
+        PyArray1::from_slice(py, &self.coordinates.time)
     }
 
     fn __repr__(&self) -> String {
@@ -1029,7 +1029,7 @@ fn demux_err(error: RadishError) -> PyErr {
 /// kind of silent corruption this module exists to avoid.
 fn output_word(py: Python<'_>, dtype: &Bound<'_, PyAny>) -> PyResult<OutputWord> {
     let resolved = py
-        .import_bound("numpy")?
+        .import("numpy")?
         .getattr("dtype")?
         .call1((dtype,))
         // Only remap the errors that mean "that isn't a dtype". Anything
@@ -1104,7 +1104,7 @@ fn raw_moment_to_py(
     py: Python<'_>,
     raw: RawMoment,
     out_shape: (usize, usize),
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     /// The length always matches `out_shape` — both come from the same
     /// `DemuxOptions` — so the error path is an invariant check, not a
     /// user-input path.
@@ -1112,12 +1112,10 @@ fn raw_moment_to_py(
         py: Python<'_>,
         values: Vec<T>,
         shape: (usize, usize),
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = Array2::from_shape_vec(shape, values)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(PyArray2::from_owned_array_bound(py, array)
-            .into_any()
-            .unbind())
+        Ok(PyArray2::from_owned_array(py, array).into_any().unbind())
     }
     match raw {
         RawMoment::U8(values) => to_py(py, values, out_shape),
@@ -1127,37 +1125,31 @@ fn raw_moment_to_py(
 
 /// Convert a `RecordInventory` into the plain dict the Python API
 /// documents.
-fn inventory_to_py(py: Python<'_>, inventory: RecordInventory) -> PyResult<PyObject> {
-    let out = PyDict::new_bound(py);
+fn inventory_to_py(py: Python<'_>, inventory: RecordInventory) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
     out.set_item("radial_count", inventory.radial_count)?;
-    out.set_item(
-        "azimuth",
-        PyArray1::from_slice_bound(py, &inventory.azimuth),
-    )?;
-    out.set_item(
-        "elevation",
-        PyArray1::from_slice_bound(py, &inventory.elevation),
-    )?;
+    out.set_item("azimuth", PyArray1::from_slice(py, &inventory.azimuth))?;
+    out.set_item("elevation", PyArray1::from_slice(py, &inventory.elevation))?;
     out.set_item(
         "azimuth_number",
-        PyArray1::from_slice_bound(py, &inventory.azimuth_number),
+        PyArray1::from_slice(py, &inventory.azimuth_number),
     )?;
     out.set_item(
         "elevation_number",
-        PyArray1::from_slice_bound(py, &inventory.elevation_number),
+        PyArray1::from_slice(py, &inventory.elevation_number),
     )?;
     out.set_item(
         "collection_time_ms",
-        PyArray1::from_slice_bound(py, &inventory.collection_time_ms),
+        PyArray1::from_slice(py, &inventory.collection_time_ms),
     )?;
     out.set_item(
         "modified_julian_date",
-        PyArray1::from_slice_bound(py, &inventory.modified_julian_date),
+        PyArray1::from_slice(py, &inventory.modified_julian_date),
     )?;
 
-    let moments = PyDict::new_bound(py);
+    let moments = PyDict::new(py);
     for (selector, encoding) in &inventory.moments {
-        let entry = PyDict::new_bound(py);
+        let entry = PyDict::new(py);
         entry.set_item("word_size", encoding.word_size)?;
         entry.set_item("scale", encoding.scale)?;
         entry.set_item("offset", encoding.offset)?;
@@ -1226,13 +1218,13 @@ fn decode_record_moment(
     fill_value: u16,
     scale: Option<f32>,
     offset: Option<f32>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let options = demux_options(py, moment, out_shape, dtype, fill_value, scale, offset)?;
     // The decode is pure Rust over a GIL-independent buffer, so release
     // the GIL — this primitive is called once per moment per record and
     // must not serialise multi-threaded callers.
     let raw = py
-        .allow_threads(|| demux::decode_record_moment(&record, &options))
+        .detach(|| demux::decode_record_moment(&record, &options))
         .map_err(demux_err)?;
     raw_moment_to_py(py, raw, out_shape)
 }
@@ -1272,10 +1264,10 @@ fn decode_sweep_moment(
     scale: Option<f32>,
     offset: Option<f32>,
     sort_by_azimuth: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let options = demux_options(py, moment, out_shape, dtype, fill_value, scale, offset)?;
     let raw = py
-        .allow_threads(|| demux::decode_sweep_moment(&span, &options, sort_by_azimuth))
+        .detach(|| demux::decode_sweep_moment(&span, &options, sort_by_azimuth))
         .map_err(demux_err)?;
     raw_moment_to_py(py, raw, out_shape)
 }
@@ -1301,9 +1293,9 @@ fn decode_sweep_moment(
 /// the safe gate dimension; `scale_factor`/`add_offset` are the CF
 /// attributes for the first-seen encoding.
 #[pyfunction]
-fn record_moment_encoding(py: Python<'_>, record: PyBackedBytes) -> PyResult<PyObject> {
+fn record_moment_encoding(py: Python<'_>, record: PyBackedBytes) -> PyResult<Py<PyAny>> {
     let inventory = py
-        .allow_threads(|| demux::record_moment_encoding(&record))
+        .detach(|| demux::record_moment_encoding(&record))
         .map_err(demux_err)?;
     inventory_to_py(py, inventory)
 }
@@ -1316,9 +1308,9 @@ fn record_moment_encoding(py: Python<'_>, record: PyBackedBytes) -> PyResult<PyO
 /// `radials_present` / `max_gate_count` / `uniform` are folded over the
 /// whole span.
 #[pyfunction]
-fn sweep_moment_encoding(py: Python<'_>, span: PyBackedBytes) -> PyResult<PyObject> {
+fn sweep_moment_encoding(py: Python<'_>, span: PyBackedBytes) -> PyResult<Py<PyAny>> {
     let inventory = py
-        .allow_threads(|| demux::sweep_moment_encoding(&span))
+        .detach(|| demux::sweep_moment_encoding(&span))
         .map_err(demux_err)?;
     inventory_to_py(py, inventory)
 }
@@ -1382,7 +1374,7 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // so a dask/multiprocessing worker that raises it loses the typed
     // exception when it crosses a process boundary — exactly the
     // parallel workflow these decoders exist for.
-    let moment_encoding_error = m.py().get_type_bound::<MomentEncodingError>();
+    let moment_encoding_error = m.py().get_type::<MomentEncodingError>();
     moment_encoding_error.setattr("__module__", "radish")?;
     m.add("MomentEncodingError", moment_encoding_error)?;
     Ok(())
