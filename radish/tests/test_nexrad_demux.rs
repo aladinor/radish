@@ -25,14 +25,7 @@ fn klot() -> Option<Vec<u8>> {
 }
 
 fn options(moment: MomentSelector, rays: usize, gates: usize, word: OutputWord) -> DemuxOptions {
-    DemuxOptions {
-        moment,
-        rays,
-        gates,
-        word,
-        fill_value: 0,
-        target: None,
-    }
+    DemuxOptions::new(moment, rays, gates, word)
 }
 
 fn word_for(word_size: u8) -> OutputWord {
@@ -170,10 +163,7 @@ fn kvnx_cross_era_zdr_lands_on_one_grid() {
     };
 
     // The 16-bit grid both eras get remapped onto.
-    let target = TargetEncoding {
-        scale: 32.0,
-        offset: 418.0,
-    };
+    let target = TargetEncoding::new(32.0, 418.0);
     let expected_source = [(era8, 8u8, 16.0f32, 128.0f32), (era16, 16, 32.0, 418.0)];
 
     for (path, word_size, scale, offset) in expected_source {

@@ -232,7 +232,11 @@ impl OutputWord {
 
 /// The raw grid the caller wants values on, as declared by a NEXRAD
 /// moment descriptor: `physical = (raw - offset) / scale`.
+///
+/// `#[non_exhaustive]`: build with [`TargetEncoding::new`] so a future
+/// field is not a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TargetEncoding {
     /// Target `scale` (the descriptor field, not CF `scale_factor`).
     pub scale: f32,
@@ -240,8 +244,20 @@ pub struct TargetEncoding {
     pub offset: f32,
 }
 
+impl TargetEncoding {
+    /// A target raw grid where `physical = (raw - offset) / scale`.
+    pub fn new(scale: f32, offset: f32) -> Self {
+        Self { scale, offset }
+    }
+}
+
 /// Everything a demux call needs beyond the bytes themselves.
+///
+/// `#[non_exhaustive]`: build with [`DemuxOptions::new`] and the
+/// `with_*` setters rather than a struct literal, so adding a field
+/// later is not a breaking change.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct DemuxOptions {
     /// Which moment to extract.
     pub moment: MomentSelector,
@@ -260,6 +276,38 @@ pub struct DemuxOptions {
 }
 
 impl DemuxOptions {
+    /// Options for demultiplexing `moment` into a `rays × gates` array
+    /// of `word`-width raw words. `fill_value` defaults to `0` and there
+    /// is no target grid; set them with [`with_fill_value`] /
+    /// [`with_target`].
+    ///
+    /// [`with_fill_value`]: Self::with_fill_value
+    /// [`with_target`]: Self::with_target
+    pub fn new(moment: MomentSelector, rays: usize, gates: usize, word: OutputWord) -> Self {
+        Self {
+            moment,
+            rays,
+            gates,
+            word,
+            fill_value: 0,
+            target: None,
+        }
+    }
+
+    /// Set the value written to rows past the radial count and rows
+    /// where the moment is absent. Must fit `word`.
+    pub fn with_fill_value(mut self, fill_value: u16) -> Self {
+        self.fill_value = fill_value;
+        self
+    }
+
+    /// Remap each block onto this target grid (see the module docs for
+    /// when the remap is accepted).
+    pub fn with_target(mut self, target: TargetEncoding) -> Self {
+        self.target = Some(target);
+        self
+    }
+
     fn validate(&self) -> Result<()> {
         if self.gates == 0 {
             return Err(RadishError::MomentEncoding(
@@ -412,7 +460,11 @@ impl RawMoment {
 /// Everything a caller needs to size an array and build its CF
 /// attributes before decoding: `scale_factor = 1 / scale`,
 /// `add_offset = -offset / scale`.
+///
+/// `#[non_exhaustive]`: radish returns these; the marker reserves room
+/// to report more per-moment facts without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct MomentEncoding {
     /// `8` or `16` — the on-wire word size of the first radial that
     /// carried this moment.
@@ -470,7 +522,11 @@ impl MomentEncoding {
 /// Per-radial headers plus per-moment encodings for a record or a
 /// sweep-sized span. One pass; cheap enough to call before every
 /// decode.
+///
+/// `#[non_exhaustive]`: radish returns these; the marker reserves room
+/// to report more per-radial fields without a breaking change.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct RecordInventory {
     /// Number of Message 31 radials — the row count a demux of this
     /// input will produce.
@@ -1293,14 +1349,7 @@ mod tests {
     }
 
     fn opts(moment: MomentSelector, rays: usize, gates: usize, word: OutputWord) -> DemuxOptions {
-        DemuxOptions {
-            moment,
-            rays,
-            gates,
-            word,
-            fill_value: 0,
-            target: None,
-        }
+        DemuxOptions::new(moment, rays, gates, word)
     }
 
     fn u8s(m: &RawMoment) -> &[u8] {
@@ -1422,10 +1471,7 @@ mod tests {
         // The issue's case: raw16 = 2 * raw8 + 162.
         let record = radial(30.0, &[zdr8(vec![0, 1, 128, 255])]);
         let mut o = opts(MomentSelector::Zdr, 1, 4, OutputWord::U16);
-        o.target = Some(TargetEncoding {
-            scale: 32.0,
-            offset: 418.0,
-        });
+        o.target = Some(TargetEncoding::new(32.0, 418.0));
         let out = decode_record_moment(&record, &o).unwrap();
         assert_eq!(u16s(&out), &[162, 164, 418, 672]);
 
@@ -1648,25 +1694,16 @@ mod tests {
         let mut o = opts(MomentSelector::Zdr, 1, 1, OutputWord::U16);
 
         // bias = 0 - 128*1 = -128: raw 0 would map below zero.
-        o.target = Some(TargetEncoding {
-            scale: 16.0,
-            offset: 0.0,
-        });
+        o.target = Some(TargetEncoding::new(16.0, 0.0));
         assert!(decode_record_moment(&record, &o).is_err(), "negative bias");
 
         // ratio = 8/16 = 0.5.
-        o.target = Some(TargetEncoding {
-            scale: 8.0,
-            offset: 64.0,
-        });
+        o.target = Some(TargetEncoding::new(8.0, 64.0));
         assert!(decode_record_moment(&record, &o).is_err(), "ratio below 1");
 
         // Degenerate target scales are reachable straight from Python.
         for scale in [0.0, f32::NAN, f32::INFINITY] {
-            o.target = Some(TargetEncoding {
-                scale,
-                offset: 418.0,
-            });
+            o.target = Some(TargetEncoding::new(scale, 418.0));
             assert!(
                 decode_record_moment(&record, &o).is_err(),
                 "scale {scale} must be refused"
@@ -1682,18 +1719,12 @@ mod tests {
         // within ZDR's 0x7FF, so this one is fine.
         let record = radial(30.0, &[zdr8(vec![255])]);
         let mut o = opts(MomentSelector::Zdr, 1, 1, OutputWord::U16);
-        o.target = Some(TargetEncoding {
-            scale: 64.0,
-            offset: 512.0,
-        });
+        o.target = Some(TargetEncoding::new(64.0, 512.0));
         assert_eq!(u16s(&decode_record_moment(&record, &o).unwrap()), &[1020]);
 
         // ratio 16 => widest 4080, past 0x7FF: off the ZDR grid even
         // though it fits a uint16.
-        o.target = Some(TargetEncoding {
-            scale: 256.0,
-            offset: 2048.0,
-        });
+        o.target = Some(TargetEncoding::new(256.0, 2048.0));
         let error = decode_record_moment(&record, &o).unwrap_err();
         assert!(
             matches!(error, RadishError::MomentEncoding(ref m) if m.contains("ZDR grid")),
@@ -1786,10 +1817,7 @@ mod tests {
         // The same bytes with an explicit target grid must still work —
         // that is precisely what the remap is for.
         let mut o = opts(MomentSelector::Zdr, 2, 3, OutputWord::U16);
-        o.target = Some(TargetEncoding {
-            scale: 16.0,
-            offset: 128.0,
-        });
+        o.target = Some(TargetEncoding::new(16.0, 128.0));
         let out = decode_record_moment(&record, &o).unwrap();
         assert_eq!(u16s(&out), &[128, 144, 160, 128, 144, 160]);
     }
@@ -1937,10 +1965,7 @@ mod tests {
         // against a -8.0 dB detection floor.
         let record = radial(30.0, &[zdr8(vec![0, 200])]);
         let mut o = opts(MomentSelector::Zdr, 1, 4, OutputWord::U16);
-        o.target = Some(TargetEncoding {
-            scale: 32.0,
-            offset: 418.0,
-        });
+        o.target = Some(TargetEncoding::new(32.0, 418.0));
         let out = decode_record_moment(&record, &o).unwrap();
         assert_eq!(u16s(&out), &[162, 562, 162, 162]);
         for raw in u16s(&out) {
@@ -1961,10 +1986,7 @@ mod tests {
     fn native_16bit_zdr_passes_through_when_the_target_matches() {
         let record = radial(30.0, &[zdr16(vec![0, 500, 2047])]);
         let mut o = opts(MomentSelector::Zdr, 1, 3, OutputWord::U16);
-        o.target = Some(TargetEncoding {
-            scale: 32.0,
-            offset: 418.0,
-        });
+        o.target = Some(TargetEncoding::new(32.0, 418.0));
         let out = decode_record_moment(&record, &o).unwrap();
         assert_eq!(u16s(&out), &[0, 500, 2047]);
     }
@@ -1999,10 +2021,7 @@ mod tests {
         // would be lossy. Refuse rather than approximate.
         let record = radial(30.0, &[zdr8(vec![10])]);
         let mut o = opts(MomentSelector::Zdr, 1, 1, OutputWord::U16);
-        o.target = Some(TargetEncoding {
-            scale: 24.0,
-            offset: 418.0,
-        });
+        o.target = Some(TargetEncoding::new(24.0, 418.0));
         let err = decode_record_moment(&record, &o).unwrap_err();
         assert!(
             matches!(err, RadishError::MomentEncoding(ref m) if m.contains("not an exact integer")),
@@ -2015,10 +2034,7 @@ mod tests {
         // 8-bit source, ratio 2, into a uint8 output: 255*2 = 510.
         let record = radial(30.0, &[zdr8(vec![10])]);
         let mut o = opts(MomentSelector::Zdr, 1, 1, OutputWord::U8);
-        o.target = Some(TargetEncoding {
-            scale: 32.0,
-            offset: 256.0,
-        });
+        o.target = Some(TargetEncoding::new(32.0, 256.0));
         let err = decode_record_moment(&record, &o).unwrap_err();
         assert!(
             matches!(err, RadishError::MomentEncoding(ref m) if m.contains("overflows the uint8 ZDR grid")),
@@ -2153,10 +2169,7 @@ mod tests {
         let mut record = radial(1.0, &[zdr8(vec![0])]);
         record.extend_from_slice(&radial(2.0, &[zdr16(vec![162])]));
         let mut o = opts(MomentSelector::Zdr, 2, 1, OutputWord::U16);
-        o.target = Some(TargetEncoding {
-            scale: 32.0,
-            offset: 418.0,
-        });
+        o.target = Some(TargetEncoding::new(32.0, 418.0));
         let out = decode_record_moment(&record, &o).unwrap();
         assert_eq!(u16s(&out), &[162, 162]);
     }

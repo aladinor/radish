@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a hand-rolled `bz2`/`struct` walk of the Message 31 headers and
   against radish's own independent volume reader. (#32)
 
+- **Rust API (`radish::backends::nexrad::demux`): the public structs are
+  `#[non_exhaustive]` with constructors**, so radish can add fields later
+  without a breaking change. Build `DemuxOptions` with
+  `DemuxOptions::new(moment, rays, gates, word)` plus `.with_fill_value()`
+  / `.with_target()`, and `TargetEncoding` with `TargetEncoding::new(scale,
+  offset)`, rather than struct literals. The returned `MomentEncoding` and
+  `RecordInventory` are `#[non_exhaustive]` too. The Python API is
+  unaffected. (#32)
+
 ### Fixed
 
 - **KILX corpus documentation was inverted.** `CORPUS.md` and

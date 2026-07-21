@@ -1081,7 +1081,7 @@ fn demux_options(
 ) -> PyResult<DemuxOptions> {
     let target = match (scale, offset) {
         (None, None) => None,
-        (Some(scale), Some(offset)) => Some(TargetEncoding { scale, offset }),
+        (Some(scale), Some(offset)) => Some(TargetEncoding::new(scale, offset)),
         _ => {
             return Err(PyValueError::new_err(
                 "scale and offset must be given together — they jointly define the target raw \
@@ -1089,14 +1089,13 @@ fn demux_options(
             ))
         }
     };
-    Ok(DemuxOptions {
-        moment: moment.parse::<MomentSelector>().map_err(demux_err)?,
-        rays: out_shape.0,
-        gates: out_shape.1,
-        word: output_word(py, dtype)?,
-        fill_value,
-        target,
-    })
+    let moment = moment.parse::<MomentSelector>().map_err(demux_err)?;
+    let mut options = DemuxOptions::new(moment, out_shape.0, out_shape.1, output_word(py, dtype)?)
+        .with_fill_value(fill_value);
+    if let Some(target) = target {
+        options = options.with_target(target);
+    }
+    Ok(options)
 }
 
 /// Hand a decoded `RawMoment` to numpy as a 2-D array, without copying.
