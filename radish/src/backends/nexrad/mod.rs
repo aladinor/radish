@@ -22,6 +22,7 @@ mod attrs;
 // without polluting individual files.
 #[allow(dead_code)]
 mod decode;
+pub mod demux;
 mod mapping;
 pub(crate) mod sniff;
 

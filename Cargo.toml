@@ -63,9 +63,12 @@ bzip2 = "0.6"
 # `image` (render), `reqwest`+`tokio` (aws), and friends.
 nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["model", "decode", "data", "chrono", "parallel"] }
 
-# Python bindings.
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
+# Python bindings. `pyo3` and `pyo3-build-config` ship in lockstep from
+# the same repo and must stay on the same version — keep both here so a
+# future bump moves one line, not two files.
+pyo3 = { version = "0.29", features = ["extension-module"] }
+pyo3-build-config = "0.29"
+numpy = "0.29"
 
 [profile.release]
 opt-level = 3

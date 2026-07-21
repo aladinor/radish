@@ -7,11 +7,16 @@
 //! Gated on `RADISH_NEXRAD_FIXTURE_DIR` — see
 //! `radish/tests/fixtures/CORPUS.md`.
 //!
-//! Two complementary asserts:
+//! Three complementary asserts:
 //!
 //! * **`klot_structural_parity_with_danielway_nexrad`** — pins
 //!   per-sweep ray-count equality on the happy-path file
 //!   (KLOT VCP-32 / 12). On a clean fixture both decoders agree.
+//!
+//! * **`kvnx_structural_parity_with_danielway_nexrad`** — the same
+//!   for the two cross-RDA-build KVNX volumes, and additionally
+//!   cross-checks the per-moment demux entry point's radial count
+//!   against danielway's.
 //!
 //! * **`kilx_structural_parity_with_danielway_nexrad`** — pins
 //!   per-sweep ray-count equality on `KILX20230629_154426_V06`,
@@ -27,9 +32,10 @@
 //!   truth; xradar is the off-by-2 outlier.
 
 #![cfg(test)]
-// The `nexrad` and `nexrad-data` crates are already runtime
-// dependencies of radish, so we don't need a separate dev-dep —
-// just import their public types here.
+// `nexrad` is a [dev-dependencies]-only side-by-side reference (see
+// `CLAUDE.md`): radish's production read path is its own in-tree
+// decoder, so importing danielway's types here is a genuine second
+// implementation, not the same code twice.
 
 use std::path::PathBuf;
 
@@ -45,6 +51,13 @@ fn klot_path() -> Option<PathBuf> {
 fn kilx_path() -> Option<PathBuf> {
     let p = corpus_dir()?.join("KILX20230629_154426_V06");
     p.is_file().then_some(p)
+}
+
+fn kvnx_paths() -> Option<(PathBuf, PathBuf)> {
+    let dir = corpus_dir()?;
+    let era8 = dir.join("KVNX20200602_123502_V06");
+    let era16 = dir.join("KVNX20200602_201830_V06");
+    (era8.is_file() && era16.is_file()).then_some((era8, era16))
 }
 
 /// Decode the file via `danielway/nexrad`. Returns sweep + radial
@@ -86,10 +99,7 @@ fn klot_structural_parity_with_danielway_nexrad() {
     let their_total: usize = their_rays_per_sweep.iter().sum();
 
     // Our decoder is reachable via the runtime path (NexradBackend),
-    // since Phase 7 hasn't swapped it yet. For parity we have to
-    // call radish's existing `read_volume` and count *its* radials
-    // — that's also what danielway returns since they both go
-    // through the upstream today.
+    // which since Phase 7 runs radish's own in-tree `decode_volume`.
     use radish::backends::{NexradBackend, RadarBackend};
     let backend = NexradBackend::new();
     let our = backend.read_volume(&path).expect("our read_volume");
@@ -106,11 +116,11 @@ fn klot_structural_parity_with_danielway_nexrad() {
         our_sweep_count, our_total, their_sweep_count, their_total
     );
 
-    // Note: until Phase 7 wires our internal decoder into the
-    // runtime path, this test is comparing danielway-against-
-    // danielway (radish's read_volume currently routes through
-    // them too). It will become a real parity gate once Phase 7
-    // lands.
+    // Phase 7 of plan 0003 swapped `read_volume` onto radish's own
+    // in-tree decoder (see `CLAUDE.md`) and there are no upstream
+    // `nexrad` *runtime* dependencies left, so this is a genuine
+    // two-implementation parity gate: our byte walker against
+    // danielway's.
     assert_eq!(our_sweep_count, their_sweep_count);
     assert_eq!(our_rays_per_sweep, their_rays_per_sweep);
 }
@@ -122,11 +132,9 @@ fn klot_structural_parity_with_danielway_nexrad() {
 /// (monotonic collection-time, sequential azimuth_number,
 /// `radial_status=1`, `spot_blank=0`).
 ///
-/// Pre-Phase-7 this is a danielway-against-danielway tautology
-/// since `radish::read_volume` still routes through danielway.
-/// Post-Phase-7 it becomes a real per-sweep-count parity gate:
-/// our internal `decode_volume` must produce the same 6840 / 360
-/// counts.
+/// Phase 7 of plan 0003 landed, so `radish::read_volume` runs our
+/// own `decode_volume`: this is a real per-sweep-count parity gate
+/// between two independent implementations, not a tautology.
 ///
 /// Note: xradar reports 6838 / 358 on this fixture due to a
 /// stride bug in its byte walker
@@ -135,7 +143,11 @@ fn klot_structural_parity_with_danielway_nexrad() {
 /// record. LDM record 49 of this fixture contains 122 messages
 /// (120 MSG_31 + 2 MSG_2), so xradar drops 2 valid MSG_31s at
 /// the LDM boundary. Both danielway and our decoder correctly
-/// walk all 122.
+/// walk all 122. Confirmed on the wire: `azimuth_number` runs
+/// 1..360 contiguously in elevation 11, with 119 and 120 present as
+/// messages 120 and 121 of LDM record 49. Filed upstream as
+/// openradar/xradar#376, fix in openradar/xradar#377 (open at the
+/// time of writing; not in 0.12.0, not on their `main`).
 #[test]
 #[ignore = "needs RADISH_NEXRAD_FIXTURE_DIR"]
 fn kilx_structural_parity_with_danielway_nexrad() {
@@ -175,4 +187,81 @@ fn kilx_structural_parity_with_danielway_nexrad() {
 
     assert_eq!(our_sweep_count, their_sweep_count);
     assert_eq!(our_rays_per_sweep, their_rays_per_sweep);
+}
+
+/// **KVNX cross-era third-party parity.**
+///
+/// The two `KVNX20200602_*` volumes straddle the 2020-06-02 RDA
+/// upgrade and are the corpus's regression gate for the per-moment
+/// decoders' remap logic (issue #32). This test pins them against
+/// `danielway/nexrad` so the ray-count claims radish documents rest on
+/// a second independent implementation rather than on radish alone.
+///
+/// It also cross-checks the **demux** entry point specifically:
+/// `sweep_moment_encoding`'s `radial_count` walks the same bytes
+/// through a different code path than `read_volume`, so agreeing with
+/// danielway on the total is a real signal, not a restatement.
+///
+/// Context for the 8-bit-era assertion: xradar reports 719 rays in the
+/// first cut of `KVNX20200602_123502_V06` where the wire carries 720.
+/// Same root cause as the KILX case above — `NEXRADRecordFile.init_record`
+/// hard-codes a 120-message LDM stride, so trailing MSG_31s are dropped
+/// from any record that also carries MSG_2. Filed upstream as
+/// openradar/xradar#376 with a fix in openradar/xradar#377 (open at the
+/// time of writing; not in xradar 0.12.0 and not on their `main`).
+#[test]
+#[ignore = "needs RADISH_NEXRAD_FIXTURE_DIR + danielway/nexrad parity dep"]
+fn kvnx_structural_parity_with_danielway_nexrad() {
+    let Some((era8, era16)) = kvnx_paths() else {
+        eprintln!("skipping: KVNX fixtures not found in RADISH_NEXRAD_FIXTURE_DIR");
+        return;
+    };
+
+    use radish::backends::nexrad::demux::sweep_moment_encoding;
+    use radish::backends::{NexradBackend, RadarBackend};
+
+    for (label, path, expected_first_cut) in [
+        ("8-bit era", era8, 720usize),
+        ("16-bit era", era16, 720usize),
+    ] {
+        let (their_sweep_count, their_rays_per_sweep) = danielway_summary(&path);
+        let their_total: usize = their_rays_per_sweep.iter().sum();
+
+        let our = NexradBackend::new()
+            .read_volume(&path)
+            .expect("our read_volume");
+        let our_rays_per_sweep: Vec<usize> = our
+            .sweeps
+            .iter()
+            .map(|s| s.coordinates.azimuth.len())
+            .collect();
+
+        // Third code path: the demux inventory, walking the raw span.
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let inventory = sweep_moment_encoding(&bytes).expect("demux inventory");
+
+        eprintln!(
+            "KVNX {label}: danielway={} sweeps / {} rays, ours={} / {}, demux={} rays",
+            their_sweep_count,
+            their_total,
+            our.num_sweeps(),
+            our_rays_per_sweep.iter().sum::<usize>(),
+            inventory.radial_count,
+        );
+
+        assert_eq!(our.num_sweeps(), their_sweep_count, "{label} sweep count");
+        assert_eq!(
+            our_rays_per_sweep, their_rays_per_sweep,
+            "{label} per-sweep"
+        );
+        assert_eq!(
+            inventory.radial_count, their_total,
+            "{label}: the demux path must see the same radials as danielway"
+        );
+        assert_eq!(
+            their_rays_per_sweep[0], expected_first_cut,
+            "{label}: first cut is a complete circle on the wire (xradar reports 719 \
+             on the 8-bit era — see openradar/xradar#377)"
+        );
+    }
 }

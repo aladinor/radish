@@ -43,6 +43,17 @@ const CORPUS_SHA256: &[(&str, &str)] = &[
         "KILX20230629_154426_V06",
         "715c3c18691f6efe87a27127d631add8d90fd92c66a019a17965b624757180da",
     ),
+    // The KVNX cross-RDA-build pair — 8-bit vs 16-bit ZDR encoding
+    // either side of the 2020-06-02 upgrade outage. Regression gate for
+    // the per-moment decoders' remap logic (issue #32).
+    (
+        "KVNX20200602_123502_V06",
+        "fde3fda1ca80e7fc3d2d859cc591ee7c4da7a80b17c2166a19f6f7047950bd1c",
+    ),
+    (
+        "KVNX20200602_201830_V06",
+        "cea716258763881b28f57483b65b144526e554bfe773aaa1df942c4a3024b855",
+    ),
 ];
 
 /// Hex-format a SHA-256 digest without pulling in the `hex` crate.
