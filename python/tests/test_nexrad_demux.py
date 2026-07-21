@@ -124,6 +124,23 @@ def test_decode_record_moment_returns_raw_words():
     np.testing.assert_array_equal(out, [[0, 1, 130, 2]])
 
 
+@pytest.mark.parametrize(
+    "bare,canonical",
+    [
+        ("decode_record_moment", "decode_nexrad_record_moment"),
+        ("decode_sweep_moment", "decode_nexrad_sweep_moment"),
+        ("record_moment_encoding", "nexrad_record_moment_encoding"),
+        ("sweep_moment_encoding", "nexrad_sweep_moment_encoding"),
+    ],
+)
+def test_unqualified_names_alias_the_canonical_ones(bare, canonical):
+    """The format-qualified names are canonical; the bare names issue #32
+    introduced are kept as aliases pointing at the same objects. Pin that
+    so a refactor can't silently drop the issue's `hasattr` contract."""
+    assert getattr(radish, bare) is getattr(radish, canonical)
+    assert bare in radish.__all__ and canonical in radish.__all__
+
+
 def test_rows_follow_record_order():
     record = _radial(90.0, [_ref([10, 11])]) + _radial(10.0, [_ref([20, 21])])
     out = radish.decode_record_moment(record, "REF", (2, 2), np.uint8)

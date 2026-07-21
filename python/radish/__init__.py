@@ -21,18 +21,18 @@ from radish._radish import (
     SweepData,
     VolumeData,
     VolumeMetadata,
-    decode_record_moment,
-    decode_sweep_moment,
+    decode_nexrad_record_moment,
+    decode_nexrad_sweep_moment,
+    nexrad_record_moment_encoding,
+    nexrad_sweep_moment_encoding,
     read_cfradial1,
     read_nexrad,
     read_nexrad_chunks,
     read_sigmet,
-    record_moment_encoding,
     scan_cfradial1,
     scan_nexrad,
     scan_nexrad_chunks,
     scan_sigmet,
-    sweep_moment_encoding,
 )
 
 # Canonical entry points: format-agnostic, input-shape-agnostic.
@@ -42,6 +42,18 @@ from radish._open import detect_backend, open_dataset, open_datatree, scan
 # from `python/pyproject.toml`. Avoids the long-standing drift where
 # this constant was hard-coded at 0.1.0 while the wheels shipped 0.2.x.
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+# Unqualified aliases for the NEXRAD per-moment decoders. Issue #32
+# specified the bare names (its reproducer does
+# `hasattr(radish, "decode_record_moment")`), so they stay as first-class
+# aliases pointing at the same objects. The `nexrad_`-qualified names
+# imported above are canonical — they match the rest of the API
+# (`read_nexrad` / `scan_nexrad`) and leave room for a future Sigmet/ODIM
+# equivalent (`decode_sigmet_record_moment`, …).
+decode_record_moment = decode_nexrad_record_moment
+decode_sweep_moment = decode_nexrad_sweep_moment
+record_moment_encoding = nexrad_record_moment_encoding
+sweep_moment_encoding = nexrad_sweep_moment_encoding
 
 try:
     __version__ = _pkg_version("radish-rs")
@@ -79,6 +91,13 @@ __all__ = [
     # exactly the bytes they need. Pair the decoders with the
     # `*_moment_encoding` inspectors, which report each moment's
     # word_size/scale/offset before you allocate.
+    #
+    # Canonical (format-qualified) names:
+    "decode_nexrad_record_moment",
+    "decode_nexrad_sweep_moment",
+    "nexrad_record_moment_encoding",
+    "nexrad_sweep_moment_encoding",
+    # Unqualified aliases (issue #32 names) — same objects:
     "decode_record_moment",
     "decode_sweep_moment",
     "record_moment_encoding",

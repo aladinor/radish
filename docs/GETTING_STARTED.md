@@ -227,6 +227,13 @@ holds ~120 Message 31 radials with every moment interleaved into the same
 byte range, so the low-level decoders let you demultiplex just the bytes
 you need.
 
+These are NEXRAD-specific, so the canonical names are
+format-qualified — `decode_nexrad_record_moment`,
+`decode_nexrad_sweep_moment`, `nexrad_record_moment_encoding`,
+`nexrad_sweep_moment_encoding` — matching `read_nexrad` / `scan_nexrad`.
+The unqualified spellings (`decode_record_moment`, …) are kept as aliases
+for the names issue #32 introduced; they refer to the same objects.
+
 The workflow is **inspect → allocate → decode**:
 
 ```python
@@ -249,12 +256,12 @@ while pos + 4 <= len(raw):
 record = bz2.decompress(records[5])
 
 # 1. Inspect: how many radials, and how is each moment encoded?
-enc = radish.record_moment_encoding(record)
+enc = radish.nexrad_record_moment_encoding(record)
 zdr = enc["moments"]["ZDR"]
 print(enc["radial_count"], zdr["word_size"], zdr["scale"], zdr["offset"])
 
 # 2. Allocate + 3. decode — ~0.08 ms for a 120 x 1832 block.
-array = radish.decode_record_moment(
+array = radish.decode_nexrad_record_moment(
     record, "ZDR", (enc["radial_count"], zdr["max_gate_count"]),
     np.uint8 if zdr["word_size"] == 8 else np.uint16,
 )
@@ -271,7 +278,7 @@ pins a single dtype and a single `scale_factor`/`add_offset`, so pass an
 explicit target grid when you need volumes from both eras in one store:
 
 ```python
-array = radish.decode_record_moment(
+array = radish.decode_nexrad_record_moment(
     record, "ZDR", (rays, gates), np.uint16, scale=32.0, offset=418.0,
 )
 ```
@@ -284,7 +291,7 @@ approximate values being returned. `enc["moments"][name]["uniform"]` is
 target grid is required.
 
 For a whole sweep-sized byte span (still compressed, control words and
-all) use `radish.decode_sweep_moment` / `radish.sweep_moment_encoding`,
+all) use `radish.decode_nexrad_sweep_moment` / `radish.nexrad_sweep_moment_encoding`,
 which decompress records in parallel. Note that each call decompresses the
 span, so if you want *every* moment you're better off with
 `radish.open_datatree`.

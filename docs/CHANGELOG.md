@@ -9,17 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Low-level NEXRAD per-moment decoders** — `radish.decode_record_moment`,
-  `radish.decode_sweep_moment`, `radish.record_moment_encoding`,
-  `radish.sweep_moment_encoding`, and the `radish.MomentEncodingError`
-  exception. These pull **one moment** out of **one LDM record** (or one
-  sweep-sized byte span) as the raw NEXRAD words, so chunked/lazy consumers
-  — zarr codecs, virtual/byte-range reference stores, partial-volume reads —
-  can decode exactly the bytes they need instead of a whole volume. A
-  120-radial × 1832-gate reflectivity block decodes in ~0.06 ms; the sweep
-  variant decompresses records in parallel via rayon (~5× on 8 cores).
-  Verified bit-identical to `xradar.io.open_nexradlevel2_datatree` on the
-  first cut of every fixture in the corpus. (#32)
+- **Low-level NEXRAD per-moment decoders** —
+  `radish.decode_nexrad_record_moment`,
+  `radish.decode_nexrad_sweep_moment`,
+  `radish.nexrad_record_moment_encoding`,
+  `radish.nexrad_sweep_moment_encoding`, and the
+  `radish.MomentEncodingError` exception. These pull **one moment** out of
+  **one LDM record** (or one sweep-sized byte span) as the raw NEXRAD words,
+  so chunked/lazy consumers — zarr codecs, virtual/byte-range reference
+  stores, partial-volume reads — can decode exactly the bytes they need
+  instead of a whole volume. A 120-radial × 1832-gate reflectivity block
+  decodes in ~0.06 ms; the sweep variant decompresses records in parallel
+  via rayon (~5× on 8 cores). Verified bit-identical to
+  `xradar.io.open_nexradlevel2_datatree` on the first cut of every fixture
+  in the corpus. (#32)
+
+  The names are format-qualified (matching `read_nexrad` / `scan_nexrad`)
+  so a future Sigmet/ODIM equivalent has room to exist. The unqualified
+  spellings issue #32 introduced — `decode_record_moment`,
+  `decode_sweep_moment`, `record_moment_encoding`, `sweep_moment_encoding`
+  — are kept as first-class aliases referring to the same objects, so that
+  issue's `hasattr(radish, "decode_record_moment")` check and any early
+  code keep working.
 
   Output arrays are native-endian; a non-native dtype (`">u2"`) is
   **rejected** rather than silently satisfied, because an array that

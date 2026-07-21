@@ -1201,6 +1201,7 @@ fn inventory_to_py(py: Python<'_>, inventory: RecordInventory) -> PyResult<Py<Py
 /// otherwise `MomentEncodingError` is raised. Without them, every block
 /// must already match the requested dtype width.
 #[pyfunction]
+#[pyo3(name = "decode_nexrad_record_moment")]
 #[pyo3(signature = (record, moment, out_shape, dtype, fill_value=0, scale=None, offset=None))]
 #[allow(clippy::too_many_arguments)]
 fn decode_record_moment(
@@ -1246,6 +1247,7 @@ fn decode_record_moment(
 /// Reproduce the same permutation for your coordinate arrays with
 /// `np.argsort(sweep_moment_encoding(span)["azimuth"], kind="stable")`.
 #[pyfunction]
+#[pyo3(name = "decode_nexrad_sweep_moment")]
 #[pyo3(signature = (span, moment, out_shape, dtype, fill_value=0, scale=None, offset=None, sort_by_azimuth=false))]
 #[allow(clippy::too_many_arguments)]
 fn decode_sweep_moment(
@@ -1287,6 +1289,7 @@ fn decode_sweep_moment(
 /// the safe gate dimension; `scale_factor`/`add_offset` are the CF
 /// attributes for the first-seen encoding.
 #[pyfunction]
+#[pyo3(name = "nexrad_record_moment_encoding")]
 fn record_moment_encoding(py: Python<'_>, record: PyBackedBytes) -> PyResult<Py<PyAny>> {
     let inventory = py
         .detach(|| demux::record_moment_encoding(&record))
@@ -1302,6 +1305,7 @@ fn record_moment_encoding(py: Python<'_>, record: PyBackedBytes) -> PyResult<Py<
 /// `radials_present` / `max_gate_count` / `uniform` are folded over the
 /// whole span.
 #[pyfunction]
+#[pyo3(name = "nexrad_sweep_moment_encoding")]
 fn sweep_moment_encoding(py: Python<'_>, span: PyBackedBytes) -> PyResult<Py<PyAny>> {
     let inventory = py
         .detach(|| demux::sweep_moment_encoding(&span))
