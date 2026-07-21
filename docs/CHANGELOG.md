@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Low-level NEXRAD per-moment decoders** —
+  `radish.decode_nexrad_record_moment`,
+  `radish.decode_nexrad_sweep_moment`,
+  `radish.nexrad_record_moment_encoding`,
+  `radish.nexrad_sweep_moment_encoding`, and the
+  `radish.MomentEncodingError` exception. These pull **one moment** out of
+  **one LDM record** (or one sweep-sized byte span) as the raw NEXRAD words,
+  so chunked/lazy consumers — zarr codecs, virtual/byte-range reference
+  stores, partial-volume reads — can decode exactly the bytes they need
+  instead of a whole volume. A 120-radial × 1832-gate reflectivity block
+  decodes in ~0.06 ms; the sweep variant decompresses records in parallel
+  via rayon (~5× on 8 cores). Verified bit-identical to
+  `xradar.io.open_nexradlevel2_datatree` on the first cut of every fixture
+  in the corpus. (#32)
+
+  The names are format-qualified (matching `read_nexrad` / `scan_nexrad`)
+  so a future Sigmet/ODIM equivalent has room to exist. The unqualified
+  spellings issue #32 introduced — `decode_record_moment`,
+  `decode_sweep_moment`, `record_moment_encoding`, `sweep_moment_encoding`
+  — are kept as first-class aliases referring to the same objects, so that
+  issue's `hasattr(radish, "decode_record_moment")` check and any early
+  code keep working.
+
+  Output arrays are native-endian; a non-native dtype (`">u2"`) is
+  **rejected** rather than silently satisfied, because an array that
+  compares equal element-wise but whose `.tobytes()` is byte-swapped is
+  exactly the corruption a zarr/reference-store caller would not notice.
+  An implausible `out_shape` is rejected too — the allocator would
+  otherwise `abort()`, which cannot be turned back into a Python
+  exception and would take a long-lived worker down with it.
+
+  The decoders read each Message 31 data block's own
+  `word_size`/`scale`/`offset` rather than assuming a fixed encoding —
+  NEXRAD moment encodings change across RDA builds (KVNX flipped ZDR from
+  `8-bit, scale=16, offset=128` to `16-bit, scale=32, offset=418` on
+  2020-06-02, so a decoder that assumes one encoding returns physically
+  wrong values for the other era). Pass `scale=`/`offset=` to remap onto a
+  common target grid; the remap is applied only when exactly representable
+  and `MomentEncodingError` is raised otherwise. An undersized `out_shape`
+  is likewise an error — radish never silently truncates gates or drops
+  radials.
+
+  Because one output array carries exactly one
+  `scale_factor`/`add_offset`, blocks that disagree on
+  `(word_size, scale, offset)` are refused unless a target grid is given
+  — including blocks of the same width whose `scale`/`offset` differ, and
+  including disagreements between separate LDM records in one sweep span.
+  `sort_by_azimuth=True` reproduces `np.argsort(azimuth, kind="stable")`
+  exactly, signed zero and NaN included, so callers can reorder their
+  coordinate arrays to match.
+
+- **KVNX cross-RDA-build fixtures** added to the test corpus
+  (`radish/tests/fixtures/CORPUS.md`): `KVNX20200602_123502_V06` and
+  `KVNX20200602_201830_V06`, the 8-bit and 16-bit ZDR eras either side of
+  the 2020-06-02 upgrade outage. The earlier volume also pins a divergence
+  where xradar's first cut has 719 rays with a 1.0° azimuth hole at
+  ~90.75°, while radish returns all 720 at uniform 0.5° spacing — confirmed
+  against a hand-rolled `bz2`/`struct` walk of the Message 31 headers and
+  against radish's own independent volume reader. (#32)
+
+- **Rust API (`radish::backends::nexrad::demux`): the public structs are
+  `#[non_exhaustive]` with constructors**, so radish can add fields later
+  without a breaking change. Build `DemuxOptions` with
+  `DemuxOptions::new(moment, out_shape, word)` — `out_shape` is a `(rays,
+  gates)` pair so the two dimensions can't be silently transposed — then
+  set the `pub` `fill_value` / `target` fields directly; build
+  `TargetEncoding` with `TargetEncoding::new(scale, offset)`. The returned
+  `MomentEncoding` and `RecordInventory` are `#[non_exhaustive]` too. The
+  enums (`MomentSelector`, `OutputWord`, `RawMoment`) stay exhaustive on
+  purpose — their variants are closed domains fixed by the wire format.
+  The Python API is unaffected. (#32)
+
+### Fixed
+
+- **KILX corpus documentation was inverted.** `CORPUS.md` and
+  `python/tests/conftest.py` described `sweep_10` of
+  `KILX20230629_154426_V06` as carrying 358 MSG_31 records with 360 being
+  an upstream bug. The file carries **360** — a full 1° circle — and 358
+  is what xradar reports. `radish/tests/test_nexrad_internal_parity.rs`
+  has always asserted the correct 360; only the prose was wrong.
+  Confirmed against radish's own reader, a hand-rolled `bz2`/`struct`
+  walk, and Py-ART. (#32)
+
 ### Security
 
 - **All outstanding `cargo audit` advisories resolved; the Security Audit
