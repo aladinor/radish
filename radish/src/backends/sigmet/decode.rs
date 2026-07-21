@@ -42,7 +42,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{RadishError, Result};
 
-use super::calibration::Decoder;
+use super::calibration::{DecodeParams, Decoder};
 use super::mapping::moment_for_id;
 use super::structs::{
     bin2_to_degrees, IngestConfiguration, IngestDataHeader, RawProdBhdr, ScanMode, StructureHeader,
@@ -193,7 +193,10 @@ pub(super) fn parse_volume(data: &[u8]) -> Result<DecodedVolume> {
         task.sweeps_per_volume as usize,
         gate_count,
         &active_data_type_ids,
-        task.nyquist_velocity_ms,
+        DecodeParams {
+            nyquist_ms: task.nyquist_velocity_ms,
+            wavelength_cm: task.wavelength_cm,
+        },
     )?;
 
     Ok(DecodedVolume {
@@ -307,7 +310,7 @@ fn parse_sweeps(
     sweeps_per_volume: usize,
     gate_count: usize,
     active_data_type_ids: &[u8],
-    nyquist_ms: f32,
+    params: DecodeParams,
 ) -> Result<Vec<DecodedSweep>> {
     let mut sweeps = Vec::with_capacity(sweeps_per_volume);
     let mut cursor = data_start;
@@ -377,7 +380,7 @@ fn parse_sweeps(
                     .map(|m| m.decoder)
                     .unwrap_or(super::calibration::DECODE_NONE);
                 if let Some((az, el, t_off, decoded)) =
-                    decode_one_ray(&mut reader, gate_count, bytes_per_bin, decoder, nyquist_ms)?
+                    decode_one_ray(&mut reader, gate_count, bytes_per_bin, decoder, params)?
                 {
                     if moment_pos == 0 {
                         ray.azimuth_deg = az;
@@ -452,7 +455,7 @@ fn decode_one_ray(
     gate_count: usize,
     bytes_per_bin: usize,
     decoder: Decoder,
-    nyquist_ms: f32,
+    params: DecodeParams,
 ) -> Result<Option<RayDecode>> {
     if reader.is_done() {
         return Ok(None);
@@ -520,14 +523,14 @@ fn decode_one_ray(
     if bytes_per_bin == 1 {
         // Two 8-bit gates per 16-bit word: low byte = gate 2k, high byte = gate 2k+1.
         for w in bin_words.iter().take(gate_count.div_ceil(2)) {
-            decoded.push(decoder(w & 0xFF, nyquist_ms));
+            decoded.push(decoder(w & 0xFF, params));
             if decoded.len() < gate_count {
-                decoded.push(decoder(w >> 8, nyquist_ms));
+                decoded.push(decoder(w >> 8, params));
             }
         }
     } else {
         for w in bin_words.iter().take(gate_count) {
-            decoded.push(decoder(*w, nyquist_ms));
+            decoded.push(decoder(*w, params));
         }
     }
     decoded.resize(gate_count, f32::NAN);
@@ -590,6 +593,13 @@ mod tests {
 
     use crate::backends::sigmet::calibration::DECODE_NONE;
 
+    /// Dummy decode params for tests that exercise `DECODE_NONE` (which
+    /// ignores both fields).
+    const TEST_PARAMS: DecodeParams = DecodeParams {
+        nyquist_ms: 0.0,
+        wavelength_cm: 0.0,
+    };
+
     /// A buffer that's not even big enough for STRUCTURE_HEADER.
     #[test]
     fn parse_volume_rejects_short_buffer() {
@@ -650,7 +660,7 @@ mod tests {
     fn decode_one_ray_returns_none_for_missing_ray_sentinel() {
         let buf = with_record_prelude(&[0x01, 0x00]);
         let mut reader = RecordReader::new(&buf, 0, buf.len());
-        let result = decode_one_ray(&mut reader, 10, 1, DECODE_NONE, 0.0).expect("Ok");
+        let result = decode_one_ray(&mut reader, 10, 1, DECODE_NONE, TEST_PARAMS).expect("Ok");
         assert!(
             result.is_none(),
             "missing-ray sentinel must surface as None"
@@ -803,7 +813,7 @@ mod tests {
         // u16 maps directly to one gate.
         let mut reader = RecordReader::new(&bytes, 0, bytes.len());
         let result =
-            decode_one_ray(&mut reader, 8, 2, DECODE_NONE, 0.0).expect("decode_one_ray ok");
+            decode_one_ray(&mut reader, 8, 2, DECODE_NONE, TEST_PARAMS).expect("decode_one_ray ok");
         let (_az, _el, _t, decoded) = result.expect("not a missing-ray sentinel");
 
         // DECODE_NONE maps raw=0 → NaN, else raw as f32. All our bins

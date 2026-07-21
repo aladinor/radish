@@ -141,3 +141,95 @@ def test_sigmet_moment_set_matches_xradar(sigmet_fixture):
             f"{skey}: xradar emits moments radish doesn't: {sorted(xradar_only)} — "
             "likely a missing entry in `SUPPORTED_MOMENTS` or `iris_mapping_ids_match_xradar_table`"
         )
+
+
+def test_sigmet_time_coordinate_is_absolute_and_matches_xradar(sigmet_fixture):
+    """The `time` coordinate must be the absolute acquisition time, not a
+    1970-epoch offset (issue #28).
+
+    radish orders rays by azimuth; xradar's IRIS reader emits a different ray
+    order, so we compare the *set* of ray times (sorted), not element-wise,
+    plus the absolute earliest time. Matching to ~1 ms also exercises the
+    YMDS millisecond decode.
+    """
+    np = pytest.importorskip("numpy")
+    xr = pytest.importorskip("xarray")
+    xradar = pytest.importorskip("xradar")
+
+    rd = xr.open_datatree(sigmet_fixture, engine="radish")
+    xd = xradar.io.open_iris_datatree(str(sigmet_fixture))
+
+    sweep_keys = sorted(
+        k for k in rd.children if k.startswith("sweep_") and k in xd.children
+    )
+    assert sweep_keys, "no overlapping sweep groups between readers"
+
+    for skey in sweep_keys:
+        rt = np.sort(rd[skey]["time"].values.astype("datetime64[ns]"))
+        xt = np.sort(xd[skey]["time"].values.astype("datetime64[ns]"))
+        assert rt.shape == xt.shape, f"{skey}: time shape mismatch"
+        # Sanity: radish time is no longer pinned to the 1970 epoch.
+        assert rt[0] > np.datetime64("2000-01-01"), (
+            f"{skey}: radish time[0]={rt[0]} looks epoch-relative (issue #28)"
+        )
+        # Sorted ray-time multisets must match xradar to within 1 ms.
+        delta_ms = np.abs((rt - xt) / np.timedelta64(1, "ms"))
+        assert delta_ms.max() <= 1.0, (
+            f"{skey}: ray-time set diverges from xradar by up to {delta_ms.max()} ms"
+        )
+
+
+def test_sigmet_moments_match_xradar(sigmet_fixture):
+    """Per-moment parity with xradar (issue #28): the finite-cell fraction
+    and the full sorted value multiset must match.
+
+    Covers all three fixes: the no-longer-over-masked power/phase moments
+    (DBZH/DBTH/ZDR/PHIDP/WRADH/SQIH go from ~6-25% to 100% finite), the
+    velocity `raw==0 -> 0.0` parity (VRADH), and the real KDP decode (was a
+    raw passthrough). Compared as sorted multisets because radish and xradar
+    order rays differently.
+    """
+    np = pytest.importorskip("numpy")
+    xr = pytest.importorskip("xarray")
+    xradar = pytest.importorskip("xradar")
+
+    rd = xr.open_datatree(sigmet_fixture, engine="radish")
+    xd = xradar.io.open_iris_datatree(str(sigmet_fixture))
+
+    sweep_keys = sorted(
+        k for k in rd.children if k.startswith("sweep_") and k in xd.children
+    )
+    assert sweep_keys, "no overlapping sweep groups between readers"
+
+    # The ODIM-mapped moments issue #28 is about. The IRIS-extended /
+    # categorical passthrough types (DB_HCLASS, DB_DBTE8, DB_DBZE8) are out
+    # of scope here: xradar decodes/keeps them differently and radish routes
+    # them through the no-op passthrough decoder — tracked separately.
+    MOMENTS = ["DBZH", "DBTH", "VRADH", "ZDR", "RHOHV", "KDP", "PHIDP", "WRADH", "SQIH"]
+
+    for skey in sweep_keys:
+        rd_ds, xd_ds = rd[skey].to_dataset(), xd[skey].to_dataset()
+        common = [
+            v
+            for v in MOMENTS
+            if v in rd_ds.data_vars and v in xd_ds.data_vars and rd_ds[v].ndim == 2
+        ]
+        assert common, f"{skey}: no common issue-#28 moments to compare"
+        for v in common:
+            r = rd_ds[v].values
+            x = xd_ds[v].values
+            rf = np.isfinite(r).mean()
+            xf = np.isfinite(x).mean()
+            assert abs(rf - xf) < 0.001, (
+                f"{skey}/{v}: finite fraction radish={rf:.3f} xradar={xf:.3f} "
+                "— masking/decoding diverges from xradar (issue #28)"
+            )
+            rs_vals = np.sort(r[np.isfinite(r)])
+            xs_vals = np.sort(x[np.isfinite(x)])
+            np.testing.assert_allclose(
+                rs_vals,
+                xs_vals,
+                rtol=1e-3,
+                atol=1e-3,
+                err_msg=f"{skey}/{v}: decoded value multiset differs from xradar",
+            )

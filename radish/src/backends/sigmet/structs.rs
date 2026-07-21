@@ -195,6 +195,9 @@ pub(super) struct TaskConfiguration {
     pub dsp_data_mask: u128,
     pub nyquist_velocity_ms: f32,
     pub prf_hz: f32,
+    /// Radar wavelength in centimetres (from `TASK_MISC_INFO.wavelength`,
+    /// stored in 1/100 cm). Used by the KDP decoder.
+    pub wavelength_cm: f32,
     pub unambiguous_range_m: f32,
     /// First gate distance in centimetres.
     pub range_first_bin_cm: i32,
@@ -255,6 +258,7 @@ impl TaskConfiguration {
         const TASK_DSP_INFO_OFF: u64 = 132;
         const TASK_RANGE_INFO_OFF: u64 = 772;
         const TASK_SCAN_INFO_OFF: u64 = 932;
+        const TASK_MISC_INFO_OFF: u64 = 1252;
         const TASK_END_INFO_OFF: u64 = 1572;
 
         let mut c = Cursor::new(buf);
@@ -290,13 +294,25 @@ impl TaskConfiguration {
         c.set_position(TASK_DSP_INFO_OFF + 136);
         let prf_hz = c.read_i32::<LittleEndian>()?.max(0) as f32;
 
+        // ----- TASK_MISC_INFO -----
+        // `wavelength` (SINT4, units of 1/100 cm) is the first field of
+        // TASK_MISC_INFO. We need it for the KDP decoder (xradar passes
+        // `wavelength / 100` cm) and to derive the Nyquist velocity.
+        c.set_position(TASK_MISC_INFO_OFF);
+        let wavelength_raw = c.read_i32::<LittleEndian>()?.max(0) as f32;
+        let wavelength_cm = wavelength_raw / 100.0;
+
         // ----- nyquist velocity -----
-        // xradar derives this from PRF + radar wavelength. We don't have
-        // wavelength reliably parsed yet; PR-B follow-up will extract it
-        // from TASK_CALIB_INFO. Leave 0 for now — only the 8-bit VEL and
-        // WIDTH decoders use it, and a CHI-style fixture using the 16-bit
-        // variants is unaffected.
-        let nyquist_velocity_ms = 0.0_f32;
+        // xradar: `nyquist = wavelength * prf / (10000 * 4)` (m/s), where
+        // `wavelength` is in 1/100 cm. For dual-PRF tasks xradar scales this
+        // by `multi_prf_mode_flag + 1`; we don't parse that flag yet, so this
+        // is the single-PRF Nyquist. Only the 8-bit VEL/WIDTH decoders use
+        // it (the 16-bit variants are self-scaled).
+        let nyquist_velocity_ms = if prf_hz > 0.0 {
+            wavelength_raw * prf_hz / 40000.0
+        } else {
+            0.0
+        };
 
         // ----- TASK_RANGE_INFO -----
         //   off 0  range_first_bin (SINT4)
@@ -361,6 +377,7 @@ impl TaskConfiguration {
             dsp_data_mask,
             nyquist_velocity_ms,
             prf_hz,
+            wavelength_cm,
             unambiguous_range_m,
             range_first_bin_cm,
             range_last_bin_cm,
@@ -514,13 +531,18 @@ fn decode_fixed_string(buf: &[u8]) -> String {
 
 /// Read a 12-byte `YMDS_TIME` and return UTC. Layout:
 ///   seconds (SINT4)
-///   millis  (UINT2 — top 4 bits flags)
+///   millis  (UINT2 — low 10 bits = milliseconds, top 6 bits are
+///            DST/UTC/local flags we ignore, mirroring xradar)
 ///   year    (SINT2)
 ///   month   (SINT2)
 ///   day     (SINT2)
 fn read_ymds_time<R: Read>(r: &mut R) -> Result<DateTime<Utc>> {
     let secs = r.read_i32::<LittleEndian>()?;
-    let _millis_and_flags = r.read_u16::<LittleEndian>()?;
+    let millis_and_flags = r.read_u16::<LittleEndian>()?;
+    // Only the low 10 bits carry milliseconds (0..=999); the upper bits are
+    // time-zone flags. Keeping the sub-second component matches xradar, which
+    // otherwise reports e.g. `…:48.818` where we would land on whole seconds.
+    let millis = (millis_and_flags & 0x3FF) as i64;
     let year = r.read_i16::<LittleEndian>()?;
     let month = r.read_i16::<LittleEndian>()?;
     let day = r.read_i16::<LittleEndian>()?;
@@ -536,7 +558,8 @@ fn read_ymds_time<R: Read>(r: &mut R) -> Result<DateTime<Utc>> {
     })?;
     let dt = date
         .and_hms_opt(0, 0, 0)
-        .and_then(|d| d.checked_add_signed(chrono::Duration::seconds(secs as i64)));
+        .and_then(|d| d.checked_add_signed(chrono::Duration::seconds(secs as i64)))
+        .and_then(|d| d.checked_add_signed(chrono::Duration::milliseconds(millis)));
     let dt = dt.ok_or_else(|| RadishError::MalformedRecord {
         offset: 0,
         msg: format!("invalid YMDS time: secs={secs}"),
@@ -565,6 +588,37 @@ mod tests {
     fn structure_header_too_short_returns_error() {
         let buf = [0x17, 0x00, 0x04, 0x00];
         assert!(StructureHeader::parse(&buf).is_err());
+    }
+
+    #[test]
+    fn read_ymds_time_keeps_milliseconds() {
+        // YMDS_TIME: secs=168 (SINT4), millis_and_flags=818 (UINT2, low 10
+        // bits = ms), year=2022, month=6, day=1 → 2022-06-01T00:02:48.818.
+        let buf: [u8; 12] = [
+            0xA8, 0x00, 0x00, 0x00, // secs = 168
+            0x32, 0x03, // 818 in the low 10 bits, flags clear
+            0xE6, 0x07, // year = 2022
+            0x06, 0x00, // month = 6
+            0x01, 0x00, // day = 1
+        ];
+        let mut c = Cursor::new(&buf[..]);
+        let dt = read_ymds_time(&mut c).expect("parse YMDS");
+        assert_eq!(dt.timestamp(), 1654041768); // 2022-06-01T00:02:48Z
+        assert_eq!(dt.timestamp_subsec_millis(), 818);
+    }
+
+    #[test]
+    fn read_ymds_time_masks_flag_bits() {
+        // Same instant but with high flag bits set in millis_and_flags; only
+        // the low 10 bits (818) should survive as milliseconds.
+        let buf: [u8; 12] = [
+            0xA8, 0x00, 0x00, 0x00, // secs = 168
+            0x32, 0xC3, // 0xC332: flags in top bits, 818 in low 10 bits
+            0xE6, 0x07, 0x06, 0x00, 0x01, 0x00,
+        ];
+        let mut c = Cursor::new(&buf[..]);
+        let dt = read_ymds_time(&mut c).expect("parse YMDS");
+        assert_eq!(dt.timestamp_subsec_millis(), 818);
     }
 
     #[test]
@@ -676,6 +730,43 @@ mod tests {
         for &(word_off, bit, packed) in cases {
             assert_mask_word_bit_round_trips(word_off, bit, packed);
         }
+    }
+
+    /// `TaskConfiguration::parse` reads `wavelength` (SINT4, 1/100 cm) from
+    /// the start of TASK_MISC_INFO (offset 1252) and derives the Nyquist
+    /// velocity as `wavelength_raw * prf / 40000` (xradar's formula). A
+    /// regression in the TASK_MISC_INFO offset or the formula fails here.
+    #[test]
+    fn task_configuration_reads_wavelength_and_derives_nyquist() {
+        let mut buf = vec![0u8; TASK_CONFIGURATION_MIN_BYTES];
+        // wavelength at TASK_MISC_INFO offset 1252 (533 → 5.33 cm).
+        buf[1252..1256].copy_from_slice(&533i32.to_le_bytes());
+        // prf at TASK_DSP_INFO + 136 = 268 (850 Hz).
+        buf[268..272].copy_from_slice(&850i32.to_le_bytes());
+        // Minimum field setup so parse() succeeds.
+        buf[772 + 10..772 + 12].copy_from_slice(&4u16.to_le_bytes()); // bins_output
+        buf[932..934].copy_from_slice(&1u16.to_le_bytes()); // scan_mode = PPI
+        buf[932 + 6..932 + 8].copy_from_slice(&1i16.to_le_bytes()); // sweep_number_total
+
+        let task = TaskConfiguration::parse(&buf).expect("parse");
+        assert!((task.wavelength_cm - 5.33).abs() < 1e-4);
+        // 533 * 850 / 40000 = 11.32625 m/s
+        assert!((task.nyquist_velocity_ms - 11.326_25).abs() < 1e-3);
+    }
+
+    /// With no PRF the Nyquist velocity degrades to 0 rather than dividing by
+    /// an unset field — the 8-bit VEL/WIDTH decoders then zero out cleanly.
+    #[test]
+    fn task_configuration_zero_prf_yields_zero_nyquist() {
+        let mut buf = vec![0u8; TASK_CONFIGURATION_MIN_BYTES];
+        buf[1252..1256].copy_from_slice(&533i32.to_le_bytes()); // wavelength
+                                                                // prf left at 0.
+        buf[772 + 10..772 + 12].copy_from_slice(&4u16.to_le_bytes());
+        buf[932..934].copy_from_slice(&1u16.to_le_bytes());
+        buf[932 + 6..932 + 8].copy_from_slice(&1i16.to_le_bytes());
+
+        let task = TaskConfiguration::parse(&buf).expect("parse");
+        assert_eq!(task.nyquist_velocity_ms, 0.0);
     }
 
     /// `IngestDataHeader::parse` must read all five SINT2 fields between
