@@ -106,6 +106,17 @@
 //! as they do on the source grid. Consumers that need to tell the two
 //! apart should read `gate_count` from [`record_moment_encoding`] and
 //! slice — the raw words alone cannot distinguish them, on either grid.
+//!
+//! # Public-type stability
+//!
+//! The structs ([`DemuxOptions`], [`TargetEncoding`], [`MomentEncoding`],
+//! [`RecordInventory`]) are `#[non_exhaustive]` because their fields are
+//! radish's editorial choice and may grow. The enums
+//! ([`MomentSelector`], [`OutputWord`], [`RawMoment`]) are left
+//! exhaustive on purpose: their variants enumerate closed domains fixed
+//! by the wire format (the seven ICD moments, 8-/16-bit words), so a
+//! caller matching all of them should get a compile error if the set
+//! ever changes, not a silently-taken wildcard arm.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -276,14 +287,17 @@ pub struct DemuxOptions {
 }
 
 impl DemuxOptions {
-    /// Options for demultiplexing `moment` into a `rays × gates` array
-    /// of `word`-width raw words. `fill_value` defaults to `0` and there
-    /// is no target grid; set them with [`with_fill_value`] /
-    /// [`with_target`].
+    /// Options for demultiplexing `moment` into an `out_shape` = `(rays,
+    /// gates)` array of `word`-width raw words. `fill_value` defaults to
+    /// `0` and there is no target grid; the fields are `pub`, so set them
+    /// directly (e.g. `opts.fill_value = 255`).
     ///
-    /// [`with_fill_value`]: Self::with_fill_value
-    /// [`with_target`]: Self::with_target
-    pub fn new(moment: MomentSelector, rays: usize, gates: usize, word: OutputWord) -> Self {
+    /// `out_shape` is a `(rays, gates)` pair rather than two `usize`
+    /// arguments so the two dimensions can't be silently transposed at a
+    /// call site — it matches the `(usize, usize)` shape the Python layer
+    /// threads through end to end.
+    pub fn new(moment: MomentSelector, out_shape: (usize, usize), word: OutputWord) -> Self {
+        let (rays, gates) = out_shape;
         Self {
             moment,
             rays,
@@ -292,20 +306,6 @@ impl DemuxOptions {
             fill_value: 0,
             target: None,
         }
-    }
-
-    /// Set the value written to rows past the radial count and rows
-    /// where the moment is absent. Must fit `word`.
-    pub fn with_fill_value(mut self, fill_value: u16) -> Self {
-        self.fill_value = fill_value;
-        self
-    }
-
-    /// Remap each block onto this target grid (see the module docs for
-    /// when the remap is accepted).
-    pub fn with_target(mut self, target: TargetEncoding) -> Self {
-        self.target = Some(target);
-        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -1349,7 +1349,7 @@ mod tests {
     }
 
     fn opts(moment: MomentSelector, rays: usize, gates: usize, word: OutputWord) -> DemuxOptions {
-        DemuxOptions::new(moment, rays, gates, word)
+        DemuxOptions::new(moment, (rays, gates), word)
     }
 
     fn u8s(m: &RawMoment) -> &[u8] {

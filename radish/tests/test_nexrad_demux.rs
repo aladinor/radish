@@ -25,7 +25,7 @@ fn klot() -> Option<Vec<u8>> {
 }
 
 fn options(moment: MomentSelector, rays: usize, gates: usize, word: OutputWord) -> DemuxOptions {
-    DemuxOptions::new(moment, rays, gates, word)
+    DemuxOptions::new(moment, (rays, gates), word)
 }
 
 fn word_for(word_size: u8) -> OutputWord {

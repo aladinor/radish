@@ -2,12 +2,6 @@
 //!
 //! ## Ownership model
 //!
-// PyO3 0.22's `#[pymethods]` macro expands `PyResult<T>` returns with an
-// implicit `From::from`-based error conversion that clippy 1.92+ flags as
-// useless. The conversion is part of PyO3's type-erasure plumbing, not our
-// own code, so we silence it crate-wide rather than scattering allows.
-#![allow(clippy::useless_conversion)]
-//!
 //! Moment arrays and per-sweep state are *moved* out of the wrapper on first
 //! access rather than cloned. A typical xarray-driven open touches every
 //! sweep and every moment exactly once, and each moment array is on the
@@ -21,7 +15,7 @@
 //! * `SweepData.get_moment(name)` consumes the moment. A second call returns
 //!   `None`.
 //! * `MomentData.data()` consumes the underlying numpy buffer (handed off
-//!   via `PyArray2::from_owned_array_bound`). A second call raises.
+//!   via `PyArray2::from_owned_array`). A second call raises.
 //! * Read-only metadata (`name`, `units`, `shape`, `num_rays`, `num_sweeps`,
 //!   coordinates, etc.) is cached side-by-side and remains accessible after
 //!   consumption.
@@ -472,7 +466,7 @@ impl PySigmetSweepAttrs {
 /// Python wrapper for `MomentData`.
 ///
 /// The (rays × gates) `Array2<f32>` is moved out of `data` on the first
-/// `data()` call via `PyArray2::from_owned_array_bound`, which transfers
+/// `data()` call via `PyArray2::from_owned_array`, which transfers
 /// ownership to numpy with no `memcpy`. A second call raises.
 #[pyclass(name = "MomentData")]
 pub struct PyMomentData {
@@ -563,7 +557,7 @@ impl PyMomentData {
 /// Python wrapper for `SweepData`.
 ///
 /// Moment slots are moved out on first `get_moment(name)` call. Coordinates
-/// are exposed as numpy views via `PyArray1::from_slice_bound` (one C-level
+/// are exposed as numpy views via `PyArray1::from_slice` (one C-level
 /// `memcpy`); cheap enough that we don't bother moving them.
 #[pyclass(name = "SweepData")]
 pub struct PySweepData {
@@ -1090,11 +1084,12 @@ fn demux_options(
         }
     };
     let moment = moment.parse::<MomentSelector>().map_err(demux_err)?;
-    let mut options = DemuxOptions::new(moment, out_shape.0, out_shape.1, output_word(py, dtype)?)
-        .with_fill_value(fill_value);
-    if let Some(target) = target {
-        options = options.with_target(target);
-    }
+    // Fields are `pub`; set them directly (the crate-wide convention),
+    // and `out_shape` flows through as one pair — no chance of
+    // transposing rays/gates.
+    let mut options = DemuxOptions::new(moment, out_shape, output_word(py, dtype)?);
+    options.fill_value = fill_value;
+    options.target = target;
     Ok(options)
 }
 

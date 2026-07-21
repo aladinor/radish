@@ -61,11 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Rust API (`radish::backends::nexrad::demux`): the public structs are
   `#[non_exhaustive]` with constructors**, so radish can add fields later
   without a breaking change. Build `DemuxOptions` with
-  `DemuxOptions::new(moment, rays, gates, word)` plus `.with_fill_value()`
-  / `.with_target()`, and `TargetEncoding` with `TargetEncoding::new(scale,
-  offset)`, rather than struct literals. The returned `MomentEncoding` and
-  `RecordInventory` are `#[non_exhaustive]` too. The Python API is
-  unaffected. (#32)
+  `DemuxOptions::new(moment, out_shape, word)` — `out_shape` is a `(rays,
+  gates)` pair so the two dimensions can't be silently transposed — then
+  set the `pub` `fill_value` / `target` fields directly; build
+  `TargetEncoding` with `TargetEncoding::new(scale, offset)`. The returned
+  `MomentEncoding` and `RecordInventory` are `#[non_exhaustive]` too. The
+  enums (`MomentSelector`, `OutputWord`, `RawMoment`) stay exhaustive on
+  purpose — their variants are closed domains fixed by the wire format.
+  The Python API is unaffected. (#32)
 
 ### Fixed
 
