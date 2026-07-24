@@ -373,4 +373,47 @@ mod tests {
         assert_eq!(ppi_attrs.sweep_mode, "azimuth_surveillance");
         assert_eq!(ppi.metadata.sweep_mode, radish_types::SweepMode::Azimuth);
     }
+
+    /// **Regression (issue #28 time epoch).** The `time` coordinate must
+    /// be the absolute acquisition instant — the sweep's `start_time`
+    /// plus each ray's `time_offset_s` — not the bare 1970-epoch offset
+    /// the old adapter produced by passing only `time_offset_s` into the
+    /// coordinate builder. This is the fixture-free CI guard for the
+    /// anchoring in `convert_sweep`; the prior tests all left
+    /// `time_offset_s = 0` and never asserted on `coordinates.time`.
+    #[test]
+    fn convert_sweep_anchors_ray_time_to_sweep_start() {
+        use chrono::TimeZone;
+
+        let start = Utc.with_ymd_and_hms(2022, 6, 1, 0, 2, 48).unwrap();
+        let mut moments = HashMap::new();
+        moments.insert(1u8, vec![10.0f32; 4]); // DB_DBT (id 1) → DBTH
+        let ray = DecodedRay {
+            azimuth_deg: 0.0,
+            elevation_deg: 0.5,
+            time_offset_s: 5.0,
+            moments,
+        };
+        let sweep = DecodedSweep {
+            sweep_number: 1,
+            fixed_angle_deg: 0.5,
+            start_time: start,
+            rays: vec![ray],
+        };
+        let range_axis: Vec<f32> = (0..4).map(|i| 1000.0 + i as f32 * 100.0).collect();
+
+        let out = convert_sweep(&sweep, 0, ScanMode::Ppi, &range_axis, &[1]).unwrap();
+        let t0 = out.coordinates.time[0];
+        let expected = start.timestamp() as f64 + 5.0;
+        assert!(
+            (t0 - expected).abs() < 1e-6,
+            "time not anchored to sweep start: got {t0}, want {expected}"
+        );
+        // The old bug yielded ~5.0 (a 1970 offset); a real 2022 instant
+        // is well past 1.6e9 Unix seconds.
+        assert!(
+            t0 > 1_600_000_000.0,
+            "time must be absolute Unix seconds, got {t0}"
+        );
+    }
 }
