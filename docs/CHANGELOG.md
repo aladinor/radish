@@ -83,6 +83,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sigmet/IRIS: north-crossing ray azimuth was 180° off.** The ray that
+  straddles the 0°/360° seam has begin ≈ 359.5° and end ≈ 0.5°, and the
+  per-ray azimuth was computed as the naive mean `(begin + end) / 2`,
+  which lands at ~180° — a full half-turn from the true bearing. That ray
+  then sat next to a legitimate ~180° ray as a near-duplicate while the
+  true ~0° ray went missing from the sweep. `decode_one_ray` now takes the
+  **circular** midpoint (unwrapping across the seam before averaging, then
+  folding back onto `[0, 360)`), so the IRIS `azimuth` coordinate matches
+  `xradar.io.open_iris_datatree` on every ray, including the north
+  crossing. Non-seam rays are bit-identical to before. (#40)
+
 - **KILX corpus documentation was inverted.** `CORPUS.md` and
   `python/tests/conftest.py` described `sweep_10` of
   `KILX20230629_154426_V06` as carrying 358 MSG_31 records with 360 being

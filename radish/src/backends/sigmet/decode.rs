@@ -535,11 +535,36 @@ fn decode_one_ray(
     }
     decoded.resize(gate_count, f32::NAN);
 
-    let azimuth = (bin2_to_degrees(az_start) as f32 + bin2_to_degrees(az_stop) as f32) * 0.5;
+    let azimuth = ray_azimuth_deg(az_start, az_stop);
     let elevation = bin2_to_degrees(el_start) as f32;
     let time_offset_s = dtime as f32;
 
     Ok(Some((azimuth, elevation, time_offset_s, decoded)))
+}
+
+/// Circular midpoint of a ray's begin/end azimuths (BIN2 words), in degrees
+/// on `[0, 360)`.
+///
+/// A ray straddling the 0°/360° seam (north crossing) has begin ≈ 359.5° and
+/// end ≈ 0.5°, so the naive arithmetic mean `(359.5 + 0.5) / 2` lands at 180°
+/// — a full half-turn from the true bearing. Whenever the two endpoints differ
+/// by more than 180° we unwrap the smaller one across the seam before
+/// averaging, then fold the result back onto `[0, 360)`. Rays that do not
+/// cross the seam take the `else` branch and are bit-identical to the old
+/// `(start + stop) * 0.5`.
+fn ray_azimuth_deg(az_start: u16, az_stop: u16) -> f32 {
+    let a = bin2_to_degrees(az_start) as f32;
+    let b = bin2_to_degrees(az_stop) as f32;
+    let b = if (b - a).abs() > 180.0 {
+        if b < a {
+            b + 360.0
+        } else {
+            b - 360.0
+        }
+    } else {
+        b
+    };
+    ((a + b) * 0.5).rem_euclid(360.0)
 }
 
 /// Apply one RLE step (copy `cmp_val` words OR skip `cmp_val` words).
@@ -825,6 +850,58 @@ mod tests {
                 (v - expected).abs() < 1e-6,
                 "gate {i}: expected {expected}, got {v}"
             );
+        }
+    }
+
+    /// BIN2 word for a bearing in `[0, 360)` (raw = deg * 65536 / 360).
+    /// Note: `deg == 360.0` saturates to 65535 (= 359.9945°) rather than
+    /// wrapping to 0 — pass the seam as `0.0`, not `360.0`.
+    fn bin2(deg: f64) -> u16 {
+        (deg * 65_536.0 / 360.0).round() as u16
+    }
+
+    /// A ray that does not cross north takes the plain-mean path and must be
+    /// bit-identical to the old `(start + stop) * 0.5`.
+    #[test]
+    fn ray_azimuth_ordinary_ray_is_plain_mean() {
+        let (start, stop) = (bin2(90.0), bin2(91.0));
+        let old = (bin2_to_degrees(start) as f32 + bin2_to_degrees(stop) as f32) * 0.5;
+        let got = ray_azimuth_deg(start, stop);
+        assert!((got - old).abs() < 1e-6, "got {got}, old-mean {old}");
+        assert!((got - 90.5).abs() < 1e-3, "got {got}");
+    }
+
+    /// The north-crossing ray from issue #40: begin ≈ 359.5°, end ≈ 0.5°.
+    /// Naive mean gives 180°; the circular midpoint must be ~0°.
+    #[test]
+    fn ray_azimuth_north_crossing_folds_to_zero() {
+        let (start, stop) = (bin2(359.5), bin2(0.5));
+        let naive = (bin2_to_degrees(start) as f32 + bin2_to_degrees(stop) as f32) * 0.5;
+        assert!((naive - 180.0).abs() < 0.5, "sanity: naive mean is ~180°");
+
+        let got = ray_azimuth_deg(start, stop);
+        // Fold onto the short side of the seam for the assertion.
+        let signed = if got > 180.0 { got - 360.0 } else { got };
+        assert!(signed.abs() < 1e-2, "expected ~0°, got {got}");
+    }
+
+    /// The seam handling is symmetric in the scan direction: a decreasing
+    /// sweep (begin ≈ 0.5°, end ≈ 359.5°) also lands at the seam, not 180°.
+    #[test]
+    fn ray_azimuth_north_crossing_is_direction_symmetric() {
+        let got = ray_azimuth_deg(bin2(0.5), bin2(359.5));
+        let signed = if got > 180.0 { got - 360.0 } else { got };
+        assert!(signed.abs() < 1e-2, "expected ~0°, got {got}");
+    }
+
+    /// Result is always folded onto `[0, 360)` — never negative, never ≥ 360.
+    #[test]
+    fn ray_azimuth_stays_in_range() {
+        for deg in [0.0f64, 0.5, 90.0, 179.9, 180.1, 270.0, 359.9] {
+            let start = bin2(deg);
+            let stop = bin2((deg + 1.0).rem_euclid(360.0));
+            let got = ray_azimuth_deg(start, stop);
+            assert!((0.0..360.0).contains(&got), "deg={deg}: got {got}");
         }
     }
 }
