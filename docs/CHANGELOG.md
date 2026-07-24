@@ -126,11 +126,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 8-bit VEL/WIDTH Nyquist scale was `0.0` because the radar
   wavelength was never parsed. `TASK_MISC_INFO.wavelength` is now read,
   `DB_KDP` decodes via xradar's exponential transform
-  (`-0.25·sign·600^((127-|d|)/126)/λ`), and the Nyquist velocity is
-  derived as `wavelength·prf/40000`. With these fixes every moment
-  xradar emits (`DBZH`, `DBTH`, `VRADH`, `ZDR`, `RHOHV`, `KDP`,
-  `PHIDP`, `WRADH`, `SQIH`) now matches xradar's decoded values to
-  floating-point precision. (#28)
+  (`-0.25·sign·600^((127-|d|)/126)/λ`, verified against xradar 0.12.0 on
+  both the positive and negative-`d` branches), and the Nyquist velocity
+  is derived as `wavelength·prf/40000`. (#28)
+
+- **Sigmet/IRIS: 2-byte moment formulas corrected against xradar** —
+  three 2-byte data types diverged from `xradar.io.open_iris_datatree`
+  and are now fixed, each pinned by an oracle-value test computed from
+  xradar 0.12.0's own decode functions:
+  - `DB_PHIDP2` was `360·raw/65535 − 180` (range −180…180°), ~180° off
+    the whole scan; now `360·(raw−1)/65534` (0…360°) per xradar
+    `decode_phidp2`.
+  - `DB_RHOHV2` used divisor `65533`, letting ρHV exceed 1.0; now the
+    full `65536` span (`(raw−1)/65536`) so it stays ≤ 1.
+  - `DB_SQI2` (→`SQIH`) and `DB_SNR16` (→`SNRH`) passed through as raw
+    counts; now decode linearly (`(raw−1)/65536` and `(raw−63)/2`).
+
+  Known remaining divergence: 8-bit `DB_VEL` on dual-/batch-PRF tasks is
+  off by the `multi_prf_mode_flag + 1` factor xradar applies (exact on
+  single-PRF); tracked as a follow-up. The `time` epoch, over-masking,
+  and velocity-zero fixes above are additionally covered by fixture-free
+  unit tests so CI verifies them without the `.RAW` fixture. (#28)
 
 ### Security
 
