@@ -448,6 +448,31 @@ mod tests {
         }
     }
 
+    /// **Wiring invariant.** No `MomentMapping::Odim` (measurement)
+    /// moment may be wired to `DECODE_NONE`, the raw-count passthrough
+    /// reserved for the categorical `DB_HCLASS`. This is the guard that
+    /// actually catches the SQI2/SNR16 class of bug — those were live
+    /// ODIM moments left on `DECODE_NONE`, a *wiring* defect the
+    /// decoder-level mask-policy test in `calibration.rs` is blind to.
+    /// One-directional (Odim ⇒ not passthrough): `Iris` rows like
+    /// `DB_DBTE8` legitimately use a real decoder, and `DB_HCLASS` is the
+    /// only `DECODE_NONE` user, so it holds for the current table.
+    #[test]
+    fn no_odim_measurement_moment_routes_to_passthrough() {
+        for m in SUPPORTED_MOMENTS {
+            if matches!(m.mapping, MomentMapping::Odim) {
+                assert!(
+                    !std::ptr::fn_addr_eq(m.decoder, DECODE_NONE),
+                    "ODIM measurement moment {} (id {}) is wired to \
+                     DECODE_NONE (raw-count passthrough) — it must use a \
+                     real decoder",
+                    m.iris_name,
+                    m.data_type_id,
+                );
+            }
+        }
+    }
+
     #[test]
     fn unknown_iris_id_returns_none() {
         assert!(moment_for_id(99).is_none());
