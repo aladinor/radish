@@ -19,8 +19,9 @@ use crate::backends::common::{meta_for, OdimMomentMeta};
 
 use super::calibration::{
     Decoder, DECODE_DBZ_2BYTE, DECODE_DBZ_8BIT, DECODE_KDP_2BYTE, DECODE_KDP_8BIT, DECODE_NONE,
-    DECODE_PHIDP_2BYTE, DECODE_PHIDP_8BIT, DECODE_RHOHV_2BYTE, DECODE_RHOHV_8BIT, DECODE_VEL_2BYTE,
-    DECODE_VEL_8BIT, DECODE_WIDTH_2BYTE, DECODE_WIDTH_8BIT, DECODE_ZDR_2BYTE, DECODE_ZDR_8BIT,
+    DECODE_PHIDP_2BYTE, DECODE_PHIDP_8BIT, DECODE_RHOHV_2BYTE, DECODE_RHOHV_8BIT, DECODE_SNR_2BYTE,
+    DECODE_SQI_2BYTE, DECODE_VEL_2BYTE, DECODE_VEL_8BIT, DECODE_WIDTH_2BYTE, DECODE_WIDTH_8BIT,
+    DECODE_ZDR_2BYTE, DECODE_ZDR_8BIT,
 };
 
 /// How a Sigmet/IRIS data type surfaces in the resulting xarray Dataset.
@@ -73,8 +74,12 @@ pub(super) struct SigmetMoment {
     pub(super) output_name: &'static str,
     /// Number of raw bytes per gate (1 or 2).
     pub(super) bytes_per_bin: u8,
-    /// Decoder applied to each gate's raw value. Returns `f32::NAN` for
-    /// "no data" sentinels (raw == 0 or raw == 1, depending on type).
+    /// Decoder applied to each gate's raw value. The no-data / masking
+    /// policy is per-type and lives in the decoder body — see the
+    /// `calibration.rs` module docs. Most measurement moments are
+    /// **unmasked** (a raw `0` decodes to a finite value); only velocity,
+    /// KDP, RHOHV/SQI sentinels, and the categorical `DECODE_NONE` fields
+    /// yield `NaN`.
     pub(super) decoder: Decoder,
     /// How this moment surfaces as a Dataset variable — see
     /// [`MomentMapping`]. Drives the CF-metadata lookup in the adapter.
@@ -229,7 +234,7 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         iris_name: "DB_SQI2",
         output_name: "SQIH",
         bytes_per_bin: 2,
-        decoder: DECODE_NONE,
+        decoder: DECODE_SQI_2BYTE,
         mapping: MomentMapping::Odim,
     },
     SigmetMoment {
@@ -245,7 +250,7 @@ pub(super) const SUPPORTED_MOMENTS: &[SigmetMoment] = &[
         iris_name: "DB_SNR16",
         output_name: "SNRH",
         bytes_per_bin: 2,
-        decoder: DECODE_NONE,
+        decoder: DECODE_SNR_2BYTE,
         mapping: MomentMapping::Odim,
     },
     // Iris-passthrough (no ODIM short name in xradar's `iris_mapping`)
