@@ -165,13 +165,20 @@ fn convert_sweep(
         _ => sort_indices_by_key(rays, |r| r.azimuth_deg),
     };
 
+    // `assemble_ppi_coordinates` expects absolute Unix seconds, but the
+    // RAY_HEADER only carries `time_offset_s` (seconds within the sweep).
+    // Anchor it to the sweep's absolute start time so the `time` coordinate
+    // is the real acquisition instant rather than a 1970-epoch offset.
+    let base_secs = sweep.start_time.timestamp() as f64
+        + sweep.start_time.timestamp_subsec_micros() as f64 / 1e6;
+
     let coordinates = assemble_ppi_coordinates(
         rays,
         &order,
         range_axis_m.to_vec(),
         |r: &DecodedRay| r.azimuth_deg,
         |r: &DecodedRay| r.elevation_deg,
-        |r: &DecodedRay| r.time_offset_s as f64,
+        |r: &DecodedRay| base_secs + r.time_offset_s as f64,
     );
 
     let nrays = rays.len();
