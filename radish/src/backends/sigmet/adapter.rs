@@ -275,18 +275,30 @@ mod tests {
     /// of `gate_count` gates filled with `value`. Lets us exercise
     /// `convert_sweep` without going through the full IRIS decode path.
     fn one_ray_sweep(data_type_id: u8, gate_count: usize, value: f32) -> DecodedSweep {
+        one_ray_sweep_at(data_type_id, gate_count, value, Utc::now(), 0.0)
+    }
+
+    /// Like [`one_ray_sweep`] but with an explicit sweep `start_time` and
+    /// per-ray `time_offset_s`, for exercising time-coordinate anchoring.
+    fn one_ray_sweep_at(
+        data_type_id: u8,
+        gate_count: usize,
+        value: f32,
+        start_time: chrono::DateTime<Utc>,
+        time_offset_s: f32,
+    ) -> DecodedSweep {
         let mut moments = HashMap::new();
         moments.insert(data_type_id, vec![value; gate_count]);
         let ray = DecodedRay {
             azimuth_deg: 0.0,
             elevation_deg: 0.5,
-            time_offset_s: 0.0,
+            time_offset_s,
             moments,
         };
         DecodedSweep {
             sweep_number: 1,
             fixed_angle_deg: 0.5,
-            start_time: Utc::now(),
+            start_time,
             rays: vec![ray],
         }
     }
@@ -386,20 +398,8 @@ mod tests {
         use chrono::TimeZone;
 
         let start = Utc.with_ymd_and_hms(2022, 6, 1, 0, 2, 48).unwrap();
-        let mut moments = HashMap::new();
-        moments.insert(1u8, vec![10.0f32; 4]); // DB_DBT (id 1) → DBTH
-        let ray = DecodedRay {
-            azimuth_deg: 0.0,
-            elevation_deg: 0.5,
-            time_offset_s: 5.0,
-            moments,
-        };
-        let sweep = DecodedSweep {
-            sweep_number: 1,
-            fixed_angle_deg: 0.5,
-            start_time: start,
-            rays: vec![ray],
-        };
+        // DB_DBT (id 1) → DBTH, one ray at +5 s into the sweep.
+        let sweep = one_ray_sweep_at(1, 4, 10.0, start, 5.0);
         let range_axis: Vec<f32> = (0..4).map(|i| 1000.0 + i as f32 * 100.0).collect();
 
         let out = convert_sweep(&sweep, 0, ScanMode::Ppi, &range_axis, &[1]).unwrap();

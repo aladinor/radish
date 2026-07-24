@@ -120,18 +120,20 @@ pub(super) const DECODE_PHIDP_2BYTE: Decoder = |raw, _p| 360.0 * (raw as f32 - 1
 /// naturally, so we just apply the formula.
 pub(super) const DECODE_RHOHV_8BIT: Decoder = |raw, _p| ((raw as f32 - 1.0) / 253.0).sqrt();
 
-/// 16-bit RHOHV decoder: (raw - 1) / 65536.0. No masking. Mirrors xradar
-/// `decode_array` for `DB_RHOHV2` (id 20, `fkw {scale: 65536, offset:
-/// -1}`) — xradar uses the full 2**16 span for 16-bit types, not 65533.
-/// The prior /65533 let ρHV exceed 1.0 (raw 65535 -> 1.000015 vs xradar
-/// 0.999969).
-pub(super) const DECODE_RHOHV_2BYTE: Decoder = |raw, _p| (raw as f32 - 1.0) / 65536.0;
+/// Linear 16-bit decoder over the full 2^16 span, `(raw - 1) / 65536`.
+/// xradar's `decode_array(scale=65536, offset=-1)` — shared verbatim by
+/// `DB_RHOHV2` (id 20) and `DB_SQI2` (id 23), so both alias this rather
+/// than repeat the constants (mirrors the [`DECODE_LINEAR_2BYTE`] idiom).
+pub(super) const DECODE_ARRAY_65536: Decoder = |raw, _p| (raw as f32 - 1.0) / 65536.0;
 
-/// 16-bit SQI decoder (DB_SQI2): (raw - 1) / 65536.0, same linear form as
-/// [`DECODE_RHOHV_2BYTE`] but SQI is already a ratio so no `sqrt`. Mirrors
-/// xradar `decode_array` (id 23, `fkw {scale: 65536, offset: -1}`).
+/// 16-bit RHOHV decoder (`DB_RHOHV2`, id 20). See [`DECODE_ARRAY_65536`].
+/// The full 2^16 span keeps ρHV ≤ 1.0; the prior /65533 let raw 65535
+/// decode to 1.000015 vs xradar's 0.999969.
+pub(super) const DECODE_RHOHV_2BYTE: Decoder = DECODE_ARRAY_65536;
+
+/// 16-bit SQI decoder (`DB_SQI2`, id 23). See [`DECODE_ARRAY_65536`].
 /// Previously routed to [`DECODE_NONE`], which left it as raw counts.
-pub(super) const DECODE_SQI_2BYTE: Decoder = |raw, _p| (raw as f32 - 1.0) / 65536.0;
+pub(super) const DECODE_SQI_2BYTE: Decoder = DECODE_ARRAY_65536;
 
 /// 16-bit SNR decoder (DB_SNR16): (raw - 63) / 2.0, dB. Mirrors xradar
 /// `decode_array` for id 66, whose `fkw` is `{scale: 2, offset: -63}`
@@ -146,11 +148,8 @@ pub(super) const DECODE_SNR_2BYTE: Decoder = |raw, _p| (raw as f32 - 63.0) / 2.0
 /// transform divided by the radar wavelength (cm):
 ///   `-0.25 * sign(d) * 600 ** ((127 - |d|) / 126) / wavelength`.
 pub(super) const DECODE_KDP_8BIT: Decoder = |raw, p| {
-    // KDP is only ever an 8-bit field, so `raw` fits a `u8`; the
-    // `as u8` narrows the widened wire value and the `as i8`
-    // reinterprets it as the signed byte the ICD defines. (If a 2-byte
-    // KDP were ever routed here, this would truncate — but `DB_KDP2`
-    // uses the linear 2-byte decoder, not this one.)
+    // `raw` is a widened 8-bit byte; `as u8 as i8` reinterprets it as
+    // the signed byte the ICD (4.4.20) defines.
     let d = (raw as u8) as i8;
     if d == 0 || d == -1 || p.wavelength_cm <= 0.0 {
         // raw 0/-1 are the IRIS no-data sentinels; a non-positive wavelength
@@ -348,15 +347,20 @@ mod tests {
         }
     }
 
-    /// **Mask-policy pin.** The whole point of issue #28 is that
-    /// measurement moments are *not* masked at `raw==0`. Enumerate the
-    /// policy so a decoder quietly re-masking a live moment (the way
-    /// SQI2/SNR16 slipped through on `DECODE_NONE`) fails loudly.
+    /// **Decoder-level mask-policy pin.** Issue #28's point is that
+    /// measurement moments decode to a *finite* value at `raw==0` (the
+    /// below-threshold floor), not `NaN`. This pins that property of the
+    /// decoder formulas themselves. It does **not** guard the wiring —
+    /// that a live moment is actually routed to one of these decoders and
+    /// not to `DECODE_NONE` — which is the mapping-table invariant in
+    /// `mapping.rs` (`no_odim_measurement_moment_routes_to_passthrough`);
+    /// the SQI2/SNR16 bug was a wiring defect, so both guards are needed.
     #[test]
     fn measurement_decoders_are_finite_at_raw_zero_and_65535() {
         let p = params(25.0);
-        // (decoder, name) — every moment that must stay unmasked.
-        let unmasked: &[(Decoder, &str)] = &[
+        // (decoder, name) — the label is needed for the failure message
+        // since fn pointers carry no name.
+        let unmasked = [
             (DECODE_DBZ_8BIT, "DBZ8"),
             (DECODE_DBZ_2BYTE, "DBZ2"),
             (DECODE_ZDR_8BIT, "ZDR8"),
@@ -370,6 +374,7 @@ mod tests {
             (DECODE_SNR_2BYTE, "SNR16"),
             (DECODE_VEL_8BIT, "VEL8"),
             (DECODE_VEL_2BYTE, "VEL2"),
+            (DECODE_KDP_2BYTE, "KDP2"),
         ];
         for (dec, name) in unmasked {
             for raw in [0u16, 65535] {
