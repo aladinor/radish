@@ -110,8 +110,13 @@ jobs:
         python-version: '3.13'
 
     - name: Install linting tools
+      # Pin the linters. Unpinned, CI installs whatever ruff/black
+      # released most recently, so a new lint rule (e.g. ruff 0.16's
+      # I001 import-sort change) fails CI on unrelated PRs with no code
+      # change. Bump these deliberately, in a PR that also applies the
+      # new autofixes.
       run: |
-        pip install black ruff
+        pip install black==26.3.1 ruff==0.15.12
 
     - name: Check formatting with black
       run: |
