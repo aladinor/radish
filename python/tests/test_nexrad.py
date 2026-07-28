@@ -852,6 +852,13 @@ class TestXradarChunkParity:
         assert r_sweeps == x_sweeps
 
     def test_pad_mode_azimuth_grids_match(self, klot_chunks, xd_open):
+        """Grid parity holds on this pinned fixture because xradar's
+        median-diff inference lands on the nominal 0.5 deg here. On live
+        partial sweeps with azimuth jitter, xradar can infer an
+        off-nominal resolution (observed: 0.49 deg -> a 735-ray grid on a
+        KLOT super-res cut, which no WSR-88D produces); radish always
+        uses MSG31 azimuth_resolution_spacing, so its grid stays the
+        ICD-nominal 720/360. That divergence is intentional."""
         import warnings as _warnings
 
         with _warnings.catch_warnings():
