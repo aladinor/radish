@@ -14,6 +14,7 @@ use std::path::Path;
 use crate::{backends::RadarBackend, RadishError, Result, SweepData, VolumeData, VolumeMetadata};
 
 mod adapter;
+pub use adapter::IncompleteSweepPolicy;
 mod attrs;
 // Internal byte-level NEXRAD decoder. Phase 7 wires it into the
 // runtime read path; some helpers (e.g. `read_i32_be`) remain
@@ -107,8 +108,7 @@ impl RadarBackend for NexradBackend {
     /// follows xradar's convention since their `open_nexradlevel2_datatree`
     /// also expects pre-decompressed bytes when given a `bytes` input.
     fn read_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeData> {
-        let scan = decode_bytes(&data)?;
-        adapter::convert_scan(scan, Path::new("<bytes>"))
+        self.read_bytes_volume_with(data, IncompleteSweepPolicy::Keep)
     }
 
     fn scan_file(&self, path: &Path) -> Result<VolumeMetadata> {
@@ -132,8 +132,7 @@ impl RadarBackend for NexradBackend {
     }
 
     fn read_volume(&self, path: &Path) -> Result<VolumeData> {
-        let scan = decode_path(path)?;
-        adapter::convert_scan(scan, path)
+        self.read_volume_with(path, IncompleteSweepPolicy::Keep)
     }
 }
 
@@ -157,9 +156,43 @@ impl NexradBackend {
     /// rays survive — incomplete trailing sweeps come through with fewer
     /// rays than the VCP's expected count.
     pub fn read_chunks_volume(&self, chunks: Vec<Vec<u8>>) -> Result<VolumeData> {
+        self.read_chunks_volume_with(chunks, IncompleteSweepPolicy::Keep)
+    }
+
+    /// [`Self::read_volume`] with an explicit incomplete-sweep policy
+    /// (plan 0009). `Keep` is byte-identical to `read_volume`.
+    pub fn read_volume_with(
+        &self,
+        path: &Path,
+        policy: IncompleteSweepPolicy,
+    ) -> Result<VolumeData> {
+        let scan = decode_path(path)?;
+        adapter::convert_scan(scan, path, policy)
+    }
+
+    /// [`Self::read_bytes_volume`] with an explicit incomplete-sweep
+    /// policy (plan 0009).
+    pub fn read_bytes_volume_with(
+        &self,
+        data: Vec<u8>,
+        policy: IncompleteSweepPolicy,
+    ) -> Result<VolumeData> {
+        let scan = decode_bytes(&data)?;
+        adapter::convert_scan(scan, Path::new("<bytes>"), policy)
+    }
+
+    /// [`Self::read_chunks_volume`] with an explicit incomplete-sweep
+    /// policy (plan 0009) — the natural entry point for partial
+    /// real-time chunk lists, where the trailing sweep is usually
+    /// still in progress.
+    pub fn read_chunks_volume_with(
+        &self,
+        chunks: Vec<Vec<u8>>,
+        policy: IncompleteSweepPolicy,
+    ) -> Result<VolumeData> {
         let combined = concat_chunks(chunks)?;
         let scan = decode_bytes(&combined)?;
-        adapter::convert_scan(scan, Path::new("<chunks>"))
+        adapter::convert_scan(scan, Path::new("<chunks>"), policy)
     }
 
     /// Scan a NEXRAD Level 2 volume from a single in-memory byte buffer

@@ -9,7 +9,7 @@ pub mod nexrad;
 pub mod sigmet;
 
 pub use cfradial1::CfRadial1Backend;
-pub use nexrad::NexradBackend;
+pub use nexrad::{IncompleteSweepPolicy, NexradBackend};
 pub use sigmet::SigmetBackend;
 
 /// Trait for radar file format backends

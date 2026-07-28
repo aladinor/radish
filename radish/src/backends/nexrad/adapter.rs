@@ -28,12 +28,13 @@ use radish_types::{PlatformType, SweepMode};
 use rayon::prelude::*;
 
 use crate::{
-    MomentData, RadishError, Result, SweepData, SweepMetadata, VolumeData, VolumeMetadata,
+    Coordinates, MomentData, RadishError, Result, SweepData, SweepMetadata, VolumeData,
+    VolumeMetadata,
 };
 
 use super::attrs::{sweep_attrs_from_cut, volume_attrs};
 use super::decode::messages::msg5::ElevationCut;
-use super::decode::model::{Radial, Scan, Sweep};
+use super::decode::model::{nominal_ray_count, Radial, Scan, Sweep};
 use super::decode::products::{CfpMomentValue, DataMoment, MomentValue, Product};
 use super::mapping::{moment_meta, SUPPORTED_PRODUCTS};
 use super::sniff;
@@ -42,20 +43,84 @@ use crate::backends::common::{
     MomentGeometry,
 };
 
+/// What to do with sweeps whose data is provably partial
+/// (`Sweep.complete == false` — truncated volume, mid-rotation join,
+/// or interior chunk gap). Plan 0009; mirrors xradar #332's
+/// `incomplete_sweep` values plus an explicit `Keep`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IncompleteSweepPolicy {
+    /// Emit incomplete sweeps as-is, with fewer rays than a full
+    /// rotation — flagged via `SweepMetadata::is_complete`. The
+    /// low-level default (today's behavior).
+    #[default]
+    Keep,
+    /// Omit incomplete sweeps from the volume. `VolumeMetadata` keeps
+    /// the *original* accounting: `sweep_group_names` /
+    /// `sweep_fixed_angles` list only the survivors under their
+    /// original positional names (`sweep_0`, `sweep_2`, …— gaps stay
+    /// gaps, matching xradar's drop mode), and
+    /// `incomplete_sweep_indices` still records what was dropped.
+    Drop,
+    /// Reindex incomplete sweeps onto the full-rotation grid: missing
+    /// rays NaN across every moment, azimuth = uniform grid centers,
+    /// elevation = sweep median, missing times extrapolated along
+    /// rotation order. xradar's `reindex_angle` + `ipol_time`
+    /// semantics, computed exactly from MSG_31 fields.
+    Pad,
+}
+
 /// Convert a fully-decoded NEXRAD `Scan` into a radish `VolumeData`.
 ///
 /// Sweep conversion is data-parallel: each `convert_sweep` invocation reads
 /// only its own `Sweep` and writes its own owned `SweepData`. We dispatch
 /// across rayon's global pool — already warmed up by the in-tree
 /// decoder's parallel bzip2 decompression that ran moments earlier.
-pub(super) fn convert_scan(scan: Scan, source: &Path) -> Result<VolumeData> {
-    let metadata = build_volume_metadata(&scan, source)?;
+///
+/// Under [`IncompleteSweepPolicy::Drop`], incomplete sweeps are filtered
+/// *before* conversion — a degenerate force-emitted trailing sweep (e.g.
+/// one radial with no supported moments) can therefore never fail the
+/// whole volume in drop mode.
+pub(super) fn convert_scan(
+    scan: Scan,
+    source: &Path,
+    policy: IncompleteSweepPolicy,
+) -> Result<VolumeData> {
+    let mut metadata = build_volume_metadata(&scan, source)?;
     let cuts = scan.coverage_pattern.elevation_cuts();
-    let sweeps: Vec<SweepData> = scan
+
+    let selected: Vec<(usize, &Sweep)> = scan
         .sweeps
-        .par_iter()
+        .iter()
         .enumerate()
-        .map(|(idx, sweep)| convert_sweep(sweep, idx, cuts.get(idx)))
+        .filter(|(_, s)| policy != IncompleteSweepPolicy::Drop || s.complete)
+        .collect();
+
+    if policy == IncompleteSweepPolicy::Drop {
+        // Survivors keep their original positional names/angles so
+        // `sweep_2` stays `sweep_2` even when `sweep_1` was dropped.
+        metadata.sweep_group_names = selected.iter().map(|(i, _)| format!("sweep_{i}")).collect();
+        metadata.sweep_fixed_angles = selected
+            .iter()
+            .map(|(i, _)| {
+                metadata
+                    .sweep_fixed_angles
+                    .get(*i)
+                    .copied()
+                    .unwrap_or(f64::NAN)
+            })
+            .collect();
+    }
+
+    let sweeps: Vec<SweepData> = selected
+        .par_iter()
+        .map(|(idx, sweep)| {
+            let data = convert_sweep(sweep, *idx, cuts.get(*idx))?;
+            Ok(if policy == IncompleteSweepPolicy::Pad && !sweep.complete {
+                pad_sweep_to_full_rotation(data, sweep)
+            } else {
+                data
+            })
+        })
         .collect::<Result<_>>()?;
     Ok(VolumeData::new(metadata, sweeps))
 }
@@ -212,6 +277,141 @@ pub(super) fn convert_sweep(
     Ok(SweepData::new(sweep_meta, moments, coordinates))
 }
 
+/// Reindex an incomplete sweep's dense (ascending-azimuth) arrays onto
+/// the full-rotation grid — the [`IncompleteSweepPolicy::Pad`] transform.
+///
+/// Grid: `n` rays of `res = 360/n` degrees, 0°-aligned with centers at
+/// `(slot + 0.5) * res` — the same grid xradar's `reindex_angle`
+/// produces, and the same ascending-azimuth convention complete sweeps
+/// already follow. `n` comes from MSG_31 `azimuth_resolution_spacing`
+/// (exact), falling back to the median azimuth step of the observed
+/// rays (MSG_1 legacy).
+///
+/// Each observed ray lands at `floor(az / res)`; on a collision the
+/// first (lowest-azimuth) ray wins. Missing slots get NaN in every
+/// moment, the sweep's median elevation, and a timestamp extrapolated
+/// along *rotation* order from the earliest observed ray — linear
+/// interpolation in slot order would go wrong when the observed arc
+/// wraps 0° (cut start azimuths are arbitrary).
+fn pad_sweep_to_full_rotation(mut data: SweepData, sweep: &Sweep) -> SweepData {
+    let nrays = data.coordinates.azimuth.len();
+    let Some(n) = full_rotation_size(sweep, &data.coordinates.azimuth) else {
+        return data;
+    };
+    if n <= nrays {
+        return data;
+    }
+    let res = 360.0_f32 / n as f32;
+
+    // Dense row → grid slot; first ray wins a contested slot.
+    let mut row_for_slot: Vec<Option<usize>> = vec![None; n];
+    for k in 0..nrays {
+        let az = data.coordinates.azimuth[k].rem_euclid(360.0);
+        let slot = ((az / res) as usize).min(n - 1);
+        if row_for_slot[slot].is_none() {
+            row_for_slot[slot] = Some(k);
+        }
+    }
+
+    let old = &data.coordinates;
+    let azimuth: Vec<f32> = (0..n).map(|i| (i as f32 + 0.5) * res).collect();
+    let el_fill = median_elevation(&old.elevation) as f32;
+    let elevation: Vec<f32> = row_for_slot
+        .iter()
+        .map(|row| row.map_or(el_fill, |k| old.elevation[k]))
+        .collect();
+    let time = fill_missing_times(&row_for_slot, &old.time);
+
+    for moment in data.moments.values_mut() {
+        let ngates = moment.data.ncols();
+        let mut arr = Array2::from_elem((n, ngates), f32::NAN);
+        for (slot, row) in row_for_slot.iter().enumerate() {
+            if let Some(k) = row {
+                arr.row_mut(slot).assign(&moment.data.row(*k));
+            }
+        }
+        moment.data = arr;
+    }
+
+    data.coordinates = Coordinates::new(time, old.range.clone(), azimuth, elevation);
+    data
+}
+
+/// Rays in one full rotation for `sweep`: MSG_31's
+/// `azimuth_resolution_spacing` when known, else inferred from the
+/// median step between the dense sorted azimuths. `None` when there
+/// aren't even two rays to infer from.
+fn full_rotation_size(sweep: &Sweep, sorted_azimuths: &[f32]) -> Option<usize> {
+    if let Some(n) = nominal_ray_count(&sweep.radials) {
+        return Some(n);
+    }
+    if sorted_azimuths.len() < 2 {
+        return None;
+    }
+    let mut steps: Vec<f32> = sorted_azimuths
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|d| *d > 0.0)
+        .collect();
+    if steps.is_empty() {
+        return None;
+    }
+    let mid = steps.len() / 2;
+    let (_, m, _) = steps.select_nth_unstable_by(mid, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let n = (360.0 / *m).round() as usize;
+    // Sanity band: legacy 1° (360) through split-cut 0.5° (720), with
+    // headroom for exotic spacings. Outside it the inference is noise.
+    (90..=1440).contains(&n).then_some(n)
+}
+
+/// Fill the padded grid's time axis. Slots holding an observed ray keep
+/// its measured timestamp; missing slots get
+/// `t0 + rotation_distance(slot0 → slot) * dt`, where `slot0`/`t0` are
+/// the earliest observed ray and `dt` the per-slot scan rate from the
+/// observed arc. Monotonic in rotation order even when the arc wraps 0°.
+fn fill_missing_times(row_for_slot: &[Option<usize>], dense_time: &[f64]) -> Vec<f64> {
+    let n = row_for_slot.len();
+    let anchors: Vec<(usize, f64)> = row_for_slot
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, row)| row.map(|k| (slot, dense_time[k])))
+        .filter(|(_, t)| t.is_finite())
+        .collect();
+
+    let Some(&(_, t_min)) = anchors
+        .iter()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    else {
+        // No usable timestamps at all — propagate what's there (NaN).
+        return row_for_slot
+            .iter()
+            .map(|row| row.map_or(f64::NAN, |k| dense_time[k]))
+            .collect();
+    };
+    let (slot0, t0) = anchors
+        .iter()
+        .copied()
+        .find(|&(_, t)| t == t_min)
+        .expect("min exists");
+    let (slot1, t1) = anchors
+        .iter()
+        .copied()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("non-empty");
+
+    let arc = (slot1 + n - slot0) % n;
+    let dt = if arc > 0 { (t1 - t0) / arc as f64 } else { 0.0 };
+
+    (0..n)
+        .map(|slot| match row_for_slot[slot] {
+            Some(k) if dense_time[k].is_finite() => dense_time[k],
+            _ => t0 + ((slot + n - slot0) % n) as f64 * dt,
+        })
+        .collect()
+}
+
 /// Find the first radial that carries `product` and return its geometry.
 /// Returns `None` if the product is absent from every radial in the sweep.
 ///
@@ -355,6 +555,138 @@ mod tests {
     use crate::backends::nexrad::decode::model::OwnedMoment;
     use crate::backends::nexrad::decode::products::CfpStatus;
 
+    /// Plan 0009 pad: an incomplete 1.0°-spacing sweep reindexes onto
+    /// the 360-slot grid — observed rays keep their values at
+    /// `floor(az/res)`, everything else is NaN, and the azimuth
+    /// coordinate becomes the uniform grid centers.
+    #[test]
+    fn pad_reindexes_incomplete_sweep_to_full_grid() {
+        let mut radials = vec![
+            ref_only_radial(0.5, 1, vec![10, 20]),
+            ref_only_radial(1.5, 1, vec![30, 40]),
+            ref_only_radial(2.5, 1, vec![50, 60]),
+        ];
+        for r in &mut radials {
+            r.azimuth_resolution_spacing = 2; // 1.0° → 360 slots
+        }
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials,
+            complete: false,
+        };
+        let dense = convert_sweep(&sweep, 0, None).expect("dense convert");
+        let padded = pad_sweep_to_full_rotation(dense, &sweep);
+
+        assert_eq!(padded.coordinates.azimuth.len(), 360);
+        assert_eq!(padded.coordinates.azimuth[0], 0.5);
+        assert_eq!(padded.coordinates.azimuth[359], 359.5);
+        let dbzh = &padded.moments["DBZH"];
+        assert_eq!(dbzh.data.nrows(), 360);
+        // Observed rays: az 0.5 → slot 0, az 1.5 → slot 1, az 2.5 → slot 2.
+        // raw 10 → (10-66)/2 = -28.0 etc.
+        assert_eq!(dbzh.data[[0, 0]], -28.0);
+        assert_eq!(dbzh.data[[1, 0]], -18.0);
+        assert_eq!(dbzh.data[[2, 0]], -8.0);
+        // Everything else NaN.
+        assert!(dbzh.data[[3, 0]].is_nan());
+        assert!(dbzh.data[[359, 1]].is_nan());
+        let nan_rows = (0..360)
+            .filter(|&i| padded.moments["DBZH"].data[[i, 0]].is_nan())
+            .count();
+        assert_eq!(nan_rows, 357);
+        // Elevation fill = sweep median (all rays at 0.5°).
+        assert_eq!(padded.coordinates.elevation[100], 0.5);
+    }
+
+    /// Pad is a no-op for sweeps already at (or above) the rotation
+    /// size, and for sweeps too small to infer a grid from.
+    #[test]
+    fn pad_leaves_full_or_uninferrable_sweeps_alone() {
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials: vec![ref_only_radial(10.0, 1, vec![2, 3])],
+            complete: false,
+        };
+        let dense = convert_sweep(&sweep, 0, None).expect("dense convert");
+        let nrays_before = dense.coordinates.azimuth.len();
+        let padded = pad_sweep_to_full_rotation(dense, &sweep);
+        assert_eq!(padded.coordinates.azimuth.len(), nrays_before);
+    }
+
+    /// The grid size falls back to median-azimuth-step inference when
+    /// no radial carries `azimuth_resolution_spacing` (MSG_1 legacy).
+    #[test]
+    fn full_rotation_size_infers_from_azimuth_steps() {
+        let sweep = Sweep {
+            elevation_number: 1,
+            radials: vec![ref_only_radial(0.0, 1, vec![2])], // spacing 0
+            complete: false,
+        };
+        let azimuths: Vec<f32> = (0..10).map(|i| i as f32 * 1.0).collect();
+        assert_eq!(full_rotation_size(&sweep, &azimuths), Some(360));
+        let azimuths_half: Vec<f32> = (0..10).map(|i| i as f32 * 0.5).collect();
+        assert_eq!(full_rotation_size(&sweep, &azimuths_half), Some(720));
+        assert_eq!(full_rotation_size(&sweep, &[5.0]), None);
+    }
+
+    /// Missing-slot times extrapolate along rotation order from the
+    /// earliest observed ray — correct even when the observed arc
+    /// wraps 0° (slots 4,5,0 observed here).
+    #[test]
+    fn fill_missing_times_is_rotation_aware_across_wrap() {
+        let dense_time = vec![100.0, 101.0, 102.0];
+        // Dense rows 0,1,2 sit at slots 4,5,0 of a 6-slot grid.
+        let row_for_slot = vec![Some(2), None, None, None, Some(0), Some(1)];
+        let t = fill_missing_times(&row_for_slot, &dense_time);
+        assert_eq!(t[4], 100.0);
+        assert_eq!(t[5], 101.0);
+        assert_eq!(t[0], 102.0);
+        // slot0=4, dt=1.0; rotation distance 4→1 is 3, 4→2 is 4, 4→3 is 5.
+        assert_eq!(t[1], 103.0);
+        assert_eq!(t[2], 104.0);
+        assert_eq!(t[3], 105.0);
+    }
+
+    /// Plan 0009 drop: incomplete sweeps are filtered before conversion
+    /// (a degenerate moment-less trailing sweep can't error the volume),
+    /// survivors keep their original positional names, and the dropped
+    /// indices stay on record.
+    #[test]
+    fn drop_policy_filters_incomplete_sweeps_and_keeps_original_names() {
+        let make_sweep = |elev: u8, complete: bool| Sweep {
+            elevation_number: elev,
+            radials: vec![ref_only_radial(0.0, elev, vec![2, 3])],
+            complete,
+        };
+        // Middle sweep incomplete; trailing sweep incomplete AND
+        // moment-less (would error convert_sweep if not filtered).
+        let mut degenerate = ref_only_radial(0.0, 3, vec![2]);
+        degenerate.reflectivity = None;
+        let sweeps = vec![
+            make_sweep(1, true),
+            make_sweep(2, false),
+            Sweep {
+                elevation_number: 3,
+                radials: vec![degenerate],
+                complete: false,
+            },
+        ];
+        let all_radials: Vec<Radial> = sweeps.iter().flat_map(|s| s.radials.clone()).collect();
+        let scan = Scan {
+            coverage_pattern: Msg5::synthetic_from_radials(&all_radials),
+            sweeps,
+            site: None,
+            rda_status: None,
+        };
+
+        let volume = convert_scan(scan, Path::new("unit-test"), IncompleteSweepPolicy::Drop)
+            .expect("drop mode must not error on degenerate incomplete sweeps");
+        assert_eq!(volume.sweeps.len(), 1);
+        assert!(volume.sweeps[0].metadata.is_complete);
+        assert_eq!(volume.metadata.sweep_group_names, vec!["sweep_0"]);
+        assert_eq!(volume.metadata.incomplete_sweep_indices, vec![1, 2]);
+    }
+
     /// Plan 0009: `Sweep.complete` must survive into both metadata
     /// surfaces — `SweepMetadata.is_complete` (full-decode path) and
     /// `VolumeMetadata.incomplete_sweep_indices` (metadata-only scan
@@ -384,7 +716,8 @@ mod tests {
         let meta = build_volume_metadata(&scan, Path::new("unit-test")).expect("metadata");
         assert_eq!(meta.incomplete_sweep_indices, vec![1]);
 
-        let volume = convert_scan(scan, Path::new("unit-test")).expect("convert");
+        let volume = convert_scan(scan, Path::new("unit-test"), IncompleteSweepPolicy::Keep)
+            .expect("convert");
         assert!(volume.sweeps[0].metadata.is_complete);
         assert!(!volume.sweeps[1].metadata.is_complete);
         assert_eq!(volume.metadata.incomplete_sweep_indices, vec![1]);

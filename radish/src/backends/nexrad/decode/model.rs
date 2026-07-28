@@ -514,7 +514,7 @@ pub(crate) fn group_radials_into_sweeps(radials: Vec<Radial>) -> Vec<Sweep> {
 /// known MSG_31 `azimuth_resolution_spacing` (`1` = 0.5° → 720,
 /// `2` = 1.0° → 360). `None` when no radial has one (MSG_1 legacy) —
 /// completeness then rests on status markers alone.
-fn nominal_ray_count(radials: &[Radial]) -> Option<usize> {
+pub(crate) fn nominal_ray_count(radials: &[Radial]) -> Option<usize> {
     radials
         .iter()
         .find_map(|r| match r.azimuth_resolution_spacing {
