@@ -126,6 +126,13 @@ pub(super) fn build_volume_metadata(scan: &Scan, source: &Path) -> Result<Volume
         num_sweeps as u32,
     ));
 
+    metadata.incomplete_sweep_indices = scan
+        .sweeps
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, s)| (!s.complete).then_some(idx))
+        .collect();
+
     Ok(metadata)
 }
 
@@ -183,6 +190,7 @@ pub(super) fn convert_sweep(
     let sweep_number = u32::from(sweep.elevation_number);
     let mut sweep_meta = SweepMetadata::new(sweep_number, SweepMode::Azimuth, fixed_angle);
     sweep_meta.nexrad = cut.map(sweep_attrs_from_cut);
+    sweep_meta.is_complete = sweep.complete;
 
     // 4. Build moments by walking radials in sorted order and decoding gates
     //    directly into the (nrays × max_gates) Array2 — no intermediate Vec,
@@ -343,8 +351,44 @@ fn fixed_angle_for(cut: Option<&ElevationCut>, sweep: &Sweep) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::backends::nexrad::decode::messages::msg31::moment::MomentDescriptor;
+    use crate::backends::nexrad::decode::messages::msg5::Msg5;
     use crate::backends::nexrad::decode::model::OwnedMoment;
     use crate::backends::nexrad::decode::products::CfpStatus;
+
+    /// Plan 0009: `Sweep.complete` must survive into both metadata
+    /// surfaces — `SweepMetadata.is_complete` (full-decode path) and
+    /// `VolumeMetadata.incomplete_sweep_indices` (metadata-only scan
+    /// path, which never materializes `SweepData`).
+    #[test]
+    fn completeness_propagates_to_sweep_and_volume_metadata() {
+        let sweeps = vec![
+            Sweep {
+                elevation_number: 1,
+                radials: vec![ref_only_radial(0.0, 1, vec![2, 3])],
+                complete: true,
+            },
+            Sweep {
+                elevation_number: 2,
+                radials: vec![ref_only_radial(0.0, 2, vec![2, 3])],
+                complete: false,
+            },
+        ];
+        let all_radials: Vec<Radial> = sweeps.iter().flat_map(|s| s.radials.clone()).collect();
+        let scan = Scan {
+            coverage_pattern: Msg5::synthetic_from_radials(&all_radials),
+            sweeps,
+            site: None,
+            rda_status: None,
+        };
+
+        let meta = build_volume_metadata(&scan, Path::new("unit-test")).expect("metadata");
+        assert_eq!(meta.incomplete_sweep_indices, vec![1]);
+
+        let volume = convert_scan(scan, Path::new("unit-test")).expect("convert");
+        assert!(volume.sweeps[0].metadata.is_complete);
+        assert!(!volume.sweeps[1].metadata.is_complete);
+        assert_eq!(volume.metadata.incomplete_sweep_indices, vec![1]);
+    }
 
     fn empty_sweep(elevation_number: u8) -> Sweep {
         Sweep {

@@ -99,6 +99,15 @@ pub struct VolumeMetadata {
     /// Sigmet/IRIS-specific volume attrs (TASK_CONFIGURATION + INGEST_HEADER).
     /// `None` for non-Sigmet volumes.
     pub sigmet: Option<SigmetVolumeAttrs>,
+
+    /// Positional indices (0-based, matching `sweep_group_names`
+    /// order) of sweeps whose data is provably partial — a NEXRAD
+    /// volume truncated mid-sweep, joined mid-rotation, or with an
+    /// interior chunk gap (plan 0009). Stored, not derived: the
+    /// metadata-only scan path never materializes `SweepData`.
+    /// Empty for formats without partial-volume semantics.
+    #[serde(default)]
+    pub incomplete_sweep_indices: Vec<usize>,
 }
 
 impl VolumeMetadata {
@@ -129,6 +138,7 @@ impl VolumeMetadata {
             attributes: std::collections::HashMap::new(),
             nexrad: None,
             sigmet: None,
+            incomplete_sweep_indices: Vec::new(),
         }
     }
 
