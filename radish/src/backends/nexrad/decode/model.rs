@@ -688,6 +688,26 @@ mod tests {
         assert!(sweeps[0].complete);
     }
 
+    /// Invariant pin for the grouping rewrite: whatever the
+    /// status/elevation sequence, grouping never panics, never loses
+    /// or duplicates a radial, and every emitted sweep is non-empty.
+    #[test]
+    fn proptest_grouping_preserves_radials_on_arbitrary_sequences() {
+        use proptest::prelude::*;
+        proptest!(|(seq in prop::collection::vec((0u8..=7, 1u8..=4), 0..64))| {
+            let radials: Vec<Radial> = seq
+                .iter()
+                .enumerate()
+                .map(|(i, &(status, elev))| radial(i as u16 + 1, elev, status))
+                .collect();
+            let n_in = radials.len();
+            let sweeps = group_radials_into_sweeps(radials);
+            let n_out: usize = sweeps.iter().map(|s| s.radials.len()).sum();
+            prop_assert_eq!(n_in, n_out);
+            prop_assert!(sweeps.iter().all(|s| !s.radials.is_empty()));
+        });
+    }
+
     #[test]
     fn trailing_truncation_marks_only_last_sweep_incomplete() {
         // Two sweeps; the stream dies mid-way through the second —

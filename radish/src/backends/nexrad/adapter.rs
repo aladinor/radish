@@ -48,6 +48,7 @@ use crate::backends::common::{
 /// or interior chunk gap). Plan 0009; mirrors xradar #332's
 /// `incomplete_sweep` values plus an explicit `Keep`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IncompleteSweepPolicy {
     /// Emit incomplete sweeps as-is, with fewer rays than a full
     /// rotation — flagged via `SweepMetadata::is_complete`. The
@@ -331,17 +332,13 @@ fn pad_sweep_to_full_rotation(mut data: SweepData, sweep: &Sweep) -> SweepData {
 
     for moment in data.moments.values_mut() {
         let ngates = moment.data.ncols();
-        // Single pass: each grid cell is written exactly once (observed
-        // row or NaN filler) — no NaN pre-fill later overwritten.
-        let mut buf = Vec::with_capacity(n * ngates);
-        for row in &row_for_slot {
-            match row {
-                Some(k) => buf.extend(moment.data.row(*k).iter().copied()),
-                None => buf.resize(buf.len() + ngates, f32::NAN),
+        let mut arr = Array2::from_elem((n, ngates), f32::NAN);
+        for (slot, row) in row_for_slot.iter().enumerate() {
+            if let Some(k) = row {
+                arr.row_mut(slot).assign(&moment.data.row(*k));
             }
         }
-        moment.data = Array2::from_shape_vec((n, ngates), buf)
-            .expect("row_for_slot has n entries of ngates each");
+        moment.data = arr;
     }
 
     data.coordinates = Coordinates::new(time, old.range, azimuth, elevation);
@@ -397,10 +394,13 @@ fn fill_missing_times(row_for_slot: &[Option<usize>], dense_time: &[f64]) -> Vec
             .map(|row| row.map_or(f64::NAN, |k| dense_time[k]))
             .collect();
     };
+    // Total: `anchors` is non-empty (the min above proved it), and the
+    // `(slot0, t0)` fallback is exactly the single-anchor semantic
+    // (arc 0 → dt 0 → flood t0).
     let &(slot1, t1) = anchors
         .iter()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .expect("non-empty");
+        .unwrap_or(&(slot0, t0));
 
     let arc = (slot1 + n - slot0) % n;
     let dt = if arc > 0 { (t1 - t0) / arc as f64 } else { 0.0 };
@@ -628,6 +628,17 @@ mod tests {
         let azimuths_half: Vec<f32> = (0..10).map(|i| i as f32 * 0.5).collect();
         assert_eq!(full_rotation_size(&sweep, &azimuths_half), Some(720));
         assert_eq!(full_rotation_size(&sweep, &[5.0]), None);
+    }
+
+    /// Degenerate time axes: no finite anchors propagates NaN; a
+    /// single anchor floods its value (no rate to extrapolate with).
+    #[test]
+    fn fill_missing_times_handles_no_and_single_anchor() {
+        let all_nan = fill_missing_times(&[Some(0), None, Some(1)], &[f64::NAN, f64::NAN]);
+        assert!(all_nan.iter().all(|t| t.is_nan()));
+
+        let single = fill_missing_times(&[None, Some(0), None], &[42.0]);
+        assert_eq!(single, vec![42.0, 42.0, 42.0]);
     }
 
     /// Missing-slot times extrapolate along rotation order from the
