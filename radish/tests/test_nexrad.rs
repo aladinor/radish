@@ -258,3 +258,150 @@ fn scan_and_read_agree_on_per_sweep_attrs_and_time_ranges() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Plan 0009: real-time chunk fixture tests (S/I/E framing, incomplete
+// sweeps, drop/pad policies). Gated on `RADISH_NEXRAD_CHUNKS_DIR` —
+// see CORPUS.md "Real-time chunk fixture" for acquisition.
+// ---------------------------------------------------------------------------
+
+/// Load the KLOT chunk fixture in scan order (lexicographic file-name
+/// sort == chunk sequence order for the bucket's naming convention).
+fn chunk_fixture() -> Option<Vec<Vec<u8>>> {
+    let dir = PathBuf::from(std::env::var_os("RADISH_NEXRAD_CHUNKS_DIR")?);
+    let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    names
+        .iter()
+        .map(|p| std::fs::read(p).ok())
+        .collect::<Option<Vec<_>>>()
+}
+
+/// Byte-concatenating real S/I/E chunks must decode identically to
+/// feeding the chunk list — same sweeps, same completeness, and
+/// bit-identical moment arrays.
+#[test]
+fn real_chunks_match_concatenated_blob_decode() {
+    let Some(chunks) = chunk_fixture() else {
+        return;
+    };
+    let blob: Vec<u8> = chunks.concat();
+
+    let backend = NexradBackend::new();
+    let from_chunks = backend
+        .read_chunks_volume(chunks)
+        .expect("chunk-list decode");
+    let from_blob = backend.read_bytes_volume(blob).expect("blob decode");
+
+    assert_eq!(from_chunks.sweeps.len(), 12, "KLOT fixture has 12 sweeps");
+    assert_eq!(from_chunks.sweeps.len(), from_blob.sweeps.len());
+    assert!(from_chunks.metadata.incomplete_sweep_indices.is_empty());
+    for (a, b) in from_chunks.sweeps.iter().zip(&from_blob.sweeps) {
+        assert_eq!(a.coordinates.azimuth, b.coordinates.azimuth);
+        assert!(a.metadata.is_complete);
+        let (da, db) = (&a.moments["DBZH"].data, &b.moments["DBZH"].data);
+        assert_eq!(da.shape(), db.shape());
+        assert!(da
+            .iter()
+            .zip(db.iter())
+            .all(|(x, y)| (x == y) || (x.is_nan() && y.is_nan())));
+    }
+}
+
+/// A partial chunk list (S + 10 I) truncates mid-sweep: the trailing
+/// sweep is flagged incomplete under `Keep`, omitted (keeping original
+/// accounting) under `Drop`, and reindexed onto the full grid under
+/// `Pad` with observed rays bit-identical to the `Keep` output.
+#[test]
+fn partial_chunk_list_keep_drop_pad_semantics() {
+    use radish::backends::IncompleteSweepPolicy;
+
+    let Some(chunks) = chunk_fixture() else {
+        return;
+    };
+    let partial: Vec<Vec<u8>> = chunks[..11].to_vec();
+    let backend = NexradBackend::new();
+
+    let keep = backend
+        .read_chunks_volume_with(partial.clone(), IncompleteSweepPolicy::Keep)
+        .expect("keep decode");
+    assert_eq!(keep.sweeps.len(), 2);
+    assert!(keep.sweeps[0].metadata.is_complete);
+    assert!(!keep.sweeps[1].metadata.is_complete);
+    assert_eq!(keep.metadata.incomplete_sweep_indices, vec![1]);
+    let observed = keep.sweeps[1].coordinates.azimuth.len();
+    assert!(
+        observed < 720,
+        "trailing sweep must be short, got {observed}"
+    );
+
+    let drop = backend
+        .read_chunks_volume_with(partial.clone(), IncompleteSweepPolicy::Drop)
+        .expect("drop decode");
+    assert_eq!(drop.sweeps.len(), 1);
+    assert_eq!(drop.metadata.sweep_group_names, vec!["sweep_0"]);
+    assert_eq!(drop.metadata.incomplete_sweep_indices, vec![1]);
+
+    let pad = backend
+        .read_chunks_volume_with(partial, IncompleteSweepPolicy::Pad)
+        .expect("pad decode");
+    let padded = &pad.sweeps[1];
+    let n = padded.coordinates.azimuth.len();
+    assert_eq!(n, 720, "split cut pads to 0.5° spacing");
+    for (i, az) in padded.coordinates.azimuth.iter().enumerate() {
+        assert!((az - (i as f32 + 0.5) * 0.5).abs() < 1e-4);
+    }
+    // Every observed ray survives bit-identically at its grid slot.
+    let keep_sweep = &keep.sweeps[1];
+    let mut matched = 0usize;
+    for (k, az) in keep_sweep.coordinates.azimuth.iter().enumerate() {
+        let slot = ((az.rem_euclid(360.0) / 0.5) as usize).min(719);
+        let padded_row = padded.moments["DBZH"].data.row(slot);
+        let keep_row = keep_sweep.moments["DBZH"].data.row(k);
+        if padded_row
+            .iter()
+            .zip(keep_row.iter())
+            .all(|(x, y)| (x == y) || (x.is_nan() && y.is_nan()))
+        {
+            matched += 1;
+        }
+    }
+    assert_eq!(matched, observed, "all observed rays preserved by pad");
+    // Missing rows are all-NaN.
+    let nan_rows = (0..n)
+        .filter(|&i| {
+            padded.moments["DBZH"]
+                .data
+                .row(i)
+                .iter()
+                .all(|v| v.is_nan())
+        })
+        .count();
+    assert_eq!(nan_rows, n - observed);
+    // Times are finite and non-decreasing along rotation order from the
+    // sweep's first observed slot.
+    assert!(padded.coordinates.time.iter().all(|t| t.is_finite()));
+}
+
+/// An I-only stream (no S chunk) joins mid-rotation: it still decodes,
+/// and the leading sweep is flagged incomplete.
+#[test]
+fn headerless_i_only_stream_flags_leading_sweep() {
+    let Some(chunks) = chunk_fixture() else {
+        return;
+    };
+    let backend = NexradBackend::new();
+    let v = backend
+        .read_chunks_volume(chunks[1..6].to_vec())
+        .expect("headerless decode");
+    assert!(!v.sweeps.is_empty());
+    assert!(!v.sweeps[0].metadata.is_complete);
+    assert_eq!(v.metadata.incomplete_sweep_indices, vec![0]);
+}

@@ -927,7 +927,7 @@ fn scan_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeMetadata> {
     NexradBackend::new()
         .scan_chunks_volume(chunks)
         .map(|inner| PyVolumeMetadata { inner })
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to scan NEXRAD chunks: {e}")))
+        .map_err(chunk_list_err)
 }
 
 /// Read a NEXRAD Level 2 volume from a sequence of chunk byte buffers.
@@ -949,7 +949,20 @@ fn read_nexrad_chunks(chunks: Vec<Vec<u8>>, incomplete_sweep: &str) -> PyResult<
     NexradBackend::new()
         .read_chunks_volume_with(chunks, policy)
         .map(PyVolumeData::from_inner)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD chunks: {e}")))
+        .map_err(chunk_list_err)
+}
+
+/// Chunk-list errors: a rejected list (empty / out-of-order volume
+/// header) is caller-fixable input, so it surfaces as `ValueError` —
+/// matching xradar's `_concatenate_chunks`. Everything else (I/O,
+/// decode) stays `RuntimeError`.
+fn chunk_list_err(e: RadishError) -> PyErr {
+    match e {
+        RadishError::InvalidFormat(msg) => {
+            PyValueError::new_err(format!("Invalid NEXRAD chunk list: {msg}"))
+        }
+        other => PyRuntimeError::new_err(format!("Failed to read NEXRAD chunks: {other}")),
+    }
 }
 
 /// Read a NEXRAD Level 2 volume from a single in-memory byte buffer.
