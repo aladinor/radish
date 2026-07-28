@@ -350,6 +350,7 @@ mod tests {
         Sweep {
             elevation_number,
             radials: Vec::new(),
+            complete: true,
         }
     }
 
@@ -402,6 +403,7 @@ mod tests {
         Radial {
             azimuth_number: 0,
             azimuth_angle_degrees: azimuth_deg,
+            azimuth_resolution_spacing: 0,
             elevation_number,
             elevation_angle_degrees: 0.5,
             radial_status: 0,
@@ -435,6 +437,7 @@ mod tests {
         // row 0 has azimuth=10° and row 1 has azimuth=20°.
         let sweep = Sweep {
             elevation_number: 1,
+            complete: true,
             radials: vec![
                 ref_only_radial(20.0, 1, vec![130, 0, 130]),
                 ref_only_radial(10.0, 1, vec![2, 1, 2]),
@@ -465,6 +468,7 @@ mod tests {
     fn convert_sweep_pads_short_moments_with_nan() {
         let sweep = Sweep {
             elevation_number: 1,
+            complete: true,
             radials: vec![
                 ref_only_radial(0.0, 1, vec![10, 20]),
                 ref_only_radial(180.0, 1, vec![30, 40]),
@@ -521,6 +525,7 @@ mod tests {
         Radial {
             azimuth_number: 0,
             azimuth_angle_degrees: azimuth_deg,
+            azimuth_resolution_spacing: 0,
             elevation_number: 1,
             elevation_angle_degrees: elev_deg,
             radial_status: 0,
@@ -559,6 +564,7 @@ mod tests {
         let commanded = cut.elevation_angle_degrees_f64();
         let sweep = Sweep {
             elevation_number: 1,
+            complete: true,
             radials: vec![
                 radial_at(0.0, 0.4395),
                 radial_at(120.0, 0.4395),
@@ -582,6 +588,7 @@ mod tests {
     fn fixed_angle_for_falls_back_to_sweep_median_when_cut_is_none() {
         let sweep = Sweep {
             elevation_number: 1,
+            complete: true,
             radials: vec![
                 radial_at(0.0, 1.5),
                 radial_at(120.0, 1.5),
@@ -609,6 +616,7 @@ mod tests {
     fn fixed_angle_for_promotes_f32_to_f64_losslessly() {
         let sweep = Sweep {
             elevation_number: 1,
+            complete: true,
             radials: vec![radial_at(0.0, 1.5_f32)],
         };
         let got = fixed_angle_for(None, &sweep).expect("Some");

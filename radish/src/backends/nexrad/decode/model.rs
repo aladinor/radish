@@ -68,6 +68,13 @@ impl Scan {
 pub(crate) struct Sweep {
     pub(crate) elevation_number: u8,
     pub(crate) radials: Vec<Radial>,
+    /// `false` when the cut's data is provably partial: the stream
+    /// ended before an end marker (truncated volume / partial chunk
+    /// list), the first radial is not a start marker (stream joined
+    /// mid-rotation), or fewer rays arrived than the rotation's
+    /// nominal count (interior chunk gap). See
+    /// [`group_radials_into_sweeps`].
+    pub(crate) complete: bool,
 }
 
 impl Sweep {
@@ -118,6 +125,10 @@ impl Sweep {
 pub(crate) struct Radial {
     pub(crate) azimuth_number: u16,
     pub(crate) azimuth_angle_degrees: f32,
+    /// ICD §3.2.4.17: `1` = 0.5° spacing (720 rays / rotation),
+    /// `2` = 1.0° (360). `0` = unknown (MSG_1 legacy has no such
+    /// field) — consumers must fall back to inference.
+    pub(crate) azimuth_resolution_spacing: u8,
     pub(crate) elevation_number: u8,
     pub(crate) elevation_angle_degrees: f32,
     pub(crate) radial_status: u8,
@@ -251,6 +262,7 @@ impl Radial {
         Self {
             azimuth_number,
             azimuth_angle_degrees,
+            azimuth_resolution_spacing: 0,
             elevation_number,
             elevation_angle_degrees,
             radial_status,
@@ -285,6 +297,7 @@ impl Radial {
         Self {
             azimuth_number: header.azimuth_number,
             azimuth_angle_degrees: header.azimuth_angle_degrees,
+            azimuth_resolution_spacing: header.azimuth_resolution_spacing,
             elevation_number: header.elevation_number,
             elevation_angle_degrees: header.elevation_angle_degrees,
             radial_status: header.radial_status,
@@ -404,79 +417,111 @@ impl Site {
 /// re-using a previous elevation_number form their own short
 /// sweep instead of merging into the parent.
 pub(crate) fn group_radials_into_sweeps(radials: Vec<Radial>) -> Vec<Sweep> {
+    /// A sweep being accumulated, plus what its completeness verdict
+    /// needs: whether its first radial was a start marker.
+    struct InFlight {
+        elevation_number: u8,
+        saw_start: bool,
+        radials: Vec<Radial>,
+    }
+
+    impl InFlight {
+        fn open(first: Radial) -> Self {
+            Self {
+                elevation_number: first.elevation_number,
+                saw_start: matches!(first.radial_status, 0 | 3 | 5),
+                radials: vec![first],
+            }
+        }
+
+        /// Close the sweep. `at_data_end` marks the one close that is
+        /// never voluntary: the stream ran out with the sweep still
+        /// open (truncated volume / partial chunk list).
+        ///
+        /// A sweep is complete only when it saw its start marker, was
+        /// not cut off by data end, and — when the nominal rotation
+        /// size is known — carries at least that many rays. The ray
+        /// count guards against interior gaps (a chunk list missing a
+        /// middle `I` chunk still shows start + end markers).
+        fn close(self, at_data_end: bool) -> Option<Sweep> {
+            if self.radials.is_empty() {
+                return None;
+            }
+            let complete = self.saw_start
+                && !at_data_end
+                && nominal_ray_count(&self.radials).is_none_or(|n| self.radials.len() >= n);
+            Some(Sweep {
+                elevation_number: self.elevation_number,
+                radials: self.radials,
+                complete,
+            })
+        }
+    }
+
     let mut sweeps = Vec::new();
-    let mut current: Option<(u8, Vec<Radial>)> = None;
+    let mut current: Option<InFlight> = None;
 
     for radial in radials {
-        let elev_num = radial.elevation_number;
         let status = radial.radial_status;
 
         // Status 0/3/5 = start of new sweep — close any in-flight
         // current sweep first.
         if matches!(status, 0 | 3 | 5) {
-            if let Some((n, rs)) = current.take() {
-                if !rs.is_empty() {
-                    sweeps.push(Sweep {
-                        elevation_number: n,
-                        radials: rs,
-                    });
-                }
+            if let Some(inflight) = current.take() {
+                sweeps.extend(inflight.close(false));
             }
-            current = Some((elev_num, vec![radial]));
+            current = Some(InFlight::open(radial));
             continue;
         }
 
         // Fallback: elevation_number changed mid-stream without a
         // start marker (legacy files / corrupt status bytes). Open
         // a new sweep so we don't merge unrelated cuts.
-        if let Some((n, _)) = &current {
-            if *n != elev_num {
-                let (n, rs) = current.take().expect("just matched Some");
-                if !rs.is_empty() {
-                    sweeps.push(Sweep {
-                        elevation_number: n,
-                        radials: rs,
-                    });
-                }
-                current = Some((elev_num, vec![radial]));
+        match &mut current {
+            Some(inflight) if inflight.elevation_number != radial.elevation_number => {
+                let inflight = current.take().expect("just matched Some");
+                sweeps.extend(inflight.close(false));
+                current = Some(InFlight::open(radial));
                 continue;
             }
-        } else {
-            current = Some((elev_num, vec![radial]));
-            continue;
-        }
-
-        // Otherwise: append to the current sweep's radials.
-        if let Some((_, rs)) = &mut current {
-            rs.push(radial);
+            None => {
+                current = Some(InFlight::open(radial));
+                continue;
+            }
+            // Otherwise: append to the current sweep's radials.
+            Some(inflight) => inflight.radials.push(radial),
         }
 
         // Status 2/4 = end of elevation/volume — close the current
         // sweep. Done after the append so the terminator radial
         // makes it into the sweep.
         if matches!(status, 2 | 4) {
-            if let Some((n, rs)) = current.take() {
-                if !rs.is_empty() {
-                    sweeps.push(Sweep {
-                        elevation_number: n,
-                        radials: rs,
-                    });
-                }
+            if let Some(inflight) = current.take() {
+                sweeps.extend(inflight.close(false));
             }
         }
     }
 
     // Trailing sweep without an explicit end marker.
-    if let Some((n, rs)) = current {
-        if !rs.is_empty() {
-            sweeps.push(Sweep {
-                elevation_number: n,
-                radials: rs,
-            });
-        }
+    if let Some(inflight) = current {
+        sweeps.extend(inflight.close(true));
     }
 
     sweeps
+}
+
+/// Nominal rays per full rotation, from the first radial carrying a
+/// known MSG_31 `azimuth_resolution_spacing` (`1` = 0.5° → 720,
+/// `2` = 1.0° → 360). `None` when no radial has one (MSG_1 legacy) —
+/// completeness then rests on status markers alone.
+fn nominal_ray_count(radials: &[Radial]) -> Option<usize> {
+    radials
+        .iter()
+        .find_map(|r| match r.azimuth_resolution_spacing {
+            1 => Some(720),
+            2 => Some(360),
+            _ => None,
+        })
 }
 
 // Phase 7 will add convenience re-exports of `Msg2 as RdaStatus`,
@@ -494,6 +539,10 @@ mod tests {
         Radial {
             azimuth_number,
             azimuth_angle_degrees: f32::from(azimuth_number) * 0.5,
+            // 0 = unknown spacing → completeness rests on markers
+            // alone, keeping these grouping tests independent of the
+            // nominal-ray-count rule (exercised by its own tests).
+            azimuth_resolution_spacing: 0,
             elevation_number,
             elevation_angle_degrees: 0.5,
             radial_status,
@@ -575,6 +624,85 @@ mod tests {
         let sweeps = group_radials_into_sweeps(radials);
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].radials.len(), 3);
+        assert!(sweeps[0].complete);
+    }
+
+    #[test]
+    fn marker_closed_sweeps_are_complete_when_spacing_unknown() {
+        // Both the end-marker close and the next-start-marker close
+        // count as voluntary; spacing 0 disables the ray-count rule.
+        let radials = vec![
+            radial(1, 1, 0),
+            radial(2, 1, 1),
+            radial(3, 1, 2),
+            radial(1, 2, 0),
+            radial(2, 2, 1), // closed by data end, not a marker
+        ];
+        let sweeps = group_radials_into_sweeps(radials);
+        assert_eq!(sweeps.len(), 2);
+        assert!(sweeps[0].complete);
+        assert!(!sweeps[1].complete, "trailing force-emitted sweep");
+    }
+
+    #[test]
+    fn leading_sweep_without_start_marker_is_incomplete() {
+        // Stream joined mid-rotation (I-chunks-only case): first
+        // radial is intermediate, yet the sweep ends with a marker.
+        let radials = vec![radial(100, 1, 1), radial(101, 1, 1), radial(102, 1, 2)];
+        let sweeps = group_radials_into_sweeps(radials);
+        assert_eq!(sweeps.len(), 1);
+        assert!(!sweeps[0].complete);
+    }
+
+    #[test]
+    fn interior_ray_gap_marks_sweep_incomplete_despite_markers() {
+        // A chunk list missing a middle `I` chunk: start + end markers
+        // are both present but the rotation is short. spacing 2 →
+        // nominal 360 rays; only 102 arrive.
+        let mut radials = vec![radial(1, 1, 0)];
+        radials.extend((2..=100).map(|i| radial(i, 1, 1)));
+        radials.extend((301..=360).map(|i| radial(i, 1, 1)));
+        radials.push(radial(361, 1, 2));
+        for r in &mut radials {
+            r.azimuth_resolution_spacing = 2;
+        }
+        let sweeps = group_radials_into_sweeps(radials);
+        assert_eq!(sweeps.len(), 1);
+        assert!(!sweeps[0].complete);
+    }
+
+    #[test]
+    fn nominal_ray_count_satisfied_keeps_sweep_complete() {
+        // Full 1.0°-spacing rotation: 360 rays bracketed by markers.
+        let mut radials: Vec<Radial> = (1..=360)
+            .map(|i| radial(i, 1, if i == 1 { 0 } else if i == 360 { 2 } else { 1 }))
+            .collect();
+        for r in &mut radials {
+            r.azimuth_resolution_spacing = 2;
+        }
+        let sweeps = group_radials_into_sweeps(radials);
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(sweeps[0].radials.len(), 360);
+        assert!(sweeps[0].complete);
+    }
+
+    #[test]
+    fn trailing_truncation_marks_only_last_sweep_incomplete() {
+        // Two sweeps; the stream dies mid-way through the second —
+        // the partial-chunk-list shape observed on the real KLOT
+        // fixture (sweep 1 of the S+10I subset has 480/720 rays).
+        let radials = vec![
+            radial(1, 1, 0),
+            radial(2, 1, 1),
+            radial(3, 1, 2),
+            radial(1, 2, 0),
+            radial(2, 2, 1),
+            radial(3, 2, 1),
+        ];
+        let sweeps = group_radials_into_sweeps(radials);
+        assert_eq!(sweeps.len(), 2);
+        assert!(sweeps[0].complete);
+        assert!(!sweeps[1].complete);
     }
 
     #[test]
@@ -587,6 +715,7 @@ mod tests {
         let sweep = Sweep {
             elevation_number: 1,
             radials,
+            complete: true,
         };
         let med = sweep.elevation_angle_degrees().expect("non-empty");
         assert!((med - 0.5).abs() < 1e-6, "got {med}");
@@ -597,6 +726,7 @@ mod tests {
         let sweep: Sweep = Sweep {
             elevation_number: 1,
             radials: vec![],
+            complete: true,
         };
         assert!(sweep.elevation_angle_degrees().is_none());
     }

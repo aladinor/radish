@@ -79,6 +79,26 @@ def nexrad_kilx_fixture():
 
 
 @pytest.fixture
+def nexrad_chunks_dir():
+    """Directory of real KLOT S/I/E chunk objects, or skip.
+
+    55 raw objects from the `unidata-nexrad-level2-chunks` live feed
+    (1 `S` + 53 `I` + 1 `E`, KLOT 2026-03-28 20:14:57 UTC), resolved
+    from ``RADISH_NEXRAD_CHUNKS_DIR``. Lexicographic sort of the
+    directory listing = scan order. See CORPUS.md for acquisition.
+    """
+    raw = os.environ.get("RADISH_NEXRAD_CHUNKS_DIR")
+    if raw:
+        p = Path(raw).expanduser()
+        if p.is_dir() and any(p.iterdir()):
+            return p
+    pytest.skip(
+        "RADISH_NEXRAD_CHUNKS_DIR not set or empty — see "
+        "radish/tests/fixtures/CORPUS.md (Real-time chunk fixture)"
+    )
+
+
+@pytest.fixture
 def sigmet_fixture():
     """Path to a Sigmet/IRIS RAW fixture file, or skip if unset."""
     path = os.environ.get("RADISH_SIGMET_FIXTURE")

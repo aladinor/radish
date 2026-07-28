@@ -124,6 +124,39 @@ for url, name in paths:
             shutil.copyfileobj(src, dst)
 ```
 
+## Real-time chunk fixture (plan 0009)
+
+One volume from the live `unidata-nexrad-level2-chunks` S3 feed,
+captured as the 55 raw chunk objects (1 `S` + 53 `I` + 1 `E`) of KLOT
+volume 2026-03-28 20:14:57 UTC. This is the only fixture that exercises
+real S/I/E chunk framing — the volume header + LDM control word in the
+`S` chunk, bare control-word-prefixed bzip2 records in `I` chunks, and
+the negative (last-record) control word in the `E` chunk. Byte-splitting
+a full archive file can never cover those.
+
+Tests resolve it from **`RADISH_NEXRAD_CHUNKS_DIR`**:
+
+```bash
+export RADISH_NEXRAD_CHUNKS_DIR="$HOME/.cache/radish/fixtures/nexrad_chunks_KLOT"
+```
+
+| Fixture | Files | Tarball SHA-256 | Purpose |
+| --- | ---: | --- | --- |
+| `nexrad_chunks_KLOT/` (from `nexrad_level2_chunks_KLOT.tar.gz`) | 55 | `630b275011eb9e41d91aba24a54c97f744c5d3e61d0555941f1c42d7b336f5a2` | Real chunk framing; incomplete-sweep detection and drop/pad policy (plan 0009). Full volume decodes to 12 sweeps (720×6 split cuts, 360×6). `S + 10 I` chunks truncate mid-sweep: sweep 1 has 480/720 rays. |
+
+Acquire via [open-radar-data](https://github.com/openradar/open-radar-data)
+(the tarball is in its pooch registry) and extract:
+
+```bash
+python -c "from open_radar_data import DATASETS; print(DATASETS.fetch('nexrad_level2_chunks_KLOT.tar.gz'))"
+mkdir -p ~/.cache/radish/fixtures
+tar xzf ~/.cache/open-radar-data/nexrad_level2_chunks_KLOT.tar.gz -C ~/.cache/radish/fixtures/
+```
+
+Chunk object names follow the bucket convention
+`YYYYMMDD-HHMMSS-NNN-[SIE]` (volume start time, 1-based sequence
+number, chunk type). Lexicographic sort of the directory = scan order.
+
 ## Deferred fixtures
 
 Add these to the corpus only if a parity-audit regression surfaces
