@@ -37,7 +37,7 @@ use radish::{
             self, DemuxOptions, MomentSelector, OutputWord, RawMoment, RecordInventory,
             TargetEncoding,
         },
-        CfRadial1Backend, NexradBackend, RadarBackend, SigmetBackend,
+        CfRadial1Backend, IncompleteSweepPolicy, NexradBackend, RadarBackend, SigmetBackend,
     },
     Coordinates, MomentData as RustMomentData, NexradSweepAttrs as RustNexradSweepAttrs,
     NexradVolumeAttrs as RustNexradVolumeAttrs, RadishError,
@@ -111,6 +111,17 @@ impl PyVolumeMetadata {
     #[getter]
     fn num_sweeps(&self) -> usize {
         self.inner.sweep_group_names.len()
+    }
+
+    /// Positional indices of provably-partial sweeps (0-based, in
+    /// original scan order — the `N` of each `sweep_N` name). Mirrors
+    /// xradar's `NEXRADLevel2File.incomplete_sweeps`. Empty for
+    /// complete volumes and for formats without partial-volume
+    /// semantics. Under `incomplete_sweep="drop"` these indices name
+    /// the sweeps that were dropped.
+    #[getter]
+    fn incomplete_sweeps(&self) -> Vec<usize> {
+        self.inner.incomplete_sweep_indices.clone()
     }
 
     /// Institution operating the radar. Often empty for NEXRAD / IRIS;
@@ -593,6 +604,15 @@ impl PySweepData {
         self.metadata.sweep_number
     }
 
+    /// `False` when the sweep's data is provably partial — a NEXRAD
+    /// volume truncated mid-sweep, joined mid-rotation, or with an
+    /// interior chunk gap (real-time chunk streams). Always `True`
+    /// for formats without partial-volume semantics.
+    #[getter]
+    fn is_complete(&self) -> bool {
+        self.metadata.is_complete
+    }
+
     /// Target elevation (PPI) or azimuth (RHI) in degrees, from the
     /// sweep's `fixed_angle` field.
     #[getter]
@@ -758,6 +778,13 @@ impl PyVolumeData {
         self.sweeps.len()
     }
 
+    /// Positional indices of provably-partial sweeps — see
+    /// `VolumeMetadata.incomplete_sweeps`.
+    #[getter]
+    fn incomplete_sweeps(&self) -> Vec<usize> {
+        self.metadata.incomplete_sweep_indices.clone()
+    }
+
     /// Take a sweep by index. Each sweep can only be taken once; calling
     /// twice raises `RuntimeError` so the caller learns about the bug
     /// instead of silently getting a re-decoded copy.
@@ -827,11 +854,27 @@ fn scan_cfradial1(path: &str) -> PyResult<PyVolumeMetadata> {
 /// The resulting volume carries `metadata.nexrad_attrs` populated from
 /// the MSG_2 (RDA Status) and MSG_5 (Volume Coverage Pattern) messages.
 #[pyfunction]
-fn read_nexrad(path: &str) -> PyResult<PyVolumeData> {
+#[pyo3(signature = (path, incomplete_sweep = "keep"))]
+fn read_nexrad(path: &str, incomplete_sweep: &str) -> PyResult<PyVolumeData> {
+    let policy = parse_incomplete_sweep(incomplete_sweep)?;
     NexradBackend::new()
-        .read_volume(Path::new(path))
+        .read_volume_with(Path::new(path), policy)
         .map(PyVolumeData::from_inner)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD file: {e}")))
+}
+
+/// Parse the `incomplete_sweep` string shared by the NEXRAD read
+/// functions. `"keep"` is the low-level default (today's behavior);
+/// `radish.open_datatree` defaults to `"drop"` for xradar #332 parity.
+fn parse_incomplete_sweep(value: &str) -> PyResult<IncompleteSweepPolicy> {
+    match value {
+        "keep" => Ok(IncompleteSweepPolicy::Keep),
+        "drop" => Ok(IncompleteSweepPolicy::Drop),
+        "pad" => Ok(IncompleteSweepPolicy::Pad),
+        other => Err(PyValueError::new_err(format!(
+            "invalid incomplete_sweep={other:?}: expected 'keep', 'drop', or 'pad'"
+        ))),
+    }
 }
 
 /// Scan a NEXRAD Level 2 file for metadata only.
@@ -900,9 +943,11 @@ fn scan_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeMetadata> {
 /// Users typically `fs.open(p, "rb").read()` each path or fetch directly
 /// from S3 via `fsspec`.
 #[pyfunction]
-fn read_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeData> {
+#[pyo3(signature = (chunks, incomplete_sweep = "keep"))]
+fn read_nexrad_chunks(chunks: Vec<Vec<u8>>, incomplete_sweep: &str) -> PyResult<PyVolumeData> {
+    let policy = parse_incomplete_sweep(incomplete_sweep)?;
     NexradBackend::new()
-        .read_chunks_volume(chunks)
+        .read_chunks_volume_with(chunks, policy)
         .map(PyVolumeData::from_inner)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD chunks: {e}")))
 }
@@ -914,9 +959,11 @@ fn read_nexrad_chunks(chunks: Vec<Vec<u8>>) -> PyResult<PyVolumeData> {
 /// reachable as `radish._radish.read_nexrad_bytes` so the dispatcher can
 /// import it without a Rust-only call path.
 #[pyfunction]
-fn read_nexrad_bytes(data: Vec<u8>) -> PyResult<PyVolumeData> {
+#[pyo3(signature = (data, incomplete_sweep = "keep"))]
+fn read_nexrad_bytes(data: Vec<u8>, incomplete_sweep: &str) -> PyResult<PyVolumeData> {
+    let policy = parse_incomplete_sweep(incomplete_sweep)?;
     NexradBackend::new()
-        .read_bytes_volume(data)
+        .read_bytes_volume_with(data, policy)
         .map(PyVolumeData::from_inner)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to read NEXRAD bytes: {e}")))
 }

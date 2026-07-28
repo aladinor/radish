@@ -99,6 +99,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         drop_variables: Optional[Iterable[str]] = None,
         group: Optional[str] = None,
         backend: Optional[str] = None,
+        incomplete_sweep: Optional[str] = None,
     ):
         """Delegate to :func:`radish.open_dataset`. Existing
         ``xr.open_dataset(path, engine="radish")`` callers go through this
@@ -112,6 +113,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             backend=backend,
             group=group,
             drop_variables=drop_variables,
+            incomplete_sweep=incomplete_sweep,
         )
 
     def open_datatree(
@@ -120,6 +122,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         *,
         drop_variables: Optional[Iterable[str]] = None,
         backend: Optional[str] = None,
+        incomplete_sweep: Optional[str] = None,
     ):
         """Delegate to :func:`radish.open_datatree`. Existing
         ``xr.open_datatree(path, engine="radish")`` callers go through this
@@ -137,6 +140,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
             filename_or_obj,
             backend=backend,
             drop_variables=drop_variables,
+            incomplete_sweep=incomplete_sweep,
         )
 
     def _volume_to_datatree(self, volume, fmt: str) -> "DataTree":
@@ -147,9 +151,15 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         `open_datatree`.
         """
         datasets = {"/": self._create_root_dataset(volume.metadata, fmt)}
+        # Children are named from `sweep_group_names`, not a positional
+        # enumerate: under NEXRAD's incomplete_sweep="drop" the survivors
+        # keep their original `sweep_N` names with gaps (xradar #332
+        # parity — dropping sweep_1 must not rename sweep_2 to sweep_1).
+        names = list(volume.metadata.sweep_group_names)
         for i in range(volume.num_sweeps):
             sweep = volume.get_sweep(i)
-            datasets[f"/sweep_{i}"] = self._sweep_to_dataset(sweep, volume.metadata)
+            name = names[i] if i < len(names) else f"sweep_{i}"
+            datasets[f"/{name}"] = self._sweep_to_dataset(sweep, volume.metadata)
         return DataTree.from_dict(datasets)
 
     def _create_root_dataset(self, metadata, fmt: str = "cfradial1") -> "xr.Dataset":
