@@ -6,16 +6,19 @@ from pathlib import Path
 import pytest
 
 
-def _nexrad_dir() -> Path | None:
-    """Resolve the NEXRAD fixture directory from
-    `RADISH_NEXRAD_FIXTURE_DIR`, returning ``None`` if unset/missing.
-    See ``radish/tests/fixtures/CORPUS.md`` for the expected layout.
+def _fixture_dir(env_var: str) -> Path | None:
+    """Resolve a fixture directory from `env_var`, returning ``None`` if
+    unset/missing. See ``radish/tests/fixtures/CORPUS.md`` for layouts.
     """
-    raw = os.environ.get("RADISH_NEXRAD_FIXTURE_DIR")
+    raw = os.environ.get(env_var)
     if not raw:
         return None
     p = Path(raw).expanduser()
     return p if p.is_dir() else None
+
+
+def _nexrad_dir() -> Path | None:
+    return _fixture_dir("RADISH_NEXRAD_FIXTURE_DIR")
 
 
 @pytest.fixture
@@ -65,10 +68,7 @@ def nexrad_kilx_fixture():
     """
     fdir = _nexrad_dir()
     if fdir is None:
-        pytest.skip(
-            "RADISH_NEXRAD_FIXTURE_DIR not set — see "
-            "radish/tests/fixtures/CORPUS.md"
-        )
+        pytest.skip("RADISH_NEXRAD_FIXTURE_DIR not set — see " "radish/tests/fixtures/CORPUS.md")
     candidate = fdir / "KILX20230629_154426_V06"
     if not candidate.exists():
         pytest.skip(
@@ -87,11 +87,9 @@ def nexrad_chunks_dir():
     from ``RADISH_NEXRAD_CHUNKS_DIR``. Lexicographic sort of the
     directory listing = scan order. See CORPUS.md for acquisition.
     """
-    raw = os.environ.get("RADISH_NEXRAD_CHUNKS_DIR")
-    if raw:
-        p = Path(raw).expanduser()
-        if p.is_dir() and any(p.iterdir()):
-            return p
+    p = _fixture_dir("RADISH_NEXRAD_CHUNKS_DIR")
+    if p is not None and any(p.iterdir()):
+        return p
     pytest.skip(
         "RADISH_NEXRAD_CHUNKS_DIR not set or empty — see "
         "radish/tests/fixtures/CORPUS.md (Real-time chunk fixture)"

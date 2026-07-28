@@ -96,19 +96,8 @@ pub(super) fn convert_scan(
         .collect();
 
     if policy == IncompleteSweepPolicy::Drop {
-        // Survivors keep their original positional names/angles so
-        // `sweep_2` stays `sweep_2` even when `sweep_1` was dropped.
-        metadata.sweep_group_names = selected.iter().map(|(i, _)| format!("sweep_{i}")).collect();
-        metadata.sweep_fixed_angles = selected
-            .iter()
-            .map(|(i, _)| {
-                metadata
-                    .sweep_fixed_angles
-                    .get(*i)
-                    .copied()
-                    .unwrap_or(f64::NAN)
-            })
-            .collect();
+        let kept: Vec<usize> = selected.iter().map(|(i, _)| *i).collect();
+        retain_sweeps_in_metadata(&mut metadata, &kept);
     }
 
     let sweeps: Vec<SweepData> = selected
@@ -123,6 +112,24 @@ pub(super) fn convert_scan(
         })
         .collect::<Result<_>>()?;
     Ok(VolumeData::new(metadata, sweeps))
+}
+
+/// Restrict `build_volume_metadata`'s per-sweep vectors to the sweeps
+/// surviving [`IncompleteSweepPolicy::Drop`], identified by their
+/// *original* positional indices. Names keep those original indices
+/// (`sweep_2` stays `sweep_2` even when `sweep_1` was dropped);
+/// `incomplete_sweep_indices` deliberately keeps recording what was
+/// dropped. Lives next to [`build_volume_metadata`] because the two
+/// are halves of one decision — any per-sweep vector added there must
+/// be filtered here.
+fn retain_sweeps_in_metadata(metadata: &mut VolumeMetadata, kept: &[usize]) {
+    metadata.sweep_group_names = kept.iter().map(|i| format!("sweep_{i}")).collect();
+    // Plain indexing: the angles were built one-entry-per-sweep from
+    // the same scan a few lines earlier; a miss is a bug worth a panic.
+    metadata.sweep_fixed_angles = kept
+        .iter()
+        .map(|i| metadata.sweep_fixed_angles[*i])
+        .collect();
 }
 
 /// Build the `VolumeMetadata` from the scan, falling back to the file path for
@@ -251,7 +258,7 @@ pub(super) fn convert_sweep(
     );
 
     let fixed_angle =
-        fixed_angle_for(cut, sweep).unwrap_or_else(|| median_elevation(&coordinates.elevation));
+        fixed_angle_for(cut, sweep).unwrap_or_else(|| median_f32(&coordinates.elevation));
     let sweep_number = u32::from(sweep.elevation_number);
     let mut sweep_meta = SweepMetadata::new(sweep_number, SweepMode::Azimuth, fixed_angle);
     sweep_meta.nexrad = cut.map(sweep_attrs_from_cut);
@@ -313,9 +320,9 @@ fn pad_sweep_to_full_rotation(mut data: SweepData, sweep: &Sweep) -> SweepData {
         }
     }
 
-    let old = &data.coordinates;
+    let old = std::mem::take(&mut data.coordinates);
     let azimuth: Vec<f32> = (0..n).map(|i| (i as f32 + 0.5) * res).collect();
-    let el_fill = median_elevation(&old.elevation) as f32;
+    let el_fill = median_f32(&old.elevation) as f32;
     let elevation: Vec<f32> = row_for_slot
         .iter()
         .map(|row| row.map_or(el_fill, |k| old.elevation[k]))
@@ -324,16 +331,20 @@ fn pad_sweep_to_full_rotation(mut data: SweepData, sweep: &Sweep) -> SweepData {
 
     for moment in data.moments.values_mut() {
         let ngates = moment.data.ncols();
-        let mut arr = Array2::from_elem((n, ngates), f32::NAN);
-        for (slot, row) in row_for_slot.iter().enumerate() {
-            if let Some(k) = row {
-                arr.row_mut(slot).assign(&moment.data.row(*k));
+        // Single pass: each grid cell is written exactly once (observed
+        // row or NaN filler) — no NaN pre-fill later overwritten.
+        let mut buf = Vec::with_capacity(n * ngates);
+        for row in &row_for_slot {
+            match row {
+                Some(k) => buf.extend(moment.data.row(*k).iter().copied()),
+                None => buf.resize(buf.len() + ngates, f32::NAN),
             }
         }
-        moment.data = arr;
+        moment.data = Array2::from_shape_vec((n, ngates), buf)
+            .expect("row_for_slot has n entries of ngates each");
     }
 
-    data.coordinates = Coordinates::new(time, old.range.clone(), azimuth, elevation);
+    data.coordinates = Coordinates::new(time, old.range, azimuth, elevation);
     data
 }
 
@@ -348,7 +359,7 @@ fn full_rotation_size(sweep: &Sweep, sorted_azimuths: &[f32]) -> Option<usize> {
     if sorted_azimuths.len() < 2 {
         return None;
     }
-    let mut steps: Vec<f32> = sorted_azimuths
+    let steps: Vec<f32> = sorted_azimuths
         .windows(2)
         .map(|w| w[1] - w[0])
         .filter(|d| *d > 0.0)
@@ -356,11 +367,7 @@ fn full_rotation_size(sweep: &Sweep, sorted_azimuths: &[f32]) -> Option<usize> {
     if steps.is_empty() {
         return None;
     }
-    let mid = steps.len() / 2;
-    let (_, m, _) = steps.select_nth_unstable_by(mid, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let n = (360.0 / *m).round() as usize;
+    let n = (360.0 / median_f32(&steps)).round() as usize;
     // Sanity band: legacy 1° (360) through split-cut 0.5° (720), with
     // headroom for exotic spacings. Outside it the inference is noise.
     (90..=1440).contains(&n).then_some(n)
@@ -380,7 +387,7 @@ fn fill_missing_times(row_for_slot: &[Option<usize>], dense_time: &[f64]) -> Vec
         .filter(|(_, t)| t.is_finite())
         .collect();
 
-    let Some(&(_, t_min)) = anchors
+    let Some(&(slot0, t0)) = anchors
         .iter()
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     else {
@@ -390,14 +397,8 @@ fn fill_missing_times(row_for_slot: &[Option<usize>], dense_time: &[f64]) -> Vec
             .map(|row| row.map_or(f64::NAN, |k| dense_time[k]))
             .collect();
     };
-    let (slot0, t0) = anchors
+    let &(slot1, t1) = anchors
         .iter()
-        .copied()
-        .find(|&(_, t)| t == t_min)
-        .expect("min exists");
-    let (slot1, t1) = anchors
-        .iter()
-        .copied()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         .expect("non-empty");
 
@@ -508,7 +509,7 @@ fn scaled_cfp(value: CfpMomentValue) -> f32 {
 
 /// Median of a slice of f32 elevations using `select_nth_unstable_by` so we
 /// don't allocate a fully-sorted copy of the slice for every fallback.
-fn median_elevation(elevations: &[f32]) -> f64 {
+fn median_f32(elevations: &[f32]) -> f64 {
     if elevations.is_empty() {
         return f64::NAN;
     }
@@ -541,7 +542,7 @@ fn median_elevation(elevations: &[f32]) -> f64 {
 /// Both readings are spec-compliant; we ship the commanded one for
 /// xradar parity. Fallback chain: commanded → median-of-radials → None
 /// (caller decides what to do — `f64::NAN` for the volume-level array,
-/// `median_elevation(coordinates.elevation)` for the per-sweep value).
+/// `median_f32(coordinates.elevation)` for the per-sweep value).
 fn fixed_angle_for(cut: Option<&ElevationCut>, sweep: &Sweep) -> Option<f64> {
     cut.map(|c| c.elevation_angle_degrees_f64())
         .or_else(|| sweep.elevation_angle_degrees().map(f64::from))
@@ -755,14 +756,14 @@ mod tests {
     }
 
     #[test]
-    fn median_elevation_handles_empty() {
-        assert!(median_elevation(&[]).is_nan());
+    fn median_f32_handles_empty() {
+        assert!(median_f32(&[]).is_nan());
     }
 
     #[test]
-    fn median_elevation_returns_middle_value() {
+    fn median_f32_returns_middle_value() {
         // Median of [0.5, 1.5, 2.5] = 1.5
-        assert!((median_elevation(&[2.5, 0.5, 1.5]) - 1.5).abs() < 1e-6);
+        assert!((median_f32(&[2.5, 0.5, 1.5]) - 1.5).abs() < 1e-6);
     }
 
     #[test]

@@ -90,6 +90,7 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         "drop_variables",
         "group",
         "backend",
+        "incomplete_sweep",
     )
 
     def open_dataset(
@@ -155,11 +156,13 @@ class RadishBackendEntrypoint(BackendEntrypoint):
         # enumerate: under NEXRAD's incomplete_sweep="drop" the survivors
         # keep their original `sweep_N` names with gaps (xradar #332
         # parity — dropping sweep_1 must not rename sweep_2 to sweep_1).
+        # Every backend fills the names 1:1 with the sweep list; a
+        # mismatch is a producer bug, so index loudly rather than mask
+        # it (a fallback name could silently overwrite a sibling key).
         names = list(volume.metadata.sweep_group_names)
         for i in range(volume.num_sweeps):
             sweep = volume.get_sweep(i)
-            name = names[i] if i < len(names) else f"sweep_{i}"
-            datasets[f"/{name}"] = self._sweep_to_dataset(sweep, volume.metadata)
+            datasets[f"/{names[i]}"] = self._sweep_to_dataset(sweep, volume.metadata)
         return DataTree.from_dict(datasets)
 
     def _create_root_dataset(self, metadata, fmt: str = "cfradial1") -> "xr.Dataset":

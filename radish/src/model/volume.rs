@@ -100,8 +100,10 @@ pub struct VolumeMetadata {
     /// `None` for non-Sigmet volumes.
     pub sigmet: Option<SigmetVolumeAttrs>,
 
-    /// Positional indices (0-based, matching `sweep_group_names`
-    /// order) of sweeps whose data is provably partial — a NEXRAD
+    /// Positional indices of provably-partial sweeps (0-based, in
+    /// *original scan order* — the `N` of each `sweep_N` name; under a
+    /// drop policy these sweeps are absent from `sweep_group_names`
+    /// and the indices record what was dropped). Partial = a NEXRAD
     /// volume truncated mid-sweep, joined mid-rotation, or with an
     /// interior chunk gap (plan 0009). Stored, not derived: the
     /// metadata-only scan path never materializes `SweepData`.

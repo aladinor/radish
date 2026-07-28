@@ -443,18 +443,15 @@ pub(crate) fn group_radials_into_sweeps(radials: Vec<Radial>) -> Vec<Sweep> {
         /// size is known — carries at least that many rays. The ray
         /// count guards against interior gaps (a chunk list missing a
         /// middle `I` chunk still shows start + end markers).
-        fn close(self, at_data_end: bool) -> Option<Sweep> {
-            if self.radials.is_empty() {
-                return None;
-            }
+        fn close(self, at_data_end: bool) -> Sweep {
             let complete = self.saw_start
                 && !at_data_end
                 && nominal_ray_count(&self.radials).is_none_or(|n| self.radials.len() >= n);
-            Some(Sweep {
+            Sweep {
                 elevation_number: self.elevation_number,
                 radials: self.radials,
                 complete,
-            })
+            }
         }
     }
 
@@ -464,32 +461,25 @@ pub(crate) fn group_radials_into_sweeps(radials: Vec<Radial>) -> Vec<Sweep> {
     for radial in radials {
         let status = radial.radial_status;
 
-        // Status 0/3/5 = start of new sweep — close any in-flight
-        // current sweep first.
-        if matches!(status, 0 | 3 | 5) {
-            if let Some(inflight) = current.take() {
-                sweeps.extend(inflight.close(false));
-            }
-            current = Some(InFlight::open(radial));
-            continue;
-        }
-
-        // Fallback: elevation_number changed mid-stream without a
-        // start marker (legacy files / corrupt status bytes). Open
-        // a new sweep so we don't merge unrelated cuts.
         match &mut current {
-            Some(inflight) if inflight.elevation_number != radial.elevation_number => {
-                let inflight = current.take().expect("just matched Some");
-                sweeps.extend(inflight.close(false));
+            // Same cut, no start marker: append to the in-flight sweep.
+            Some(inflight)
+                if inflight.elevation_number == radial.elevation_number
+                    && !matches!(status, 0 | 3 | 5) =>
+            {
+                inflight.radials.push(radial);
+            }
+            // Sweep boundary: an explicit start marker (0/3/5), or —
+            // fallback for legacy files / corrupt status bytes — an
+            // elevation_number change without one. Close any in-flight
+            // sweep and open the new one with this radial.
+            _ => {
+                if let Some(prev) = current.take() {
+                    sweeps.push(prev.close(false));
+                }
                 current = Some(InFlight::open(radial));
                 continue;
             }
-            None => {
-                current = Some(InFlight::open(radial));
-                continue;
-            }
-            // Otherwise: append to the current sweep's radials.
-            Some(inflight) => inflight.radials.push(radial),
         }
 
         // Status 2/4 = end of elevation/volume — close the current
@@ -497,14 +487,14 @@ pub(crate) fn group_radials_into_sweeps(radials: Vec<Radial>) -> Vec<Sweep> {
         // makes it into the sweep.
         if matches!(status, 2 | 4) {
             if let Some(inflight) = current.take() {
-                sweeps.extend(inflight.close(false));
+                sweeps.push(inflight.close(false));
             }
         }
     }
 
     // Trailing sweep without an explicit end marker.
     if let Some(inflight) = current {
-        sweeps.extend(inflight.close(true));
+        sweeps.push(inflight.close(true));
     }
 
     sweeps

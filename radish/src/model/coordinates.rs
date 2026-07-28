@@ -1,7 +1,7 @@
 //! Coordinate data structures.
 
 /// Coordinate data for a sweep
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Coordinates {
     /// Time for each ray (seconds since epoch)
     pub time: Vec<f64>,

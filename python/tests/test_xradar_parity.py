@@ -155,14 +155,10 @@ def test_fm301_scalar_data_vars_present_on_every_sweep(parity_pair):
     }
     for sweep_key in (k for k in rd.children if k.startswith("sweep_")):
         sweep = rd[sweep_key]
-        missing = {
-            v
-            for v in fm301_scalars
-            if v not in sweep.data_vars or sweep[v].ndim != 0
-        }
-        assert not missing, (
-            f"{backend_id}: {sweep_key} missing FM301 scalar data_vars: {sorted(missing)}"
-        )
+        missing = {v for v in fm301_scalars if v not in sweep.data_vars or sweep[v].ndim != 0}
+        assert (
+            not missing
+        ), f"{backend_id}: {sweep_key} missing FM301 scalar data_vars: {sorted(missing)}"
 
 
 def test_sweep_coord_dtypes_match_xradar(parity_pair):
@@ -179,20 +175,20 @@ def test_sweep_coord_dtypes_match_xradar(parity_pair):
 
     rd0 = rd[sweeps[0]]
     # `azimuth` and `elevation` must be float64 (xradar convention).
-    assert rd0["azimuth"].dtype == np.float64, (
-        f"{backend_id}: azimuth dtype {rd0['azimuth'].dtype}, expected float64"
-    )
-    assert rd0["elevation"].dtype == np.float64, (
-        f"{backend_id}: elevation dtype {rd0['elevation'].dtype}, expected float64"
-    )
+    assert (
+        rd0["azimuth"].dtype == np.float64
+    ), f"{backend_id}: azimuth dtype {rd0['azimuth'].dtype}, expected float64"
+    assert (
+        rd0["elevation"].dtype == np.float64
+    ), f"{backend_id}: elevation dtype {rd0['elevation'].dtype}, expected float64"
     # `range` is float32 to keep memory low for high-gate-count volumes.
-    assert rd0["range"].dtype == np.float32, (
-        f"{backend_id}: range dtype {rd0['range'].dtype}, expected float32"
-    )
+    assert (
+        rd0["range"].dtype == np.float32
+    ), f"{backend_id}: range dtype {rd0['range'].dtype}, expected float32"
     # `time` is datetime64 (any precision); pin via numpy `np.issubdtype`.
-    assert np.issubdtype(rd0["time"].dtype, np.datetime64), (
-        f"{backend_id}: time dtype {rd0['time'].dtype}, expected datetime64"
-    )
+    assert np.issubdtype(
+        rd0["time"].dtype, np.datetime64
+    ), f"{backend_id}: time dtype {rd0['time'].dtype}, expected datetime64"
 
 
 def test_moment_set_matches_xradar(parity_pair):
@@ -215,12 +211,12 @@ def test_moment_set_matches_xradar(parity_pair):
         xd_vars = {v for v in xd[skey].data_vars if xd[skey][v].ndim == 2}
         only_rd = rd_vars - xd_vars
         only_xd = xd_vars - rd_vars
-        assert not only_rd, (
-            f"{backend_id} {skey}: radish emits moments xradar doesn't: {sorted(only_rd)}"
-        )
-        assert not only_xd, (
-            f"{backend_id} {skey}: xradar emits moments radish doesn't: {sorted(only_xd)}"
-        )
+        assert (
+            not only_rd
+        ), f"{backend_id} {skey}: radish emits moments xradar doesn't: {sorted(only_rd)}"
+        assert (
+            not only_xd
+        ), f"{backend_id} {skey}: xradar emits moments radish doesn't: {sorted(only_xd)}"
 
 
 def test_per_moment_units_match_xradar(parity_pair):
@@ -253,9 +249,8 @@ def test_per_moment_units_match_xradar(parity_pair):
     # omits a `units` attr while radish emits one, expand this test to
     # treat that as expected. Today we want strict parity on every
     # common variable.
-    assert not mismatches, (
-        f"{backend_id}: per-moment units mismatch:\n  "
-        + "\n  ".join(f"{v}: radish={r!r}  xradar={x!r}" for v, r, x in mismatches)
+    assert not mismatches, f"{backend_id}: per-moment units mismatch:\n  " + "\n  ".join(
+        f"{v}: radish={r!r}  xradar={x!r}" for v, r, x in mismatches
     )
 
 
@@ -323,7 +318,6 @@ def test_sweep_fixed_angle_matches_xradar(parity_pair):
         f"{backend_id}: per-sweep `sweep_fixed_angle` differs from xradar "
         f"by more than the backend's tolerance ({atol}°):\n  "
         + "\n  ".join(
-            f"{s}: radish={r:.6f}  xradar={x:.6f}  diff={r - x:+.6f}"
-            for s, r, x in mismatches
+            f"{s}: radish={r:.6f}  xradar={x:.6f}  diff={r - x:+.6f}" for s, r, x in mismatches
         )
     )

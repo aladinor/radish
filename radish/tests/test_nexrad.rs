@@ -284,6 +284,14 @@ fn chunk_fixture() -> Option<Vec<Vec<u8>>> {
         .collect::<Option<Vec<_>>>()
 }
 
+/// NaN-tolerant element equality for two moment views: equal when both
+/// values match bitwise-meaningfully (x == y, or both NaN).
+fn nan_eq<'a>(a: impl IntoIterator<Item = &'a f32>, b: impl IntoIterator<Item = &'a f32>) -> bool {
+    a.into_iter()
+        .zip(b)
+        .all(|(x, y)| (x == y) || (x.is_nan() && y.is_nan()))
+}
+
 /// Byte-concatenating real S/I/E chunks must decode identically to
 /// feeding the chunk list — same sweeps, same completeness, and
 /// bit-identical moment arrays.
@@ -308,10 +316,7 @@ fn real_chunks_match_concatenated_blob_decode() {
         assert!(a.metadata.is_complete);
         let (da, db) = (&a.moments["DBZH"].data, &b.moments["DBZH"].data);
         assert_eq!(da.shape(), db.shape());
-        assert!(da
-            .iter()
-            .zip(db.iter())
-            .all(|(x, y)| (x == y) || (x.is_nan() && y.is_nan())));
+        assert!(nan_eq(da.iter(), db.iter()));
     }
 }
 
@@ -365,11 +370,7 @@ fn partial_chunk_list_keep_drop_pad_semantics() {
         let slot = ((az.rem_euclid(360.0) / 0.5) as usize).min(719);
         let padded_row = padded.moments["DBZH"].data.row(slot);
         let keep_row = keep_sweep.moments["DBZH"].data.row(k);
-        if padded_row
-            .iter()
-            .zip(keep_row.iter())
-            .all(|(x, y)| (x == y) || (x.is_nan() && y.is_nan()))
-        {
+        if nan_eq(padded_row.iter(), keep_row.iter()) {
             matched += 1;
         }
     }

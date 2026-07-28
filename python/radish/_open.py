@@ -197,6 +197,17 @@ _DISPATCH: Dict[Tuple[str, InputShape], Callable[..., Any]] = {
     ("sigmet", SHAPE_FILELIKE): lambda obj: read_sigmet_bytes(obj.read()),
 }
 
+# The one high-level default for NEXRAD's partial-volume policy —
+# referenced by both the read path and the warning path so they can
+# never drift apart. "drop" mirrors xradar #332.
+_DEFAULT_INCOMPLETE_SWEEP = "drop"
+
+# Backends whose readers accept the `incomplete_sweep` keyword. Every
+# other backend has no partial-volume semantics and rejects an explicit
+# value. New per-backend reader kwargs extend this set + the `**kw`
+# rows in `_DISPATCH`, not the shared `_read_volume` body.
+_POLICY_BACKENDS = frozenset({"nexrad_level2"})
+
 # Metadata-only twin of `_DISPATCH`. Returns `VolumeMetadata` instead
 # of `VolumeData` — same input-shape detection, ~3× faster on the
 # Rust side because it skips per-ray moment materialization.
@@ -244,8 +255,8 @@ def _read_volume(input_obj: Any, backend: Optional[str], incomplete_sweep: Optio
             f"(Common: cfradial1 only accepts paths — `libnetcdf` doesn't expose "
             f"an in-memory open. Pass a path or use NEXRAD bytes/chunks instead.)"
         )
-    if backend == "nexrad_level2":
-        return reader(input_obj, incomplete_sweep=incomplete_sweep or "drop")
+    if backend in _POLICY_BACKENDS:
+        return reader(input_obj, incomplete_sweep=incomplete_sweep or _DEFAULT_INCOMPLETE_SWEEP)
     if incomplete_sweep is not None:
         raise ValueError(
             f"incomplete_sweep is only supported by the NEXRAD backend; "
@@ -256,7 +267,7 @@ def _read_volume(input_obj: Any, backend: Optional[str], incomplete_sweep: Optio
 
 def _warn_dropped_sweeps(volume: Any, incomplete_sweep: Optional[str]) -> None:
     """xradar-#332-parity warnings for the default ``"drop"`` mode."""
-    if incomplete_sweep not in (None, "drop"):
+    if (incomplete_sweep or _DEFAULT_INCOMPLETE_SWEEP) != "drop":
         return
     dropped = sorted(volume.incomplete_sweeps)
     if not dropped:
@@ -377,17 +388,20 @@ def open_dataset(
     backend = _normalize_backend(backend)
     volume = _read_volume(filename_or_obj, backend, incomplete_sweep)
     # Lazy import to break the radish ↔ xarray_backend module cycle.
-    from radish.backends.xarray_backend import RadishBackendEntrypoint, _parse_sweep_index
+    from radish.backends.xarray_backend import RadishBackendEntrypoint
 
-    sweep_names = list(volume.metadata.sweep_group_names)
-    if group and sweep_names:
-        # Resolve by name so dropped sweeps leave gaps instead of
-        # silently shifting every later index.
-        if group not in sweep_names:
-            raise ValueError(f"sweep group {group!r} not present; available: {sweep_names}")
-        sweep_idx = sweep_names.index(group)
+    # Resolve `group` against the volume's sweep names so dropped
+    # sweeps leave gaps instead of silently shifting every later index.
+    if not group:
+        sweep_idx = 0
     else:
-        sweep_idx = _parse_sweep_index(group, volume.num_sweeps)
+        sweep_names = list(volume.metadata.sweep_group_names)
+        try:
+            sweep_idx = sweep_names.index(group)
+        except ValueError:
+            raise ValueError(
+                f"sweep group {group!r} not present; available: {sweep_names}"
+            ) from None
     sweep = volume.get_sweep(sweep_idx)
     return RadishBackendEntrypoint()._sweep_to_dataset(sweep, volume.metadata)
 
