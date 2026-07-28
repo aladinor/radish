@@ -675,7 +675,19 @@ mod tests {
     fn nominal_ray_count_satisfied_keeps_sweep_complete() {
         // Full 1.0°-spacing rotation: 360 rays bracketed by markers.
         let mut radials: Vec<Radial> = (1..=360)
-            .map(|i| radial(i, 1, if i == 1 { 0 } else if i == 360 { 2 } else { 1 }))
+            .map(|i| {
+                radial(
+                    i,
+                    1,
+                    if i == 1 {
+                        0
+                    } else if i == 360 {
+                        2
+                    } else {
+                        1
+                    },
+                )
+            })
             .collect();
         for r in &mut radials {
             r.azimuth_resolution_spacing = 2;
