@@ -233,3 +233,42 @@ def test_sigmet_moments_match_xradar(sigmet_fixture):
                 atol=1e-3,
                 err_msg=f"{skey}/{v}: decoded value multiset differs from xradar",
             )
+
+
+def test_sigmet_azimuth_coordinate_matches_xradar(sigmet_fixture):
+    """The per-ray azimuth label must match xradar, including the ray that
+    straddles the 0deg/360deg seam (issue #40).
+
+    A ray crossing north has begin ~= 359.5deg and end ~= 0.5deg; the old
+    naive `(begin + end) / 2` put its azimuth at ~180deg — a half-turn off,
+    landing it next to a legitimate 180deg ray as a near-duplicate while the
+    true ~0deg ray went missing. The circular-midpoint fix folds it back to
+    ~0deg. xradar computes this bearing correctly and its azimuth coordinate
+    is the same in every xradar release (unaffected by the #357 data-rotation
+    bug), so a sorted element-wise comparison is a valid gate against any
+    installed xradar. Compared sorted because radish and xradar order rays
+    differently.
+    """
+    np = pytest.importorskip("numpy")
+    xr = pytest.importorskip("xarray")
+    xradar = pytest.importorskip("xradar")
+
+    rd = xr.open_datatree(sigmet_fixture, engine="radish")
+    xd = xradar.io.open_iris_datatree(str(sigmet_fixture))
+
+    sweep_keys = sorted(k for k in rd.children if k.startswith("sweep_") and k in xd.children)
+    assert sweep_keys, "no overlapping sweep groups between readers"
+
+    for skey in sweep_keys:
+        raz = np.sort(np.asarray(rd[skey]["azimuth"].values, dtype=float))
+        xaz = np.sort(np.asarray(xd[skey]["azimuth"].values, dtype=float))
+        assert raz.shape == xaz.shape, f"{skey}: azimuth shape mismatch"
+        # A 180deg-off seam ray shows up as a ~180deg discrepancy at two
+        # sorted positions; 1e-2 deg comfortably passes genuine f32/f64
+        # rounding while failing decisively on the #40 bug.
+        np.testing.assert_allclose(
+            raz,
+            xaz,
+            atol=1e-2,
+            err_msg=f"{skey}: azimuth coordinate diverges from xradar (issue #40)",
+        )
