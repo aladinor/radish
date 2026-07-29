@@ -150,6 +150,7 @@ mod tests {
         let mut radial = Radial {
             azimuth_number: 0,
             azimuth_angle_degrees: 0.0,
+            azimuth_resolution_spacing: 0,
             elevation_number: 1,
             elevation_angle_degrees: 0.5,
             radial_status: 0,
@@ -175,6 +176,7 @@ mod tests {
         let radial = Radial {
             azimuth_number: 0,
             azimuth_angle_degrees: 0.0,
+            azimuth_resolution_spacing: 0,
             elevation_number: 1,
             elevation_angle_degrees: 0.5,
             radial_status: 0,

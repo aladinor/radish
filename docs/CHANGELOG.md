@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NEXRAD real-time chunks: incomplete-sweep detection + `incomplete_sweep`
+  policy** (plan 0009, following xradar #332). Sweeps whose data is provably
+  partial — a volume truncated mid-sweep (partial chunk list from
+  `unidata-nexrad-level2-chunks`), a stream joined mid-rotation, or an
+  interior chunk gap (start/end markers present but rays missing — a case
+  xradar's marker-only flag cannot catch) — are now detected in the decoder
+  and surfaced as `SweepData.is_complete` plus
+  `VolumeData.incomplete_sweeps` / `VolumeMetadata.incomplete_sweeps`.
+  `read_nexrad`, `read_nexrad_bytes`, and `read_nexrad_chunks` accept
+  `incomplete_sweep="keep"|"drop"|"pad"` (default `"keep"`, today's
+  behavior). `"pad"` reindexes incomplete sweeps onto the full 360/720-ray
+  azimuth grid — grid size comes from MSG31's `azimuth_resolution_spacing`
+  (exact, with median-step inference for MSG_1 legacy), missing rays are
+  NaN across every moment, elevation fills with the sweep median, and
+  missing times extrapolate along rotation order (correct across the 0°
+  wrap, where linear-in-slot interpolation would not be).
+- **Chunk-list validation**: `read_nexrad_chunks` / `scan_nexrad_chunks` now
+  reject an empty list and an `AR2V` volume header in any chunk after the
+  first (out-of-order chunks / mixed volumes previously concatenated into
+  silently corrupt output). Headerless `I`/`E`-only lists remain allowed.
+- **Single-chunk auto-detection**: format sniffing now recognises a lone
+  real-time chunk object by bytes (LDM control word + `BZh` + level digit +
+  plausible record size) and by object name (`YYYYMMDD-HHMMSS-NNN-[SIE]`),
+  so `radish.open_datatree(one_chunk_bytes)` and chunk paths route to the
+  NEXRAD backend without `backend="nexrad"`.
+
+### Changed
+
+- **Behavior change — `radish.open_datatree` / `open_dataset` (and the
+  `engine="radish"` xarray entrypoints) now default to
+  `incomplete_sweep="drop"` for NEXRAD input**: provably-partial sweeps are
+  omitted with a `UserWarning` listing the dropped indices (xradar #332
+  parity). Previously they were passed through silently with a short
+  azimuth dimension. Surviving sweeps keep their *original* `sweep_N`
+  names — dropping `sweep_1` leaves a gap rather than renaming `sweep_2`.
+  Pass `incomplete_sweep="keep"` for the old shape, or `"pad"` for
+  NaN-padded full rotations. Low-level `read_*` defaults are unchanged
+  (`"keep"`).
+
 - **Low-level NEXRAD per-moment decoders** —
   `radish.decode_nexrad_record_moment`,
   `radish.decode_nexrad_sweep_moment`,

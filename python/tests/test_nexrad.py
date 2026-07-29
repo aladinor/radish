@@ -171,8 +171,10 @@ def test_radish_matches_xradar_per_moment(nexrad_fixture):
 
         # Sanity check: matched azimuths agree.
         np.testing.assert_allclose(
-            rd_az_s[rd_keep], xd_az_s[xd_keep_idx], atol=AZ_TOL,
-            err_msg=f"sweep {k}: matched azimuths disagree"
+            rd_az_s[rd_keep],
+            xd_az_s[xd_keep_idx],
+            atol=AZ_TOL,
+            err_msg=f"sweep {k}: matched azimuths disagree",
         )
 
         for m, (lo, hi) in plausibility.items():
@@ -189,18 +191,22 @@ def test_radish_matches_xradar_per_moment(nexrad_fixture):
             # Mask anything either side considers "missing" (NaN OR outside the
             # plausibility window). Compare only on the intersection.
             valid = (
-                np.isfinite(rd_arr) & np.isfinite(xd_arr)
-                & (rd_arr >= lo) & (rd_arr <= hi)
-                & (xd_arr >= lo) & (xd_arr <= hi)
+                np.isfinite(rd_arr)
+                & np.isfinite(xd_arr)
+                & (rd_arr >= lo)
+                & (rd_arr <= hi)
+                & (xd_arr >= lo)
+                & (xd_arr <= hi)
             )
             if not valid.any():
                 continue
             np.testing.assert_allclose(
-                rd_arr[valid], xd_arr[valid], atol=1e-3,
+                rd_arr[valid],
+                xd_arr[valid],
+                atol=1e-3,
                 err_msg=(
-                    f"sweep {k} moment {m}: valid gates disagree "
-                    f"({valid.sum()} compared)"
-                )
+                    f"sweep {k} moment {m}: valid gates disagree " f"({valid.sum()} compared)"
+                ),
             )
             compared += 1
     assert compared > 0, "expected to compare at least one moment"
@@ -315,9 +321,7 @@ def test_xarray_engine_accepts_backend_kwarg(nexrad_fixture):
     assert sorted(dt_auto.attrs.keys()) == sorted(dt_explicit.attrs.keys())
 
     # Aliasing — `backend="nexrad_level2"` is the canonical name; `nexrad` is the alias.
-    dt_canonical = xr.open_datatree(
-        nexrad_fixture, engine="radish", backend="nexrad_level2"
-    )
+    dt_canonical = xr.open_datatree(nexrad_fixture, engine="radish", backend="nexrad_level2")
     assert sorted(dt_canonical.children) == sorted(dt_auto.children)
 
 
@@ -398,6 +402,7 @@ def test_detect_backend_introspection(nexrad_fixture, tmp_path):
     assert radish.detect_backend([data]) == "nexrad_level2"
 
     import io
+
     assert radish.detect_backend(io.BytesIO(data)) == "nexrad_level2"
 
     # Path-by-extension routing: the file doesn't need to exist for the
@@ -431,7 +436,13 @@ def test_sweep_emits_fm301_scalar_variables(nexrad_fixture):
                 assert str(s[var].values) in {"fixed", "staggered", "dual", "not_set"}
             elif var == "follow_mode":
                 assert str(s[var].values) in {
-                    "none", "sun", "vehicle", "aircraft", "target", "manual", "not_set",
+                    "none",
+                    "sun",
+                    "vehicle",
+                    "aircraft",
+                    "target",
+                    "manual",
+                    "not_set",
                 }
         # Old attribute-based form must NOT come back.
         assert "fixed_angle" not in s.attrs, f"{sweep_key}: fixed_angle attr leaked"
@@ -468,9 +479,9 @@ def test_root_emits_msg2_msg5_attrs(nexrad_fixture):
         if ty is bool:
             assert isinstance(actual, bool), f"{key!r}: expected bool, got {type(actual)}"
         elif ty is int:
-            assert isinstance(actual, int) and not isinstance(actual, bool), (
-                f"{key!r}: expected int, got {type(actual)}"
-            )
+            assert isinstance(actual, int) and not isinstance(
+                actual, bool
+            ), f"{key!r}: expected int, got {type(actual)}"
         elif ty is float:
             assert isinstance(actual, float), f"{key!r}: expected float, got {type(actual)}"
         else:
@@ -500,8 +511,11 @@ def test_sweep_emits_msg5_per_cut_attrs(nexrad_fixture):
         "base_tilt_cut": bool,
     }
     valid_waveforms = {
-        "contiguous_surveillance", "contiguous_doppler",
-        "batch", "staggered_pulse_pair", "not_applicable",
+        "contiguous_surveillance",
+        "contiguous_doppler",
+        "batch",
+        "staggered_pulse_pair",
+        "not_applicable",
     }
     valid_channels = {"constant_phase", "random_phase", "sz2_phase_coding"}
 
@@ -511,17 +525,17 @@ def test_sweep_emits_msg5_per_cut_attrs(nexrad_fixture):
             assert key in s.attrs, f"{sweep_key}: missing attr {key!r}"
             actual = s.attrs[key]
             if ty is bool:
-                assert isinstance(actual, bool), (
-                    f"{sweep_key}.{key!r}: expected bool, got {type(actual)}"
-                )
+                assert isinstance(
+                    actual, bool
+                ), f"{sweep_key}.{key!r}: expected bool, got {type(actual)}"
             elif ty is int:
-                assert isinstance(actual, int) and not isinstance(actual, bool), (
-                    f"{sweep_key}.{key!r}: expected int, got {type(actual)}"
-                )
+                assert isinstance(actual, int) and not isinstance(
+                    actual, bool
+                ), f"{sweep_key}.{key!r}: expected int, got {type(actual)}"
             else:
-                assert isinstance(actual, ty), (
-                    f"{sweep_key}.{key!r}: expected {ty}, got {type(actual)}"
-                )
+                assert isinstance(
+                    actual, ty
+                ), f"{sweep_key}.{key!r}: expected {ty}, got {type(actual)}"
         assert s.attrs["waveform_type"] in valid_waveforms
         assert s.attrs["channel_config"] in valid_channels
 
@@ -537,11 +551,21 @@ def test_root_attrs_match_xradar(nexrad_fixture):
     xd = xradar.io.open_nexradlevel2_datatree(nexrad_fixture)
 
     keys = (
-        "dynamic_scan_type", "mpda_vcp", "base_tilt_vcp", "num_base_tilts",
-        "vcp_truncated", "vcp_sequence_active", "number_elevation_cuts",
-        "doppler_velocity_resolution", "vcp_pulse_width", "avset_enabled",
-        "ebc_enabled", "super_res_status", "rda_build_number",
-        "operational_mode", "actual_elevation_cuts",
+        "dynamic_scan_type",
+        "mpda_vcp",
+        "base_tilt_vcp",
+        "num_base_tilts",
+        "vcp_truncated",
+        "vcp_sequence_active",
+        "number_elevation_cuts",
+        "doppler_velocity_resolution",
+        "vcp_pulse_width",
+        "avset_enabled",
+        "ebc_enabled",
+        "super_res_status",
+        "rda_build_number",
+        "operational_mode",
+        "actual_elevation_cuts",
     )
     for k in keys:
         if k not in xd.attrs:
@@ -567,10 +591,15 @@ def test_sweep_attrs_match_xradar(nexrad_fixture):
     assert common, "no sweep groups in common"
 
     keys = (
-        "waveform_type", "channel_config", "super_resolution",
-        "sails_cut", "sails_sequence_number",
-        "mrle_cut", "mrle_sequence_number",
-        "mpda_cut", "base_tilt_cut",
+        "waveform_type",
+        "channel_config",
+        "super_resolution",
+        "sails_cut",
+        "sails_sequence_number",
+        "mrle_cut",
+        "mrle_sequence_number",
+        "mpda_cut",
+        "base_tilt_cut",
     )
     for sweep_key in common:
         rs, xs = rd[sweep_key], xd[sweep_key]
@@ -578,9 +607,7 @@ def test_sweep_attrs_match_xradar(nexrad_fixture):
             if k not in xs.attrs:
                 continue
             rd_v, xd_v = rs.attrs[k], xs.attrs[k]
-            assert rd_v == xd_v, (
-                f"{sweep_key}.{k!r}: radish={rd_v!r} xradar={xd_v!r}"
-            )
+            assert rd_v == xd_v, f"{sweep_key}.{k!r}: radish={rd_v!r} xradar={xd_v!r}"
 
 
 def test_radish_matches_xradar_structure(nexrad_fixture):
@@ -602,7 +629,9 @@ def test_radish_matches_xradar_structure(nexrad_fixture):
     # Root data_vars set + dtypes match.
     assert set(rd.data_vars) == set(xd.data_vars)
     for v in rd.data_vars:
-        assert rd[v].dtype == xd[v].dtype, f"root[{v}] dtype mismatch: {rd[v].dtype} vs {xd[v].dtype}"
+        assert (
+            rd[v].dtype == xd[v].dtype
+        ), f"root[{v}] dtype mismatch: {rd[v].dtype} vs {xd[v].dtype}"
 
     rd_keys = sorted(k for k in rd.children if k.startswith("sweep_"))
     xd_keys = sorted(k for k in xd.children if k.startswith("sweep_"))
@@ -616,9 +645,9 @@ def test_radish_matches_xradar_structure(nexrad_fixture):
         assert set(rs.sizes) == set(xs.sizes), f"{k}: dim names differ"
         for d in rs.sizes:
             rd_n, xd_n = rs.sizes[d], xs.sizes[d]
-            assert abs(rd_n - xd_n) <= max(3, int(0.01 * max(rd_n, xd_n))), (
-                f"{k}.{d}: lengths differ too much: rd={rd_n} xd={xd_n}"
-            )
+            assert abs(rd_n - xd_n) <= max(
+                3, int(0.01 * max(rd_n, xd_n))
+            ), f"{k}.{d}: lengths differ too much: rd={rd_n} xd={xd_n}"
         # Coord set + dim layout + dtype.
         assert set(rs.coords) == set(xs.coords), f"{k}: coords differ"
         for c in rs.coords:
@@ -631,10 +660,9 @@ def test_radish_matches_xradar_structure(nexrad_fixture):
             # Per-DataArray CF metadata: units / standard_name / long_name.
             for key in ("units", "standard_name", "long_name"):
                 if key in xs[v].attrs:
-                    assert rs[v].attrs.get(key) == xs[v].attrs[key], (
-                        f"{k}.{v}.attrs[{key!r}]: {rs[v].attrs.get(key)!r} != {xs[v].attrs[key]!r}"
-                    )
-
+                    assert (
+                        rs[v].attrs.get(key) == xs[v].attrs[key]
+                    ), f"{k}.{v}.attrs[{key!r}]: {rs[v].attrs.get(key)!r} != {xs[v].attrs[key]!r}"
 
 
 def test_scan_path_bytes_filelike_chunks_all_yield_same_metadata(nexrad_fixture):
@@ -677,9 +705,7 @@ def test_scan_path_bytes_filelike_chunks_all_yield_same_metadata(nexrad_fixture)
     assert md_path.nexrad_attrs == md_file.nexrad_attrs
     assert md_path.nexrad_attrs == md_chunks.nexrad_attrs
 
-    assert (
-        md_path.nexrad_attrs.sweep_attrs == md_bytes.nexrad_attrs.sweep_attrs
-    )
+    assert md_path.nexrad_attrs.sweep_attrs == md_bytes.nexrad_attrs.sweep_attrs
 
 
 def test_scan_rejects_unsupported_input_types():
@@ -699,3 +725,147 @@ def test_scan_explicit_backend_override(nexrad_fixture):
     md_alias = radish.scan(nexrad_fixture, backend="nexrad")
     md_auto = radish.scan(nexrad_fixture)
     assert md_canonical.instrument_name == md_alias.instrument_name == md_auto.instrument_name
+
+
+# ---------------------------------------------------------------------------
+# Plan 0009: real-time chunk streams (S/I/E objects), incomplete-sweep
+# detection, and the incomplete_sweep="drop"|"pad"|"keep" policy.
+# Gated on RADISH_NEXRAD_CHUNKS_DIR via the `nexrad_chunks_dir` fixture.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def klot_chunks(nexrad_chunks_dir):
+    """The 55 KLOT chunk objects as bytes, in scan order."""
+    paths = sorted(p for p in nexrad_chunks_dir.iterdir() if p.is_file())
+    return [p.read_bytes() for p in paths]
+
+
+class TestChunkStreamFullVolume:
+    def test_full_chunk_list_decodes_all_sweeps_without_warning(self, klot_chunks):
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as w:
+            _warnings.simplefilter("always")
+            dt = radish.open_datatree(klot_chunks)
+        assert len(dt.children) == 12
+        assert not [x for x in w if "incomplete" in str(x.message)]
+
+    def test_full_chunk_list_matches_concatenated_blob(self, klot_chunks):
+        v_chunks = radish.read_nexrad_chunks(klot_chunks)
+        v_blob = radish._radish.read_nexrad_bytes(b"".join(klot_chunks))
+        assert v_chunks.num_sweeps == v_blob.num_sweeps
+        assert v_chunks.incomplete_sweeps == []
+        a = v_chunks.get_sweep(0).get_moment("DBZH").data()
+        b = v_blob.get_sweep(0).get_moment("DBZH").data()
+        np.testing.assert_array_equal(a, b)
+
+
+class TestIncompleteSweepPolicy:
+    def test_default_drop_warns_and_keeps_original_names(self, klot_chunks):
+        with pytest.warns(UserWarning, match=r"Dropped 1 incomplete sweep\(s\): \[1\]"):
+            dt = radish.open_datatree(klot_chunks[:11])
+        assert sorted(dt.children) == ["sweep_0"]
+
+    def test_pad_reindexes_to_full_uniform_grid(self, klot_chunks):
+        dt = radish.open_datatree(klot_chunks[:11], incomplete_sweep="pad")
+        s1 = dt["sweep_1"].ds
+        assert s1.sizes["azimuth"] == 720
+        np.testing.assert_allclose(np.diff(s1.azimuth.values), 0.5)
+        observed_rows = int(np.isfinite(s1.DBZH.values).any(axis=1).sum())
+        assert 0 < observed_rows < 720
+        # Complete sweep untouched by pad.
+        assert dt["sweep_0"].ds.sizes["azimuth"] == 720
+
+    def test_keep_passes_partial_sweep_through(self, klot_chunks):
+        dt = radish.open_datatree(klot_chunks[:11], incomplete_sweep="keep")
+        assert dt["sweep_1"].ds.sizes["azimuth"] < 720
+
+    def test_incomplete_sweeps_property_on_low_level_read(self, klot_chunks):
+        v = radish.read_nexrad_chunks(klot_chunks[:11])
+        assert v.incomplete_sweeps == [1]
+        assert v.metadata.incomplete_sweeps == [1]
+        assert v.get_sweep(0).is_complete
+        assert not v.get_sweep(1).is_complete
+
+    def test_scan_chunks_reports_incomplete_indices(self, klot_chunks):
+        md = radish.scan_nexrad_chunks(klot_chunks[:11])
+        assert md.incomplete_sweeps == [1]
+
+    def test_headerless_i_only_stream_flags_leading_sweep(self, klot_chunks):
+        v = radish.read_nexrad_chunks(klot_chunks[1:6])
+        assert v.incomplete_sweeps == [0]
+
+    def test_invalid_policy_value_raises(self, klot_chunks):
+        with pytest.raises(ValueError, match="keep.*drop.*pad|expected"):
+            radish.read_nexrad_chunks(klot_chunks[:11], incomplete_sweep="bogus")
+
+    def test_policy_rejected_for_non_nexrad_backend(self, klot_chunks):
+        # bytes shape so the (backend, shape) dispatch row exists — the
+        # policy check must fire before any decode is attempted.
+        with pytest.raises(ValueError, match="only supported by the NEXRAD backend"):
+            radish.open_datatree(klot_chunks[0], backend="sigmet", incomplete_sweep="pad")
+
+    def test_open_dataset_group_uses_original_indices(self, klot_chunks):
+        ds = radish.open_dataset(klot_chunks[:11], group="sweep_0")
+        assert ds.sizes["azimuth"] == 720
+        with pytest.raises(ValueError, match="not present"):
+            radish.open_dataset(klot_chunks[:11], group="sweep_1")
+
+
+class TestChunkListValidation:
+    def test_out_of_order_volume_header_raises(self, klot_chunks):
+        with pytest.raises(ValueError, match="chunk 1"):
+            radish.read_nexrad_chunks([klot_chunks[1], klot_chunks[0]])
+
+    def test_empty_chunk_list_raises(self):
+        with pytest.raises(ValueError, match="empty chunk list"):
+            radish.read_nexrad_chunks([])
+
+    def test_single_i_chunk_bytes_auto_detect(self, klot_chunks):
+        assert radish.detect_backend(klot_chunks[5]) == "nexrad_level2"
+
+
+class TestXradarChunkParity:
+    """Compare drop/pad sweep sets against xradar when the installed
+    xradar carries openradar/xradar#332 (incomplete_sweep support)."""
+
+    @pytest.fixture
+    def xd_open(self):
+        xd = pytest.importorskip("xradar")
+        import inspect
+
+        sig = inspect.signature(xd.io.open_nexradlevel2_datatree)
+        if "incomplete_sweep" not in sig.parameters:
+            pytest.skip("installed xradar predates openradar/xradar#332")
+        return xd.io.open_nexradlevel2_datatree
+
+    def test_drop_mode_sweep_sets_match(self, klot_chunks, xd_open):
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            dt_x = xd_open(klot_chunks[:11], incomplete_sweep="drop")
+            dt_r = radish.open_datatree(klot_chunks[:11], incomplete_sweep="drop")
+        x_sweeps = sorted(c for c in dt_x.children if c.startswith("sweep_"))
+        r_sweeps = sorted(c for c in dt_r.children if c.startswith("sweep_"))
+        assert r_sweeps == x_sweeps
+
+    def test_pad_mode_azimuth_grids_match(self, klot_chunks, xd_open):
+        """Grid parity holds on this pinned fixture because xradar's
+        median-diff inference lands on the nominal 0.5 deg here. On live
+        partial sweeps with azimuth jitter, xradar can infer an
+        off-nominal resolution (observed: 0.49 deg -> a 735-ray grid on a
+        KLOT super-res cut, which no WSR-88D produces); radish always
+        uses MSG31 azimuth_resolution_spacing, so its grid stays the
+        ICD-nominal 720/360. That divergence is intentional."""
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            dt_x = xd_open(klot_chunks[:11], incomplete_sweep="pad")
+            dt_r = radish.open_datatree(klot_chunks[:11], incomplete_sweep="pad")
+        sx = dt_x["sweep_1"].ds
+        sr = dt_r["sweep_1"].ds
+        assert sr.sizes["azimuth"] == sx.sizes["azimuth"]
+        np.testing.assert_allclose(sr.azimuth.values, sx.azimuth.values)

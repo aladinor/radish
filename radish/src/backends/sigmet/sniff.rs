@@ -28,6 +28,7 @@ pub(crate) const SIGMET_SNIFF: SniffConfig = SniffConfig {
     extensions: EXTENSIONS,
     magic_prefixes: &[INGEST_HEADER_MAGIC, PRODUCT_HDR_MAGIC],
     filename_pattern: None,
+    head_pattern: None,
 };
 
 /// Combined check: extension OR magic.

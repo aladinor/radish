@@ -134,9 +134,9 @@ def test_sigmet_moment_set_matches_xradar(sigmet_fixture):
         xd_vars = {v for v in xd[skey].data_vars if xd[skey][v].ndim == 2}
         radish_only = rd_vars - xd_vars
         xradar_only = xd_vars - rd_vars
-        assert not radish_only, (
-            f"{skey}: radish emits moments xradar doesn't: {sorted(radish_only)}"
-        )
+        assert (
+            not radish_only
+        ), f"{skey}: radish emits moments xradar doesn't: {sorted(radish_only)}"
         assert not xradar_only, (
             f"{skey}: xradar emits moments radish doesn't: {sorted(xradar_only)} — "
             "likely a missing entry in `SUPPORTED_MOMENTS` or `iris_mapping_ids_match_xradar_table`"
@@ -159,9 +159,7 @@ def test_sigmet_time_coordinate_is_absolute_and_matches_xradar(sigmet_fixture):
     rd = xr.open_datatree(sigmet_fixture, engine="radish")
     xd = xradar.io.open_iris_datatree(str(sigmet_fixture))
 
-    sweep_keys = sorted(
-        k for k in rd.children if k.startswith("sweep_") and k in xd.children
-    )
+    sweep_keys = sorted(k for k in rd.children if k.startswith("sweep_") and k in xd.children)
     assert sweep_keys, "no overlapping sweep groups between readers"
 
     for skey in sweep_keys:
@@ -169,14 +167,14 @@ def test_sigmet_time_coordinate_is_absolute_and_matches_xradar(sigmet_fixture):
         xt = np.sort(xd[skey]["time"].values.astype("datetime64[ns]"))
         assert rt.shape == xt.shape, f"{skey}: time shape mismatch"
         # Sanity: radish time is no longer pinned to the 1970 epoch.
-        assert rt[0] > np.datetime64("2000-01-01"), (
-            f"{skey}: radish time[0]={rt[0]} looks epoch-relative (issue #28)"
-        )
+        assert rt[0] > np.datetime64(
+            "2000-01-01"
+        ), f"{skey}: radish time[0]={rt[0]} looks epoch-relative (issue #28)"
         # Sorted ray-time multisets must match xradar to within 1 ms.
         delta_ms = np.abs((rt - xt) / np.timedelta64(1, "ms"))
-        assert delta_ms.max() <= 1.0, (
-            f"{skey}: ray-time set diverges from xradar by up to {delta_ms.max()} ms"
-        )
+        assert (
+            delta_ms.max() <= 1.0
+        ), f"{skey}: ray-time set diverges from xradar by up to {delta_ms.max()} ms"
 
 
 def test_sigmet_moments_match_xradar(sigmet_fixture):
@@ -196,9 +194,7 @@ def test_sigmet_moments_match_xradar(sigmet_fixture):
     rd = xr.open_datatree(sigmet_fixture, engine="radish")
     xd = xradar.io.open_iris_datatree(str(sigmet_fixture))
 
-    sweep_keys = sorted(
-        k for k in rd.children if k.startswith("sweep_") and k in xd.children
-    )
+    sweep_keys = sorted(k for k in rd.children if k.startswith("sweep_") and k in xd.children)
     assert sweep_keys, "no overlapping sweep groups between readers"
 
     # The ODIM-mapped moments issue #28 is about. The IRIS-extended /

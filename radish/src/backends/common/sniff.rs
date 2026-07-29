@@ -40,6 +40,11 @@ pub(crate) struct SniffConfig {
     /// Optional filename-pattern test — used when the file lacks an
     /// extension altogether (e.g. NEXRAD's `KLOT20260310_231412_V06`).
     pub filename_pattern: Option<fn(&Path) -> bool>,
+    /// Optional head-bytes test for magics that are not plain prefixes
+    /// (e.g. NEXRAD real-time chunk records: a 4-byte LDM control word
+    /// and *then* `BZh`). Receives up to [`MAGIC_PEEK_BYTES`] from the
+    /// head — implementations must handle shorter slices.
+    pub head_pattern: Option<fn(&[u8]) -> bool>,
 }
 
 /// Path-based sniff: extension match → magic-byte read → filename pattern.
@@ -55,15 +60,11 @@ pub(crate) fn looks_like(path: &Path, cfg: &SniffConfig) -> bool {
             return true;
         }
     }
-    if !cfg.magic_prefixes.is_empty() {
+    if !cfg.magic_prefixes.is_empty() || cfg.head_pattern.is_some() {
         if let Ok(mut file) = File::open(path) {
             let mut buf = [0u8; MAGIC_PEEK_BYTES];
             if let Ok(n) = file.read(&mut buf) {
-                if cfg
-                    .magic_prefixes
-                    .iter()
-                    .any(|m| n >= m.len() && &buf[..m.len()] == *m)
-                {
+                if looks_like_bytes(&buf[..n], cfg) {
                     return true;
                 }
             }
@@ -72,12 +73,13 @@ pub(crate) fn looks_like(path: &Path, cfg: &SniffConfig) -> bool {
     false
 }
 
-/// In-memory sniff: just the magic-prefix check. Path-only signals
-/// (extension, filename) don't apply to a buffer.
+/// In-memory sniff: magic-prefix check plus the optional head pattern.
+/// Path-only signals (extension, filename) don't apply to a buffer.
 pub(crate) fn looks_like_bytes(head: &[u8], cfg: &SniffConfig) -> bool {
     cfg.magic_prefixes
         .iter()
         .any(|m| head.len() >= m.len() && &head[..m.len()] == *m)
+        || cfg.head_pattern.is_some_and(|pattern| pattern(head))
 }
 
 #[cfg(test)]
@@ -102,6 +104,7 @@ mod tests {
             extensions: &["raw", "ar2v"],
             magic_prefixes: &[],
             filename_pattern: None,
+            head_pattern: None,
         };
         assert!(looks_like(&PathBuf::from("/tmp/whatever.RAW"), &cfg));
         assert!(looks_like(&PathBuf::from("/tmp/whatever.ar2v"), &cfg));
@@ -114,6 +117,7 @@ mod tests {
             extensions: &[],
             magic_prefixes: &[],
             filename_pattern: Some(nexrad_pat),
+            head_pattern: None,
         };
         assert!(looks_like(
             &PathBuf::from("/data/KLOT20260310_231412_V06"),
@@ -128,6 +132,7 @@ mod tests {
             extensions: &[],
             magic_prefixes: &[b"AR2V", b"\x1f\x8b"],
             filename_pattern: None,
+            head_pattern: None,
         };
         assert!(looks_like_bytes(b"AR2V0006.001", &cfg));
         assert!(looks_like_bytes(&[0x1f, 0x8b, 0x08, 0x00], &cfg));
@@ -143,6 +148,7 @@ mod tests {
             extensions: &[],
             magic_prefixes: &[b"AR2V"],
             filename_pattern: None,
+            head_pattern: None,
         };
         assert!(!looks_like(&PathBuf::from("/no/such/file"), &cfg));
     }
@@ -165,6 +171,7 @@ mod tests {
             extensions: &[],
             magic_prefixes: &[b"AR2V"],
             filename_pattern: None,
+            head_pattern: None,
         };
         assert!(looks_like(tmp.path(), &cfg));
     }
@@ -179,6 +186,7 @@ mod tests {
             extensions: &[],
             magic_prefixes: &[b"AR2V", b"\x89HDF"],
             filename_pattern: None,
+            head_pattern: None,
         };
         assert!(!looks_like(tmp.path(), &cfg));
     }
@@ -194,6 +202,7 @@ mod tests {
             extensions: &[],
             magic_prefixes: &[b"AR2V"],
             filename_pattern: None,
+            head_pattern: None,
         };
         assert!(!looks_like(tmp.path(), &cfg));
     }

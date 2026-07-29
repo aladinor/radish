@@ -14,6 +14,7 @@ use std::path::Path;
 use crate::{backends::RadarBackend, RadishError, Result, SweepData, VolumeData, VolumeMetadata};
 
 mod adapter;
+pub use adapter::IncompleteSweepPolicy;
 mod attrs;
 // Internal byte-level NEXRAD decoder. Phase 7 wires it into the
 // runtime read path; some helpers (e.g. `read_i32_be`) remain
@@ -107,8 +108,7 @@ impl RadarBackend for NexradBackend {
     /// follows xradar's convention since their `open_nexradlevel2_datatree`
     /// also expects pre-decompressed bytes when given a `bytes` input.
     fn read_bytes_volume(&self, data: Vec<u8>) -> Result<VolumeData> {
-        let scan = decode_bytes(&data)?;
-        adapter::convert_scan(scan, Path::new("<bytes>"))
+        self.read_bytes_volume_with(data, IncompleteSweepPolicy::Keep)
     }
 
     fn scan_file(&self, path: &Path) -> Result<VolumeMetadata> {
@@ -132,8 +132,7 @@ impl RadarBackend for NexradBackend {
     }
 
     fn read_volume(&self, path: &Path) -> Result<VolumeData> {
-        let scan = decode_path(path)?;
-        adapter::convert_scan(scan, path)
+        self.read_volume_with(path, IncompleteSweepPolicy::Keep)
     }
 }
 
@@ -157,9 +156,43 @@ impl NexradBackend {
     /// rays survive — incomplete trailing sweeps come through with fewer
     /// rays than the VCP's expected count.
     pub fn read_chunks_volume(&self, chunks: Vec<Vec<u8>>) -> Result<VolumeData> {
-        let combined = concat_chunks(chunks);
+        self.read_chunks_volume_with(chunks, IncompleteSweepPolicy::Keep)
+    }
+
+    /// [`Self::read_volume`] with an explicit incomplete-sweep policy
+    /// (plan 0009). `Keep` is byte-identical to `read_volume`.
+    pub fn read_volume_with(
+        &self,
+        path: &Path,
+        policy: IncompleteSweepPolicy,
+    ) -> Result<VolumeData> {
+        let scan = decode_path(path)?;
+        adapter::convert_scan(scan, path, policy)
+    }
+
+    /// [`Self::read_bytes_volume`] with an explicit incomplete-sweep
+    /// policy (plan 0009).
+    pub fn read_bytes_volume_with(
+        &self,
+        data: Vec<u8>,
+        policy: IncompleteSweepPolicy,
+    ) -> Result<VolumeData> {
+        let scan = decode_bytes(&data)?;
+        adapter::convert_scan(scan, Path::new("<bytes>"), policy)
+    }
+
+    /// [`Self::read_chunks_volume`] with an explicit incomplete-sweep
+    /// policy (plan 0009) — the natural entry point for partial
+    /// real-time chunk lists, where the trailing sweep is usually
+    /// still in progress.
+    pub fn read_chunks_volume_with(
+        &self,
+        chunks: Vec<Vec<u8>>,
+        policy: IncompleteSweepPolicy,
+    ) -> Result<VolumeData> {
+        let combined = concat_chunks(chunks)?;
         let scan = decode_bytes(&combined)?;
-        adapter::convert_scan(scan, Path::new("<chunks>"))
+        adapter::convert_scan(scan, Path::new("<chunks>"), policy)
     }
 
     /// Scan a NEXRAD Level 2 volume from a single in-memory byte buffer
@@ -199,7 +232,7 @@ impl NexradBackend {
     /// [`Self::scan_bytes_volume`]: chunks must be raw, already-
     /// decompressed bytes from each S3 object.
     pub fn scan_chunks_volume(&self, chunks: Vec<Vec<u8>>) -> Result<VolumeMetadata> {
-        let combined = concat_chunks(chunks);
+        let combined = concat_chunks(chunks)?;
         let scan = decode_bytes(&combined)?;
         adapter::build_volume_metadata(&scan, Path::new("<chunks>"))
     }
@@ -209,13 +242,38 @@ impl NexradBackend {
 /// allocation. The implementation is straightforward but worth keeping in
 /// one place: chunk count can be in the dozens for a typical KXXX volume,
 /// so pre-sizing the destination matters.
-fn concat_chunks(chunks: Vec<Vec<u8>>) -> Vec<u8> {
+///
+/// Rejects what is *provably* wrong before the decoder sees it:
+///
+/// * an empty list (nothing to decode — the decoder's
+///   `UnsupportedRecordFormat` for zero bytes is a worse message);
+/// * an `AR2V` volume header in any chunk after the first — the `S`
+///   chunk must lead, so a later header means the list is out of order
+///   or mixes volumes, and concatenating would silently corrupt.
+///
+/// A list with *no* volume header anywhere stays allowed: headerless
+/// `I`/`E` streams decode (site and VCP recovered from MSG_31 / a
+/// synthetic MSG_5), just with degraded volume metadata.
+fn concat_chunks(chunks: Vec<Vec<u8>>) -> Result<Vec<u8>> {
+    if chunks.is_empty() {
+        return Err(RadishError::InvalidFormat(
+            "empty chunk list — pass the volume's chunks in scan order (S, I01.., E)".to_string(),
+        ));
+    }
+    for (idx, chunk) in chunks.iter().enumerate().skip(1) {
+        if chunk.starts_with(sniff::AR2V_MAGIC) {
+            return Err(RadishError::InvalidFormat(format!(
+                "chunk {idx} starts with an AR2V volume header — the `S` chunk must be \
+                 first and all chunks must come from a single volume in scan order"
+            )));
+        }
+    }
     let total: usize = chunks.iter().map(|c| c.len()).sum();
     let mut out = Vec::with_capacity(total);
     for chunk in chunks {
         out.extend_from_slice(&chunk);
     }
-    out
+    Ok(out)
 }
 
 /// Decode an Archive II buffer through the in-tree decoder. The
@@ -269,15 +327,30 @@ mod tests {
         let a = vec![0x41, 0x52, 0x32, 0x56]; // "AR2V" magic
         let b = vec![4, 5, 6, 7, 8, 9];
         let c = vec![10, 11];
-        let out = concat_chunks(vec![a.clone(), b.clone(), c.clone()]);
+        let out = concat_chunks(vec![a.clone(), b.clone(), c.clone()]).expect("valid order");
         let expected: Vec<u8> = a.into_iter().chain(b).chain(c).collect();
         assert_eq!(out, expected);
     }
 
     #[test]
-    fn concat_chunks_empty_returns_empty() {
-        let out = concat_chunks(Vec::<Vec<u8>>::new());
-        assert!(out.is_empty());
+    fn concat_chunks_empty_list_errors() {
+        let err = concat_chunks(Vec::<Vec<u8>>::new()).expect_err("empty must error");
+        assert!(err.to_string().contains("empty chunk list"), "got: {err}");
+    }
+
+    #[test]
+    fn concat_chunks_rejects_volume_header_after_first_chunk() {
+        // An S chunk in second position = out-of-order list or two
+        // volumes mixed — either way concatenation would corrupt.
+        let i_chunk = vec![0x00, 0x01, 0x5f, 0x05, b'B', b'Z', b'h', b'9'];
+        let s_chunk = b"AR2V0006.901xxxxxxxxxxxx".to_vec();
+        let err = concat_chunks(vec![i_chunk.clone(), s_chunk.clone()])
+            .expect_err("late header must error");
+        assert!(err.to_string().contains("chunk 1"), "got: {err}");
+
+        // Headerless list (I/E only) and header-first list stay fine.
+        assert!(concat_chunks(vec![i_chunk.clone(), i_chunk.clone()]).is_ok());
+        assert!(concat_chunks(vec![s_chunk, i_chunk]).is_ok());
     }
 
     /// Real-fixture round-trip test: read the entire fixture as bytes, split

@@ -38,12 +38,51 @@ pub(crate) const NEXRAD_SNIFF: SniffConfig = SniffConfig {
     extensions: EXTENSIONS,
     magic_prefixes: &[AR2V_MAGIC, GZIP_MAGIC],
     filename_pattern: Some(matches_nexrad_filename),
+    head_pattern: Some(looks_like_chunk_bytes),
 };
 
 /// Returns `true` if the path's file name matches the canonical NEXRAD naming
-/// convention (e.g. `KLOT20260310_231412_V06`).
+/// convention (e.g. `KLOT20260310_231412_V06`) or the real-time chunk object
+/// convention (e.g. `20260328-201457-015-I`).
 pub(crate) fn matches_nexrad_filename(path: &Path) -> bool {
-    nexrad_icao_from_name(path).is_some()
+    nexrad_icao_from_name(path).is_some() || matches_chunk_object_name(path)
+}
+
+/// Real-time chunk record magic: a 4-byte big-endian LDM control word (the
+/// record's compressed size; the sign bit marks a volume's last record)
+/// followed by a bzip2 stream header `BZh<level>`. Headerless `I`/`E`
+/// objects from the `unidata-nexrad-level2-chunks` bucket start exactly
+/// like this — no `AR2V` prefix for the plain-magic path to hit.
+///
+/// Stronger than the upstream `nexrad-data` check (`data[4..6] == "BZ"`),
+/// which runs in a chunk-only context: radish sniffs arbitrary buffers, so
+/// we also require the bzip2 level digit and a plausible record size.
+/// Real compressed LDM records run from a few hundred bytes (`S`-chunk
+/// metadata records) to a few MB.
+pub(crate) fn looks_like_chunk_bytes(head: &[u8]) -> bool {
+    if head.len() < 8 || &head[4..7] != b"BZh" || !head[7].is_ascii_digit() {
+        return false;
+    }
+    let size = i32::from_be_bytes([head[0], head[1], head[2], head[3]]).unsigned_abs();
+    (64..=16 * 1024 * 1024).contains(&size)
+}
+
+/// `YYYYMMDD-HHMMSS-NNN-[SIE]` — the object naming convention of the
+/// `unidata-nexrad-level2-chunks` bucket (volume start time, 1-based
+/// chunk sequence number, chunk type).
+fn matches_chunk_object_name(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let b = name.as_bytes();
+    b.len() == 21
+        && b[..8].iter().all(|c| c.is_ascii_digit())
+        && b[8] == b'-'
+        && b[9..15].iter().all(|c| c.is_ascii_digit())
+        && b[15] == b'-'
+        && b[16..19].iter().all(|c| c.is_ascii_digit())
+        && b[19] == b'-'
+        && matches!(b[20], b'S' | b'I' | b'E')
 }
 
 /// Extracts the 4-letter ICAO from a path whose file name matches the
@@ -144,6 +183,59 @@ mod tests {
         // Path doesn't exist and has no NEXRAD-like name; the shared
         // dispatcher's three signals all fall through cleanly.
         assert!(!looks_like_nexrad(&PathBuf::from("/no/such/file/here.txt")));
+    }
+
+    #[test]
+    fn chunk_object_names_match() {
+        assert!(matches_nexrad_filename(&PathBuf::from(
+            "/vol/20260328-201457-015-I"
+        )));
+        assert!(matches_nexrad_filename(&PathBuf::from(
+            "20260328-201457-001-S"
+        )));
+        assert!(matches_nexrad_filename(&PathBuf::from(
+            "20260328-201457-055-E"
+        )));
+        // Wrong type letter, wrong separators, wrong lengths.
+        assert!(!matches_nexrad_filename(&PathBuf::from(
+            "20260328-201457-055-X"
+        )));
+        assert!(!matches_nexrad_filename(&PathBuf::from(
+            "20260328_201457_055_I"
+        )));
+        assert!(!matches_nexrad_filename(&PathBuf::from(
+            "2026028-201457-055-I"
+        )));
+    }
+
+    #[test]
+    fn chunk_bytes_magic_requires_control_word_and_bzh() {
+        // Real `I`-chunk head from the KLOT fixture: size 0x00015f05,
+        // then the bzip2 stream header.
+        assert!(looks_like_chunk_bytes(&[
+            0x00, 0x01, 0x5f, 0x05, b'B', b'Z', b'h', b'9'
+        ]));
+        // Negative control word (`E` chunk, last record of the volume).
+        assert!(looks_like_chunk_bytes(&[
+            0xff, 0xff, 0x7b, 0xb8, b'B', b'Z', b'h', b'9'
+        ]));
+        // `BZh` at offset 4 but an absurd record size — rejected.
+        assert!(!looks_like_chunk_bytes(&[
+            0x7f, 0xff, 0xff, 0xff, b'B', b'Z', b'h', b'9'
+        ]));
+        // Bare bzip2 stream (no control word) — not a chunk record.
+        assert!(!looks_like_chunk_bytes(b"BZh91AY&SY"));
+        // Missing level digit / short buffers — rejected, no panic.
+        assert!(!looks_like_chunk_bytes(&[
+            0x00, 0x01, 0x5f, 0x05, b'B', b'Z', b'h', b'!'
+        ]));
+        assert!(!looks_like_chunk_bytes(&[0x00, 0x01, 0x5f]));
+        assert!(!looks_like_chunk_bytes(b""));
+        // And the sniff-config plumbing routes it through the shared
+        // in-memory driver.
+        assert!(looks_like_ar2v_bytes(&[
+            0x00, 0x01, 0x5f, 0x05, b'B', b'Z', b'h', b'9'
+        ]));
     }
 
     #[test]

@@ -476,6 +476,7 @@ mod tests {
         Sweep {
             elevation_number,
             radials: Vec::new(),
+            complete: true,
         }
     }
 
@@ -490,6 +491,7 @@ mod tests {
             .map(|(i, ts)| Radial {
                 azimuth_number: i as u16,
                 azimuth_angle_degrees: i as f32,
+                azimuth_resolution_spacing: 0,
                 elevation_number,
                 elevation_angle_degrees: 0.5,
                 radial_status: 0,
@@ -519,6 +521,7 @@ mod tests {
         Sweep {
             elevation_number,
             radials,
+            complete: true,
         }
     }
 }

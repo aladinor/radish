@@ -107,6 +107,17 @@ pub struct SweepMetadata {
 
     /// Sigmet/IRIS-specific sweep attrs. `None` for non-Sigmet sweeps.
     pub sigmet: Option<SigmetSweepAttrs>,
+
+    /// `false` when the sweep's data is provably partial — e.g. a
+    /// NEXRAD volume truncated mid-sweep (real-time chunk streams,
+    /// plan 0009). Formats without partial-volume semantics always
+    /// report `true`.
+    #[serde(default = "default_true")]
+    pub is_complete: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl SweepMetadata {
@@ -127,6 +138,7 @@ impl SweepMetadata {
             unambiguous_range: None,
             nexrad: None,
             sigmet: None,
+            is_complete: true,
         }
     }
 }

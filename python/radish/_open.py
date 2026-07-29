@@ -17,6 +17,7 @@ Adding a new format backend is now a two-step ritual:
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from radish._radish import (
@@ -180,16 +181,32 @@ def detect_backend(input_obj: Any) -> Optional[str]:
 # Dispatch table: (backend_name, input_shape) -> reader callable returning
 # `radish.VolumeData`. Each cell is one Rust→Python entry point. Adding a
 # format means appending its rows here.
-_DISPATCH: Dict[Tuple[str, InputShape], Callable[[Any], Any]] = {
-    ("nexrad_level2", SHAPE_PATH): lambda obj: read_nexrad(os.fspath(obj)),
-    ("nexrad_level2", SHAPE_BYTES): lambda obj: read_nexrad_bytes(bytes(obj)),
-    ("nexrad_level2", SHAPE_FILELIKE): lambda obj: read_nexrad_bytes(obj.read()),
-    ("nexrad_level2", SHAPE_CHUNKS): lambda obj: read_nexrad_chunks(_materialize_chunks(obj)),
+_DISPATCH: Dict[Tuple[str, InputShape], Callable[..., Any]] = {
+    # NEXRAD rows accept **kw so `_read_volume` can thread
+    # `incomplete_sweep` through; the other backends have no
+    # partial-volume semantics and keep single-argument readers.
+    ("nexrad_level2", SHAPE_PATH): lambda obj, **kw: read_nexrad(os.fspath(obj), **kw),
+    ("nexrad_level2", SHAPE_BYTES): lambda obj, **kw: read_nexrad_bytes(bytes(obj), **kw),
+    ("nexrad_level2", SHAPE_FILELIKE): lambda obj, **kw: read_nexrad_bytes(obj.read(), **kw),
+    ("nexrad_level2", SHAPE_CHUNKS): lambda obj, **kw: read_nexrad_chunks(
+        _materialize_chunks(obj), **kw
+    ),
     ("cfradial1", SHAPE_PATH): lambda obj: read_cfradial1(os.fspath(obj)),
     ("sigmet", SHAPE_PATH): lambda obj: read_sigmet(os.fspath(obj)),
     ("sigmet", SHAPE_BYTES): lambda obj: read_sigmet_bytes(bytes(obj)),
     ("sigmet", SHAPE_FILELIKE): lambda obj: read_sigmet_bytes(obj.read()),
 }
+
+# The one high-level default for NEXRAD's partial-volume policy —
+# referenced by both the read path and the warning path so they can
+# never drift apart. "drop" mirrors xradar #332.
+_DEFAULT_INCOMPLETE_SWEEP = "drop"
+
+# Backends whose readers accept the `incomplete_sweep` keyword. Every
+# other backend has no partial-volume semantics and rejects an explicit
+# value. New per-backend reader kwargs extend this set + the `**kw`
+# rows in `_DISPATCH`, not the shared `_read_volume` body.
+_POLICY_BACKENDS = frozenset({"nexrad_level2"})
 
 # Metadata-only twin of `_DISPATCH`. Returns `VolumeMetadata` instead
 # of `VolumeData` — same input-shape detection, ~3× faster on the
@@ -211,8 +228,14 @@ _SCAN_DISPATCH: Dict[Tuple[str, InputShape], Callable[[Any], Any]] = {
 }
 
 
-def _read_volume(input_obj: Any, backend: Optional[str]):
-    """Pick the right Rust reader for `(backend, shape)` and decode."""
+def _read_volume(input_obj: Any, backend: Optional[str], incomplete_sweep: Optional[str] = None):
+    """Pick the right Rust reader for `(backend, shape)` and decode.
+
+    ``incomplete_sweep`` (``"drop"`` / ``"pad"`` / ``"keep"``) applies to
+    the NEXRAD backend only, where ``None`` means the xradar-parity
+    default ``"drop"``. Passing an explicit value with any other backend
+    raises — those formats have no partial-volume semantics.
+    """
     shape = _classify_shape(input_obj)
     if backend is None:
         backend = _sniff_backend(input_obj, shape)
@@ -232,7 +255,35 @@ def _read_volume(input_obj: Any, backend: Optional[str]):
             f"(Common: cfradial1 only accepts paths — `libnetcdf` doesn't expose "
             f"an in-memory open. Pass a path or use NEXRAD bytes/chunks instead.)"
         )
+    if backend in _POLICY_BACKENDS:
+        return reader(input_obj, incomplete_sweep=incomplete_sweep or _DEFAULT_INCOMPLETE_SWEEP)
+    if incomplete_sweep is not None:
+        raise ValueError(
+            f"incomplete_sweep is only supported by the NEXRAD backend; "
+            f"backend {backend!r} has no partial-volume semantics."
+        )
     return reader(input_obj)
+
+
+def _warn_dropped_sweeps(volume: Any, incomplete_sweep: Optional[str]) -> None:
+    """xradar-#332-parity warnings for the default ``"drop"`` mode."""
+    if (incomplete_sweep or _DEFAULT_INCOMPLETE_SWEEP) != "drop":
+        return
+    dropped = sorted(volume.incomplete_sweeps)
+    if not dropped:
+        return
+    warnings.warn(
+        f"Dropped {len(dropped)} incomplete sweep(s): {dropped}. "
+        f"Use incomplete_sweep='pad' to include them with NaN-filled rays.",
+        UserWarning,
+        stacklevel=3,
+    )
+    if volume.num_sweeps == 0:
+        warnings.warn(
+            "All sweeps are incomplete. Returning a root-only DataTree.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _scan_volume(input_obj: Any, backend: Optional[str]):
@@ -268,6 +319,7 @@ def open_datatree(
     backend: Optional[str] = None,
     *,
     drop_variables: Optional[Iterable[str]] = None,
+    incomplete_sweep: Optional[str] = None,
 ) -> "Any":  # xarray.DataTree
     """Open a radar volume as an ``xarray.DataTree``.
 
@@ -284,6 +336,17 @@ def open_datatree(
     drop_variables
         Reserved for API parity with xarray's plugin ``open_datatree``;
         currently unused.
+    incomplete_sweep
+        NEXRAD only — what to do with sweeps whose data is provably
+        partial (real-time chunk streams / truncated volumes).
+        ``None`` (default) behaves as ``"drop"``: incomplete sweeps are
+        omitted with a warning, and surviving sweeps keep their original
+        ``sweep_N`` names (gaps stay gaps — xradar #332 parity).
+        ``"pad"`` reindexes them onto the full 360/720-ray azimuth grid
+        with NaN-filled missing rays. ``"keep"`` passes them through
+        as-is with fewer rays (flagged via each sweep's ``is_complete``).
+        Passing an explicit value with a non-NEXRAD backend raises
+        ``ValueError``.
 
     Returns
     -------
@@ -300,7 +363,8 @@ def open_datatree(
         radish.open_datatree("foo.nc", backend="cfradial1")    # explicit
     """
     backend = _normalize_backend(backend)
-    volume = _read_volume(filename_or_obj, backend)
+    volume = _read_volume(filename_or_obj, backend, incomplete_sweep)
+    _warn_dropped_sweeps(volume, incomplete_sweep)
     return _build_datatree(volume, _format_for_root(backend or _infer_backend_from_volume(volume)))
 
 
@@ -310,18 +374,34 @@ def open_dataset(
     *,
     group: Optional[str] = None,
     drop_variables: Optional[Iterable[str]] = None,
+    incomplete_sweep: Optional[str] = None,
 ) -> "Any":  # xarray.Dataset
     """Open a single sweep as an ``xarray.Dataset``. Use ``open_datatree`` for
     multi-sweep volumes.
 
-    See :func:`open_datatree` for input-shape and ``backend`` semantics.
+    See :func:`open_datatree` for input-shape, ``backend``, and
+    ``incomplete_sweep`` semantics. ``group`` refers to *original*
+    sweep names: with the default ``incomplete_sweep="drop"`` on a
+    truncated NEXRAD volume, ``group="sweep_2"`` still means the sweep
+    originally at index 2 even when ``sweep_1`` was dropped.
     """
     backend = _normalize_backend(backend)
-    volume = _read_volume(filename_or_obj, backend)
+    volume = _read_volume(filename_or_obj, backend, incomplete_sweep)
     # Lazy import to break the radish ↔ xarray_backend module cycle.
-    from radish.backends.xarray_backend import RadishBackendEntrypoint, _parse_sweep_index
+    from radish.backends.xarray_backend import RadishBackendEntrypoint
 
-    sweep_idx = _parse_sweep_index(group, volume.num_sweeps)
+    # Resolve `group` against the volume's sweep names so dropped
+    # sweeps leave gaps instead of silently shifting every later index.
+    if not group:
+        sweep_idx = 0
+    else:
+        sweep_names = list(volume.metadata.sweep_group_names)
+        try:
+            sweep_idx = sweep_names.index(group)
+        except ValueError:
+            raise ValueError(
+                f"sweep group {group!r} not present; available: {sweep_names}"
+            ) from None
     sweep = volume.get_sweep(sweep_idx)
     return RadishBackendEntrypoint()._sweep_to_dataset(sweep, volume.metadata)
 

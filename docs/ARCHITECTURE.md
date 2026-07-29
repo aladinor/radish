@@ -259,6 +259,39 @@ classDiagram
 4. **Efficient Memory Layout**: Use ndarray for numerical data
 5. **Minimal Python Overhead**: Keep hot paths in Rust
 
+## NEXRAD Real-Time Chunk Streams
+
+The `unidata-nexrad-level2-chunks` S3 feed splits each volume into many
+small objects named `YYYYMMDD-HHMMSS-NNN-[SIE]`:
+
+- **S** (start): the 24-byte `AR2V` volume header, then an LDM record —
+  a 4-byte big-endian control word (compressed size) followed by a
+  bzip2 stream.
+- **I** (intermediate): one control-word-prefixed bzip2 LDM record, no
+  volume header.
+- **E** (end): same as `I`, but the control word is **negative** (the
+  Archive II last-record convention; `split_ldm_records` takes
+  `unsigned_abs()`).
+
+Byte-concatenating `[S, I…, E]` therefore reproduces a valid Archive II
+record stream, and `NexradBackend::read_chunks_volume` feeds exactly
+that to the ordinary decoder (`concat_chunks` validates the order: an
+`AR2V` header anywhere but chunk 0 is rejected; headerless `I`/`E`-only
+lists are allowed and decode with degraded volume metadata).
+
+**Sweep completeness** is decided in
+`decode::model::group_radials_into_sweeps`: a sweep is complete only
+when its first radial is a start marker (`radial_status` 0/3/5), it was
+closed voluntarily (end marker 2/4 or a following sweep's start —
+not by running out of data), and, when MSG31's
+`azimuth_resolution_spacing` is known, it carries at least the nominal
+rotation's ray count (catches interior chunk gaps that markers alone
+cannot). The flag flows through `SweepMetadata.is_complete` and
+`VolumeMetadata.incomplete_sweep_indices`; the adapter's
+`IncompleteSweepPolicy` (keep/drop/pad) turns it into behavior, and
+`radish.open_datatree(..., incomplete_sweep=…)` defaults to `"drop"`
+for xradar-#332 parity.
+
 ## Extension Points
 
 1. **New Backends**: Implement `RadarBackend` trait
