@@ -342,32 +342,74 @@ velocity message codes, and two different azimuth resolutions. `N3B` at
 
 ## 8. Phase D — the wasm binding
 
+**Status: DONE** (`plans/0011-nexrad-level3-wasm-backend.md` Phase 7).
+
 New crate `wasm/` (sibling of `python/`), mirroring how the pyo3 binding is
 structured.
 
-- [ ] `crate-type = ["cdylib"]`, `wasm-bindgen`, and `radish` with
-      `default-features = false`.
-- [ ] Export the raw-code path as **zero-copy**. The consumer's next call is
-      `gl.texImage2D` with the code array; a copy at the wasm/JS boundary is pure
-      waste. `bytemuck::cast_slice` into a `Uint8Array` view over wasm linear
-      memory. **Document the lifetime**: that view is invalidated when wasm
-      memory grows.
-- [ ] Keep it a **library, not an application**. No fetch, no S3, no worker
-      logic inside the crate — bytes in, decoded sweep out. The consumer owns
-      networking. This keeps the crate testable natively and keeps radish from
-      growing a browser dependency.
-- [ ] **Measure and record**: `wasm-opt -O3` binary size (gzipped), and decode
-      milliseconds on the real 224 KB `LOT_N0B` fixture — not a synthetic buffer.
+- [x] `crate-type = ["cdylib"]`, `wasm-bindgen`, and `radish` with
+      `default-features = false` — as a **direct `path` dependency**, not
+      `{ workspace = true, default-features = false }`: Cargo only honours a
+      member's `default-features = false` override on a workspace-inherited
+      dependency if the *workspace-level* entry also declares
+      `default-features = false`, which ours doesn't (every other member
+      needs the default `native` feature). The workspace-inherited form
+      silently no-ops — caught via `cargo tree -p radish-wasm`, which still
+      pulled in `hdf5`/`netcdf`/`rayon` before this was fixed. CI now asserts
+      this directly (`.github/workflows/rust-ci.yml`'s `wasm` job).
+- [x] Exports `codes()` as **zero-copy**: `js_sys::Uint8Array::view` over the
+      wasm linear memory backing the decoded product's raw codes array.
+      Lifetime documented on the method itself (invalidated if the
+      `DecodedProduct` instance is freed or wasm memory grows before the
+      caller reads/copies it) — not `bytemuck::cast_slice` as originally
+      sketched here, since the codes are already `u8`; no cast needed, just
+      the view.
+- [x] Also exports `dealiasRegionBased` (velocity + mask in, fold-count
+      `Int32Array` out) — the reason Phase 5/6 targeted wasm at all; a
+      corrected-velocity display needs both decode and dealiasing with no
+      server in the path.
+- [x] **Library, not an application.** No fetch, no S3, no worker logic — bytes
+      (or typed arrays) in, decoded/dealiased sweep out.
+- [x] **Measured, not assumed** (Node.js harness, `wasm-bindgen --target
+      nodejs` + `performance.now()`, real fixtures — see
+      `plans/0011-nexrad-level3-wasm-backend.md` Phase 7 for the full
+      methodology):
 
-**Budget, for calibration.** A comparable Rust->WASM radar module (Mora &
-Perdomo Charry, benchmarked in
-`/home/alfonso-ladino/python/radar-animation/docs/competitive-landscape.md` §4)
-ships at **54 kB** after `wasm-opt -O3` — though it does geometry, not decoding,
-so it is a floor rather than a target. AtmoScale's stated reject threshold is
-**> ~100 KB gzipped** for the decompressor alone. Record the real number either
-way; the budget should be re-argued from a measurement, not from feel.
+  | Metric | Value |
+  |---|---|
+  | Raw `.wasm`, rustc release (opt-level 3, LTO, strip) | 170,470 B |
+  | After `wasm-opt -O3 --all-features` | 159,237 B |
+  | After `wasm-opt -Oz --all-features` | 158,038 B |
+  | Gzip -9, raw | 63,935 B |
+  | Gzip -9, after `wasm-opt -O3` | 64,017 B |
+  | Gzip -9, after `wasm-opt -Oz` | 64,184 B |
+  | `decodeNexradLevel3`, real 224,559 B `LOT_N0B` (720×1840) | 21.9 ms median (n=50) |
+  | `dealiasRegionBased`, real KLOT sweep (720×1192, 225,842 nonzero folds) | 578.3 ms median (n=10) |
 
-**Exit:** a browser decodes one real NIDS product with no server in the path.
+  **The gzip-size finding is worth stating plainly, since it contradicts the
+  intuitive assumption**: `wasm-opt`'s size optimizations shrink the *raw*
+  binary (170,470 → 158,038 B, ~7% smaller at `-Oz`) but very slightly
+  *increase* the *gzipped* size (63,935 → 64,184 B) — code restructured for
+  compactness can reduce the repetition gzip's LZ77 window would otherwise
+  compress well. Since browsers transfer the gzipped (or brotli'd) bytes,
+  not the raw ones, `wasm-opt` here is close to a wash on transfer size for
+  this module and buys nothing worth citing as a win — recorded honestly
+  rather than assuming `-O3`/`-Oz` "obviously" helps.
+  All figures are single-machine measurements (this session's dev box), not
+  a cross-platform benchmark claim.
+  The dealiasing figure (fold count 225,842) matches the native Rust
+  criterion benchmark and the Python-binding smoke test exactly — real
+  end-to-end confirmation the wasm build's output is bit-identical to
+  native, not just "runs without crashing."
+
+**The unverified "54 kB" figure originally cited here has been removed** —
+grepped the whole `radar-animation/docs/competitive-landscape.md` this
+session and it isn't there; do not re-cite it. The real, measured numbers
+above (~64 KB gzipped for decode+dealias combined) replace it.
+
+**Exit:** a browser (Node.js standing in for one) decodes and dealiases a
+real NIDS product and a real velocity sweep with no server in the path, with
+real size/latency numbers instead of a cited-but-unverified one.
 
 ---
 

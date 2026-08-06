@@ -22,9 +22,15 @@ use std::io::Read;
 use std::path::Path;
 
 /// How many bytes to read from the head of a file when sniffing magic on
-/// disk. 16 covers the longest current magic (HDF5 = 8 bytes) plus a few
-/// for any backend that adds a longer signature.
-const MAGIC_PEEK_BYTES: usize = 16;
+/// disk. 128 — not just the longest fixed-offset magic (HDF5 = 8 bytes) —
+/// because NEXRAD Level 3's `head_pattern` scans a WMO/AWIPS text header
+/// for a 6-character product token that can sit anywhere in the first 128
+/// bytes (a NOAAPORT-style prefix line can precede it; see
+/// `docs/NEXRAD_LEVEL3_WASM.md` §6). Every `head_pattern` implementation
+/// must already tolerate a shorter slice (the in-memory
+/// `auto_backend_for_bytes` path hands over whatever the caller has), so
+/// widening this disk-read peek is backward compatible.
+const MAGIC_PEEK_BYTES: usize = 128;
 
 /// Per-backend sniff configuration. Construct as a `static` with hard-coded
 /// `&'static` arrays / function pointers so the runtime cost is one slice

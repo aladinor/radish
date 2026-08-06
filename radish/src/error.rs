@@ -12,11 +12,15 @@ pub enum RadishError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// HDF5 error
+    /// HDF5 error. Only constructible on `native` builds — `hdf5` links a C
+    /// library with no `wasm32-unknown-unknown` story (see
+    /// `docs/NEXRAD_LEVEL3_WASM.md` §5).
+    #[cfg(feature = "native")]
     #[error("HDF5 error: {0}")]
     Hdf5(#[from] hdf5::Error),
 
-    /// NetCDF error
+    /// NetCDF error. Only constructible on `native` builds, same reason.
+    #[cfg(feature = "native")]
     #[error("NetCDF error: {0}")]
     NetCdf(#[from] netcdf::Error),
 
@@ -69,6 +73,16 @@ pub enum RadishError {
     /// Unsupported feature
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
+
+    /// Velocity dealiasing input/precondition error — a shape mismatch
+    /// between the velocity and mask arrays, a non-finite or non-positive
+    /// Nyquist velocity, or an invalid tuning option
+    /// (`transforms::dealias::DealiasOptions`). Distinct from
+    /// [`RadishError::Conversion`]: this is a *caller* precondition
+    /// violation on an in-memory transform, not a source-file decode
+    /// problem.
+    #[error("Dealiasing error: {0}")]
+    Dealias(String),
 
     /// General error
     #[error("Error: {0}")]

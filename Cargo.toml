@@ -3,6 +3,7 @@ members = [
     "radish",
     "python",
     "types",
+    "wasm",
 ]
 resolver = "2"
 

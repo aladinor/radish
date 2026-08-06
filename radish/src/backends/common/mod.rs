@@ -30,6 +30,7 @@ pub(crate) mod buffer;
 pub(crate) mod coords;
 pub(crate) mod geometry;
 pub(crate) mod metadata;
+pub(crate) mod parallel;
 pub(crate) mod sniff;
 pub(crate) mod sort;
 
@@ -42,5 +43,6 @@ pub(crate) use buffer::decode_into_array;
 pub(crate) use coords::assemble_ppi_coordinates;
 pub(crate) use geometry::{build_range_axis, MomentGeometry};
 pub(crate) use metadata::{meta_for, OdimMomentMeta};
+pub(crate) use parallel::{par_enumerate_map, par_map};
 pub(crate) use sniff::{looks_like, looks_like_bytes, SniffConfig};
 pub(crate) use sort::sort_indices_by_key;

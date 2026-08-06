@@ -34,6 +34,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plausible record size) and by object name (`YYYYMMDD-HHMMSS-NNN-[SIE]`),
   so `radish.open_datatree(one_chunk_bytes)` and chunk paths route to the
   NEXRAD backend without `backend="nexrad"`.
+- **NEXRAD Level 3 (NIDS) backend** (plan 0011), a new `NexradLevel3Backend`
+  decoding single-tilt, single-moment NIDS products — reflectivity,
+  velocity, spectrum width, ZDR/RHOHV/KDP, hydrometeor classification, and
+  the legacy 8/16-level `AF1F`-encoded family (26 message codes total, 19
+  implemented past the PDB stage; the remaining 7 — packet-28/XDR and 5
+  surface precip codes — refuse cleanly with a named `UnsupportedProduct`
+  rather than guessing). `MomentData` gains `raw_codes: Option<Array2<u8>>`
+  and `declared_scale: Option<DeclaredScale>` so a caller can recover the
+  verbatim on-wire codes, not just the decoded physical values;
+  `SweepMetadata` gains `nids: Option<NidsSweepAttrs>` (AWIPS id, message
+  code, VCP, tilt ordinal). Byte-exact against a local Python oracle on 7
+  real S3 fixtures (`radish/tests/test_nexrad_level3_parity.rs`,
+  `#[ignore]`-gated); value-parity against xradar #392's independently
+  authored synthetic test vectors for the remaining implemented codes
+  (`radish/tests/test_nexrad_level3_xradar_vectors.rs`).
+- **`radish` core now compiles for `wasm32-unknown-unknown`** behind a new
+  `native` Cargo feature (default-on) gating `hdf5`/`netcdf`/`rayon` out of
+  the dependency graph entirely under `--no-default-features` — verified in
+  CI (`.github/workflows/rust-ci.yml`'s `wasm` job asserts
+  `netcdf`/`hdf5-metno-sys`/`libz-sys`/`rayon` never enter the wasm32
+  dependency graph, for both `radish` core and the new `radish-wasm` crate
+  below).
+- **Region-based velocity dealiasing**: `radish::transforms::dealias_region_based`,
+  a Rust port of Py-ART's `pyart.correct.dealias_region_based`, bit-exact
+  with Py-ART on every unmasked gate — verified against a real Py-ART
+  install on 2 real NEXRAD Level 2 velocity sweeps
+  (`radish/tests/test_dealias_parity.rs`, `#[ignore]`-gated;
+  `radish/benches/dealias.rs` records ~8x speedup over Py-ART's own
+  Python-object-heavy implementation on the same sweep). Reachable from
+  Python as `radish.dealias_region_based(velocity, valid_mask, nyquist,
+  rays_wrap_around, ...)` and from the new `radish-wasm` crate as
+  `dealiasRegionBased(...)`. `valid_mask` uses the opposite polarity from
+  Py-ART's own `gfilter` (`true` = valid/usable, matching Rust convention)
+  — documented prominently at every layer since getting this backwards
+  silently inverts every result.
+- **New `radish-wasm` crate** (`wasm/`), a `wasm-bindgen` binding exposing
+  `decodeNexradLevel3(bytes) -> DecodedProduct` (zero-copy `codes()` via
+  `Uint8Array::view`, general per-radial `azimuths()` — no fitted
+  `az_start_deg`/`az_step_deg` slope; that's application-layer display
+  policy) and `dealiasRegionBased(...)`. Library only — no fetch, no S3, no
+  worker logic. Measured (not assumed): ~64 KB gzipped for decode+dealias
+  combined; ~22 ms to decode a real 224 KB NIDS product, ~570 ms to dealias
+  a real 720x1192 velocity sweep (Node.js `wasm-bindgen --target nodejs`
+  harness on real fixtures) — see `docs/NEXRAD_LEVEL3_WASM.md` §8 for the
+  full measurement table.
 
 ### Changed
 

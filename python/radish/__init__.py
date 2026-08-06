@@ -21,6 +21,7 @@ from radish._radish import (
     SweepData,
     VolumeData,
     VolumeMetadata,
+    dealias_region_based,
     decode_nexrad_record_moment,
     decode_nexrad_sweep_moment,
     nexrad_record_moment_encoding,
@@ -84,6 +85,9 @@ __all__ = [
     "scan_nexrad_chunks",
     "read_sigmet",
     "scan_sigmet",
+    # Velocity dealiasing (region-based, bit-exact with Py-ART on every
+    # unmasked gate — see plans/0011-nexrad-level3-wasm-backend.md).
+    "dealias_region_based",
     # Low-level NEXRAD per-moment decoders. These return the **raw**
     # NEXRAD words for one moment out of one LDM record (or one
     # sweep-sized byte span) so chunked/lazy consumers — zarr codecs,

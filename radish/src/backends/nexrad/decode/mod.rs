@@ -25,12 +25,12 @@ pub(super) mod volume;
 #[cfg(test)]
 mod integration_test;
 
+use crate::backends::common::par_map;
 use error::Result;
 use messages::msg2::Msg2;
 use messages::msg5::Msg5;
 use messages::{decode_messages, MessagePayload};
 use model::{group_radials_into_sweeps, Radial, Scan, Site};
-use rayon::prelude::*;
 use record::{decompress, is_raw_archive2, raw_archive2_body, split_ldm_records};
 use volume::parse as parse_volume_header;
 
@@ -58,10 +58,7 @@ pub(crate) fn decode_volume_with_phase_timing(bytes: &[u8]) -> Result<Scan> {
         vec![decode_one_message_stream(body)?]
     } else {
         let records = split_ldm_records(bytes)?;
-        records
-            .par_iter()
-            .map(decode_one_record)
-            .collect::<Result<Vec<_>>>()?
+        par_map(&records, decode_one_record)?
     };
     let t1 = Instant::now();
     let t2 = Instant::now();
@@ -211,10 +208,7 @@ pub(crate) fn decode_volume(bytes: &[u8]) -> Result<Scan> {
         // first error and preserves record order in the output Vec —
         // important because radial order within a sweep matters for
         // the ICD radial_status grouping pass below.
-        records
-            .par_iter()
-            .map(decode_one_record)
-            .collect::<Result<Vec<_>>>()?
+        par_map(&records, decode_one_record)?
     };
 
     // Stitch: walk per-record results in arrival order, taking

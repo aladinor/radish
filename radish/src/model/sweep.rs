@@ -4,7 +4,7 @@ use radish_types::{FollowMode, PrtMode, SweepMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{Coordinates, MomentData, NexradSweepAttrs, SigmetSweepAttrs};
+use super::{Coordinates, MomentData, NexradSweepAttrs, NidsSweepAttrs, SigmetSweepAttrs};
 
 /// Sweep data containing moments and coordinates
 #[derive(Debug, Clone)]
@@ -108,6 +108,11 @@ pub struct SweepMetadata {
     /// Sigmet/IRIS-specific sweep attrs. `None` for non-Sigmet sweeps.
     pub sigmet: Option<SigmetSweepAttrs>,
 
+    /// NEXRAD Level 3 (NIDS)-specific sweep attrs. `None` for non-NIDS
+    /// sweeps.
+    #[serde(default)]
+    pub nids: Option<NidsSweepAttrs>,
+
     /// `false` when the sweep's data is provably partial — e.g. a
     /// NEXRAD volume truncated mid-sweep (real-time chunk streams,
     /// plan 0009). Formats without partial-volume semantics always
@@ -138,6 +143,7 @@ impl SweepMetadata {
             unambiguous_range: None,
             nexrad: None,
             sigmet: None,
+            nids: None,
             is_complete: true,
         }
     }

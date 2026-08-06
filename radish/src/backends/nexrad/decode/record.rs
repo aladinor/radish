@@ -22,15 +22,18 @@
 //! unconditionally; the decompressed payload is normal NEXRAD
 //! messages either way.
 //!
-//! The decompression path is wired through rayon's `par_iter` so we
-//! preserve the ~6× speedup that `nexrad-data/parallel` provides
-//! upstream (see `CLAUDE.md`'s performance gotcha note).
+//! The decompression path is wired through `backends::common::par_map`
+//! (rayon under the `native` feature, serial on wasm) so we preserve the
+//! ~6× speedup that `nexrad-data/parallel` provides upstream on native
+//! builds (see `CLAUDE.md`'s performance gotcha note), while still
+//! compiling for `wasm32-unknown-unknown`.
 
 use std::io::Read;
 
 use byteorder::{BigEndian, ByteOrder};
 use bzip2::read::BzDecoder;
-use rayon::prelude::*;
+
+use crate::backends::common::par_map;
 
 use super::error::{NexradDecodeError, Result};
 
@@ -115,7 +118,7 @@ pub(crate) fn decompress(record: &LdmRecord<'_>) -> Result<Vec<u8>> {
 /// preserves input order — `decompress_all(records)[i]` corresponds
 /// to `records[i]`.
 pub(crate) fn decompress_all(records: &[LdmRecord<'_>]) -> Result<Vec<Vec<u8>>> {
-    records.par_iter().map(decompress).collect()
+    par_map(records, decompress)
 }
 
 /// True when `bytes` look like a pre-Build-12 raw Archive II file:

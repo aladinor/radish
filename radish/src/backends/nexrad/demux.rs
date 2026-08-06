@@ -123,8 +123,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-use rayon::prelude::*;
-
+use crate::backends::common::par_map;
 use crate::{RadishError, Result};
 
 use super::decode::error::NexradDecodeError;
@@ -1137,11 +1136,10 @@ where
         let body = raw_archive2_body(span).map_err(decode_err)?;
         return Ok(vec![f(body)?]);
     }
-    split_ldm_records(span)
-        .map_err(decode_err)?
-        .par_iter()
-        .map(|record| f(&decompress(record).map_err(decode_err)?))
-        .collect()
+    let records = split_ldm_records(span).map_err(decode_err)?;
+    par_map(&records, |record| {
+        f(&decompress(record).map_err(decode_err)?)
+    })
 }
 
 /// Demultiplex one moment out of a **compressed** sweep-sized byte

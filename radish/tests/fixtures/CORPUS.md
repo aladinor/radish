@@ -181,3 +181,144 @@ during decoder Phase 6:
 - **Parity tests** (`radish/tests/test_nexrad_internal_parity.rs`) are
   marked `#[ignore]` so they don't slow `cargo test`. Run with
   `cargo test -- --ignored` once the corpus is in place.
+
+## NEXRAD Level 3 (NIDS) corpus (plan 0011)
+
+Unmodified NIDS products pulled from `s3://unidata-nexrad-level3` (a flat
+bucket — object keys ARE the filenames below, no date-prefixed path).
+Not committed, same policy as the Level 2 corpus above. Tests resolve
+their on-disk path from **`RADISH_NEXRAD_LEVEL3_FIXTURE_DIR`**.
+
+```bash
+export RADISH_NEXRAD_LEVEL3_FIXTURE_DIR="$HOME/.cache/radish/fixtures/nexrad_level3"
+```
+
+### Required files
+
+| file | bytes | sha256 | product | why this one |
+| --- | ---: | --- | --- | --- |
+| `LOT_N0B_2026_07_31_13_06_53` | 224559 | `e4f0dd21d74dd5415bb5eb95e32d1126d0674f82662b9969cd7129dc2c54510b` | N0B | lowest tilt, packet 16, `LinearInteger` scaling — the free tier's first product |
+| `LOT_N3B_2026_07_31_13_02_14` | 18644 | `fa66cfb820b08d37a401fe8f00afe6f58c30aec19daf745b8fdabcac6b319689` | N3B | half the azimuth resolution (360 vs 720 radials) — a genuinely different grid |
+| `LOT_N0X_2020_03_30_00_02_07` | 54368 | `e25169aa65e0f191ca1e7022cb51d12d9c05490ffc0c0dcf48b9ff3bdc2b2fb4` | N0X | ZDR, the float32 scale/offset form |
+| `LOT_N0C_2020_03_31_00_05_24` | 57703 | `dc705bb0a49482420944044c4cfcaf5bdf28a99af51811ab7e273de037652838` | N0C | RHOHV, float32 form |
+| `LOT_N0K_2020_03_31_00_05_24` | 5109 | `8338080a732bd6920caad48734de327cb76a376d8fdbb9d66759a58d27ab45bc` | N0K | KDP, float32 form |
+| `LOT_N0G_2026_08_04_00_09_57` | 98434 | `a9779831847031f2739fb8fa6e8ad38cc55af102d3b755d46fc877019479ca2f` | N0G | velocity, message code **154** (lower tilts) |
+| `LOT_N2U_2026_08_04_00_09_57` | 18091 | `32c016b9fa19615fc1f4641ed0e68ee159c3fb620440e4a1de377d38fc8692d9` | N2U | velocity, message code **99** (upper tilts) — velocity is split by tilt (`G` on N0/N1/NA, `U` on N2/N3/NB), so N0G alone can't cover message code 99 |
+
+All seven are KLOT, VCP 215. Reflectivity spans the six super-res tilts
+(`N0B NAB N1B NBB N2B N3B` at 0.5/0.9/1.3/1.8/2.4/3.1°); N3B above is
+tilt 5.
+
+```bash
+mkdir -p ~/.cache/radish/fixtures/nexrad_level3
+cd ~/.cache/radish/fixtures/nexrad_level3
+
+for f in LOT_N0B_2026_07_31_13_06_53 LOT_N3B_2026_07_31_13_02_14 \
+         LOT_N0X_2020_03_30_00_02_07 LOT_N0C_2020_03_31_00_05_24 \
+         LOT_N0K_2020_03_31_00_05_24 LOT_N0G_2026_08_04_00_09_57 \
+         LOT_N2U_2026_08_04_00_09_57; do
+  aws s3 cp --no-sign-request "s3://unidata-nexrad-level3/$f" .
+done
+
+sha256sum -c <<EOF
+e4f0dd21d74dd5415bb5eb95e32d1126d0674f82662b9969cd7129dc2c54510b  LOT_N0B_2026_07_31_13_06_53
+fa66cfb820b08d37a401fe8f00afe6f58c30aec19daf745b8fdabcac6b319689  LOT_N3B_2026_07_31_13_02_14
+e25169aa65e0f191ca1e7022cb51d12d9c05490ffc0c0dcf48b9ff3bdc2b2fb4  LOT_N0X_2020_03_30_00_02_07
+dc705bb0a49482420944044c4cfcaf5bdf28a99af51811ab7e273de037652838  LOT_N0C_2020_03_31_00_05_24
+8338080a732bd6920caad48734de327cb76a376d8fdbb9d66759a58d27ab45bc  LOT_N0K_2020_03_31_00_05_24
+a9779831847031f2739fb8fa6e8ad38cc55af102d3b755d46fc877019479ca2f  LOT_N0G_2026_08_04_00_09_57
+32c016b9fa19615fc1f4641ed0e68ee159c3fb620440e4a1de377d38fc8692d9  LOT_N2U_2026_08_04_00_09_57
+EOF
+```
+
+Or via Python `fsspec` (`anon=True`, same public bucket):
+
+```python
+import fsspec, shutil
+
+names = [
+    "LOT_N0B_2026_07_31_13_06_53", "LOT_N3B_2026_07_31_13_02_14",
+    "LOT_N0X_2020_03_30_00_02_07", "LOT_N0C_2020_03_31_00_05_24",
+    "LOT_N0K_2020_03_31_00_05_24", "LOT_N0G_2026_08_04_00_09_57",
+    "LOT_N2U_2026_08_04_00_09_57",
+]
+for name in names:
+    with fsspec.open(f"s3://unidata-nexrad-level3/{name}", mode="rb", anon=True) as src:
+        with open(f"~/.cache/radish/fixtures/nexrad_level3/{name}", "wb") as dst:
+            shutil.copyfileobj(src, dst)
+```
+
+### Expected-output sidecars (Tier 1 byte-parity)
+
+`radish/tests/fixtures/nexrad_level3/expected/<fixture>.json` — **committed**
+(small JSON, no raw arrays). Generated once, offline, from the Python decode
+oracle (`radar-animation/src/server/nexrad_level3.py`) by
+`radish/tests/fixtures/nexrad_level3/generate_expected.py`. Each sidecar
+carries every scalar the decoder produces (site/product/moment/tilt/
+message_code/vcp/elevation/scan_time/lat/lon/height/geometry/scale triple),
+the full azimuth array, and `codes_sha256` — a SHA-256 of the oracle's
+row-major `codes` array bytes, giving full-array byte-exactness without
+committing the array itself (same reasoning as the Level 2 corpus's
+uncommitted-fixtures policy above, applied to expected output instead of
+input). Re-run the generator only when the fixture list changes; it needs
+Python, numpy, and a checkout of `radar-animation` — none of which the
+Rust test (`test_nexrad_level3_parity.rs`) needs at run time.
+
+## Test gating (NIDS)
+
+- `test_nexrad_level3_parity.rs`'s fixture-parity cases are `#[ignore]`d
+  and skip (rather than fail) when `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR` is
+  unset or a listed file is missing — same discipline as the Level 2
+  parity tests above. Run with
+  `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR=... cargo test -p radish --test
+  test_nexrad_level3_parity -- --ignored`.
+- The sabotage-verify test in the same file is **not** `#[ignore]`d — it
+  runs on every `cargo test` and needs no fixtures, since it only
+  perturbs an in-memory byte array and checks the comparison catches it.
+
+## Velocity dealiasing golden corpus (plan 0011 Phase 6)
+
+Reuses the NEXRAD Level 2 corpus above — no separate fixture download.
+`radish/tests/test_dealias_parity.rs` decodes real velocity (`VRADH`)
+sweeps from `KLOT20251210_102338_V06` with radish's own NEXRAD backend,
+runs `radish::transforms::dealias_region_based` on them, and checks the
+resulting fold-count array against a golden sidecar generated from a
+**real Py-ART install** — see `radish/tests/fixtures/dealias/generate_expected.py`'s
+module doc for exactly how (it deliberately uses radish's own decoded
+array as the shared input to both sides, so this gate isolates
+dealiasing-only parity from decode parity, which
+`test_nexrad_internal_parity.rs` already covers separately).
+
+**Py-ART version pinned: `2.2.0`** (the version installed in
+`/home/alfonso-ladino/radar-segmentation/.venv` when the sidecars below
+were generated this session — a local dev venv, not part of this repo;
+any Py-ART install of the same version will reproduce identical sidecars,
+since the golden output only depends on Py-ART's own deterministic
+algorithm, not anything venv-specific). Re-run
+`generate_expected.py` and update this pin if upgrading the reference
+Py-ART version — the plan's own risk section flags this as a real
+maintenance point, not a one-time setup step.
+
+### Expected-output sidecars
+
+`radish/tests/fixtures/dealias/expected/*.json` — **committed** (small
+JSON, no raw arrays, same "hash the array, don't commit it" convention as
+the NIDS corpus above): per case, sweep index, moment, nyquist,
+`rays_wrap_around`, shape, valid-gate count, and `folds_sha256` — a
+SHA-256 of the expected fold-count array's row-major `int32` bytes.
+
+| sidecar | sweep | shape | valid gates | nonzero folds | folds_sha256 (prefix) |
+| --- | ---: | --- | ---: | ---: | --- |
+| `KLOT20251210_102338_V06_sweep1` | 1 (0.48°) | 720x1192 | 405,994 | 225,842 | `958d100460b5...` |
+| `KLOT20251210_102338_V06_sweep9` | 9 (2.42°) | 360x1336 | — | — | `a067ddbc859b...` |
+
+### Test gating (dealiasing)
+
+- `test_dealias_parity.rs`'s fixture-parity cases are `#[ignore]`d and
+  skip cleanly when `RADISH_NEXRAD_FIXTURE_DIR` is unset or the fixture
+  is missing. Run with `RADISH_NEXRAD_FIXTURE_DIR=... cargo test -p
+  radish --test test_dealias_parity -- --ignored`.
+- The sabotage-verify test in the same file is **not** `#[ignore]`d.
+- `radish/benches/dealias.rs` (criterion) also resolves
+  `RADISH_NEXRAD_FIXTURE_DIR` and skips cleanly when unset. Run with
+  `RADISH_NEXRAD_FIXTURE_DIR=... cargo bench --bench dealias`.

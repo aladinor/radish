@@ -1,0 +1,29 @@
+[package]
+name = "radish-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "radish_wasm"
+crate-type = ["cdylib"]
+
+[dependencies]
+# `default-features = false` is the point of this crate — proves Phase 1's
+# feature gate works end-to-end: no hdf5/netcdf/rayon in the compile graph
+# (see `radish/Cargo.toml`'s `[features]` doc comment).
+#
+# Deliberately NOT `radish = { workspace = true, default-features = false
+# }`: Cargo only honours a member's `default-features = false` override on
+# a workspace-inherited dependency if the WORKSPACE-level entry ALSO
+# declares `default-features = false` — ours doesn't (every other member
+# needs the default `native` feature), so that form silently no-ops
+# (confirmed via `cargo tree -p radish-wasm`, which still pulled in
+# hdf5/netcdf/rayon before this was caught). A direct `path` dependency
+# sidesteps workspace feature inheritance entirely.
+radish = { path = "../radish", default-features = false }
+ndarray = { workspace = true }
+wasm-bindgen = "0.2.100"
+js-sys = "0.3"
