@@ -489,5 +489,5 @@ real size/latency numbers instead of a cited-but-unverified one.
 
 ---
 
-[atmoscale]: https://github.com/aladinor/radar-dashboard
+[atmoscale]: https://github.com/aladinor/radar-dashboard "private repo — ignored by the markdown-link-check CI job, see .github/markdown-link-check-config.json"
 [xr392]: https://github.com/openradar/xradar/pull/392

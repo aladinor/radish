@@ -8,6 +8,9 @@
     },
     {
       "pattern": "^https://github\\.com/aladinor/radish/(releases/tag|compare)/"
+    },
+    {
+      "pattern": "^https://github\\.com/aladinor/radar-dashboard"
     }
   ],
   "replacementPatterns": [],
