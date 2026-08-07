@@ -43,7 +43,18 @@ pub fn fixture_path(env_var: &str, name: &str) -> Option<PathBuf> {
 /// are committed, version-controlled fixtures; a missing or malformed
 /// one is a test-setup bug, not a runtime condition to handle gracefully.
 pub fn load_expected<T: serde::de::DeserializeOwned>(dir: &std::path::Path, name: &str) -> T {
-    let path = dir.join(format!("{name}.json"));
+    load_expected_file(dir, &format!("{name}.json"))
+}
+
+/// Same as [`load_expected`], but takes the sidecar's exact filename
+/// rather than assuming a bare `{name}.json` — for corpora with more
+/// than one sidecar per fixture (e.g. a second oracle's cross-check,
+/// named `{name}.xradar.json`).
+pub fn load_expected_file<T: serde::de::DeserializeOwned>(
+    dir: &std::path::Path,
+    filename: &str,
+) -> T {
+    let path = dir.join(filename);
     let bytes = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("read expected sidecar {}: {e}", path.display()));
     serde_json::from_slice(&bytes)

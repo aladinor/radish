@@ -48,7 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real S3 fixtures (`radish/tests/test_nexrad_level3_parity.rs`,
   `#[ignore]`-gated); value-parity against xradar #392's independently
   authored synthetic test vectors for the remaining implemented codes
-  (`radish/tests/test_nexrad_level3_xradar_vectors.rs`).
+  (`radish/tests/test_nexrad_level3_xradar_vectors.rs`); and value-parity
+  against xradar #392's own decoder on 4 more real fixtures covering
+  packet `AF1F` and categorical products, plus 3 real fixtures of
+  currently-unimplemented product families confirming a clean rejection
+  (`radish/tests/test_nexrad_level3_xradar_oracle.rs`). That cross-check
+  surfaced and resolved a real decode question against the NEXRAD ICD
+  directly (2620001AC, Figure 3-11c, Note 1): an odd `n_bins` radial
+  carries one halfword-alignment pad byte, not a 1688th gate — radish's
+  original decode was already ICD-correct; the divergence was in
+  xradar's still-unmerged branch.
 - **`radish` core now compiles for `wasm32-unknown-unknown`** behind a new
   `native` Cargo feature (default-on) gating `hdf5`/`netcdf`/`rayon` out of
   the dependency graph entirely under `--no-default-features` — verified in

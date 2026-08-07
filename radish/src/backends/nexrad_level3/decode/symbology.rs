@@ -559,6 +559,22 @@ mod tests {
     fn decode_symbology_tolerates_pad_byte_beyond_n_bins() {
         // n_bytes (5) > n_bins (4): a real odd-bin-count radial's pad byte.
         // Only the first n_bins bytes should be read into codes.
+        //
+        // This is a documented ICD behavior, not an inferred convention —
+        // NEXRAD ICD 2620001AC, Figure 3-11c ("Digital Radial Data Array
+        // Packet - Packet Code 16"), Note 1: "The RPG clips radials to 70
+        // kft. This could result in an odd number of bins in a radial.
+        // However, the radial will always be on a halfword boundary, so
+        // the number of bytes in a radial may be number of bins in a
+        // radial + 1." I.e. `n_bins` (the packet header field) is always
+        // the true, authoritative gate count; a `n_bytes == n_bins + 1`
+        // radial carries one genuine pad byte, not a dropped 1688th gate.
+        // Confirmed against 13 real fixtures this session (2 odd-`n_bins`
+        // cases, both exhibiting exactly this +1 pattern with the extra
+        // byte always 0 across every radial; 11 even-`n_bins` cases,
+        // zero mismatches) — see `radish/tests/test_nexrad_level3_xradar_oracle.rs`
+        // for why xradar's PR-392 branch's raw_data needs a matching trim
+        // before comparison on these two fixtures specifically.
         let mut body = Vec::new();
         body.extend_from_slice(&(-1i16).to_be_bytes());
         body.extend_from_slice(&1i16.to_be_bytes());

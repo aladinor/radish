@@ -214,6 +214,31 @@ that wants to distinguish "below threshold" from "range folded" can —
 that distinction isn't collapsed away, just not exposed as a separate
 field radish would have to own and keep in sync.
 
+### 4.9 An odd `n_bins` gets one halfword-alignment pad byte, not a dropped gate
+
+Packet 16's own header field (`n_bins`, "Number of Range Bins") is
+always the true, authoritative gate count — a per-radial byte count one
+larger than that is a documented, expected pad byte, not evidence the
+header is wrong. NEXRAD ICD 2620001AC, Figure 3-11c ("Digital Radial
+Data Array Packet - Packet Code 16"), Note 1: *"The RPG clips radials
+to 70 kft. This could result in an odd number of bins in a radial.
+However, the radial will always be on a halfword boundary, so the
+number of bytes in a radial may be number of bins in a radial + 1."*
+radish reads only the first `n_bins` bytes of each radial and discards
+the rest (`decode_symbology_tolerates_pad_byte_beyond_n_bins` in
+`decode/symbology.rs`), matching Note 1 directly. Verified empirically,
+not just cited: cross-checked against real fixtures with an odd
+`n_bins` (N1B, N3B — both KLOT super-res reflectivity tilts) — every
+radial in both files declares exactly one extra byte, and that byte is
+0 on all of them, while 11 other real fixtures with an even `n_bins`
+show zero header/byte-count disagreement at all. This is also a
+documented divergence from xradar's PR #392 branch (commit `9c8826c`
+at the time this was checked): its `_read_packet16` does not implement
+Note 1 and silently widens to the padded byte count instead — see
+`radish/tests/fixtures/CORPUS.md`'s xradar cross-check section and
+`generate_expected_xradar.py` for how the golden sidecars correct for
+that before comparison.
+
 ---
 
 ## 5. Phase A — `radish` compiles to `wasm32-unknown-unknown`
