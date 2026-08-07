@@ -86,7 +86,7 @@ __all__ = [
     "read_sigmet",
     "scan_sigmet",
     # Velocity dealiasing (region-based, bit-exact with Py-ART on every
-    # unmasked gate — see plans/0011-nexrad-level3-wasm-backend.md).
+    # unmasked gate — see docs/NEXRAD_LEVEL3_WASM.md).
     "dealias_region_based",
     # Low-level NEXRAD per-moment decoders. These return the **raw**
     # NEXRAD words for one moment out of one LDM record (or one

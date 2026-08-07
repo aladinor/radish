@@ -1,195 +1,189 @@
 # NEXRAD Level 3 (NIDS) in radish, and radish in the browser
 
-**Status:** design, 2026-08-06. Nothing here is built.
-
-This document is written to be executed by someone (or some session) working
-**inside the radish repo**, who has not seen the conversation that produced it.
-It carries the full context deliberately, including absolute paths into a
-*different* repository — [AtmoScale / radar-animation][atmoscale] — which is the
-consumer that motivates the work.
-
-> **Path convention.** radish's own docs use repo-relative paths
-> (`docs/ARCHITECTURE.md`). Everything referring to radar-animation is written
-> as an **absolute path**, because it is a separate checkout:
-> `/home/alfonso-ladino/python/radar-animation/...`. Those files are the
-> specification; read them before writing code.
+**Status:** implemented. All phases below are done and verified — this
+document now serves as the design record and the byte-format reference
+for the decoder, not a forward-looking plan.
 
 ---
 
-## 1. Why this work exists
+## 1. Why this exists
 
-AtmoScale is a browser weather-radar product with two tiers:
+radish already reads CfRadial1, ODIM, IRIS/Sigmet, and NEXRAD Level 2 —
+NEXRAD Level 3 (NIDS) is the obvious remaining gap in radar-format
+coverage. Level 3 products are small (a real product is at most ~1.3 MB
+decompressed) and self-contained, which also makes them the natural first
+target for a `wasm32` build: a radar client that wants to decode and
+display NIDS products with no server in the path — reading the bytes
+directly from public object storage, entirely in the browser — needs a
+decoder that can run there.
 
-| tier | data | path | who pays |
-|---|---|---|---|
-| **free / real-time** | NEXRAD **Level 3** (NIDS), last 6–12 frames | **browser reads public S3 directly** | nobody — NOAA pays egress |
-| **paid / historical** | Level 2 archive, arbitrary depth | server + virtual-reference catalogue | the customer |
+That's the motivating use case: a serverless, browser-only NEXRAD Level 3
+viewer, where the browser fetches NIDS bytes from public storage
+(`s3://unidata-nexrad-level3`, no auth required) and decodes/renders them
+with no backend at all. **The one thing that architecture costs is a
+decoder** — someone has to turn NIDS bytes into codes a browser can
+render, and it has to run in the browser itself, not on a server that
+doesn't exist in this deployment shape.
 
-The free tier's decision — go serverless, no backend at all — was made on
-2026-08-06 after the original reasoning was falsified and re-established on new
-evidence. The decision record is here:
-
-- `/home/alfonso-ladino/python/radar-animation/plans/realtime-first-wiring.md`
-  — section **D0**, the decision itself and everything that refuted the previous
-  answer.
-- `/home/alfonso-ladino/python/radar-animation/docs/competitive-landscape.md`
-  — the measurements behind it: four browser radar competitors, browser decode
-  benchmarks, the GPU memory wall, and why loop depth is the paywall.
-
-**The one thing that decision costs is a decoder.** Today a Python server
-decodes NIDS and ships uint8 codes to the browser. With no server, the browser
-must decode NIDS itself — bzip2 decompression plus the NEXRAD Level 3 product
-format.
-
-That decoder is what this document is about, and **radish is where it should
-live.**
+That decoder is what this document is about, and radish is where it
+should live.
 
 ---
 
-## 2. Why radish, and not a TypeScript port
+## 2. Why radish, and not a standalone port
 
-The AtmoScale plan originally called for a TypeScript port of the Python
-decoder, policed by a CI diff-test against the Python original. That plan is at
-`/home/alfonso-ladino/python/radar-animation/plans/serverless-realtime.md`
-(Phases 2–3) and **this document supersedes those two phases.**
-
-The problem with a port is structural: two implementations of one binary format
-that must agree byte-for-byte, forever. Level 2 and Level 3 share a single uint8
-code space in AtmoScale, so a disagreement does not throw — it renders the same
-storm differently in the free tier than in the paid one.
+The alternative to putting this in radish is a from-scratch decoder in
+whatever language the browser client is written in (e.g. a TypeScript
+port), kept in sync with a reference implementation by a diff test. That
+has a structural problem: two independent implementations of one binary
+format that must agree byte-for-byte, forever — and if a radar client
+also displays NEXRAD Level 2 data through the same code-space convention,
+a disagreement between the two decoders doesn't throw, it silently
+renders the same storm differently depending on which tier served it.
 
 radish removes the problem instead of policing it:
 
 ```
 radish (pure Rust core: decode, model, normalize)
   |
-  +-- radish-python   (pyo3 / maturin, cdylib "_radish")  -> servers, notebooks, the paid tier
-  +-- radish-wasm     (wasm-bindgen)                       -> the browser, the free tier
+  +-- radish-python   (pyo3 / maturin, cdylib "_radish")  -> servers, notebooks
+  +-- radish-wasm     (wasm-bindgen)                       -> the browser
 ```
 
-**One decoder, two bindings, nothing to diff.** The pyo3 binding already exists
-(`python/Cargo.toml`, `crate-type = ["cdylib"]`, `pyo3` + `numpy`), which is the
-condition that makes this pay off. Without a Python binding, a Rust decoder would
-just be a *different* second implementation; with one, it is the only
-implementation.
+**One decoder, two bindings, nothing to diff.** The pyo3 binding already
+existed (`python/Cargo.toml`, `crate-type = ["cdylib"]`, `pyo3` + `numpy`)
+before this work started, which is the condition that makes this pay
+off — without an existing native binding, a new Rust decoder would just
+be a *different* second implementation to keep in sync; with one already
+in place, adding a wasm binding makes it the *only* implementation,
+reachable from both server and browser contexts.
 
-Secondary benefits, in honest order of importance:
+Secondary benefits, in order of importance:
 
-1. radish gains a Level 3 backend it wants anyway — it currently reads
-   CfRadial1, ODIM, IRIS/Sigmet and NEXRAD Level 2, and Level 3 is the obvious
-   gap.
+1. radish gains a Level 3 backend it wants regardless of any particular
+   consumer — it's the obvious gap in its existing format coverage.
 2. radish gains a `wasm32` target, which makes every backend it has
-   browser-reachable, not only this one.
-3. AtmoScale gets its decoder without owning a second codebase.
+   browser-reachable, not just this one.
+3. Any downstream browser client gets a decoder without owning a second
+   codebase to keep byte-exact with a server-side reference.
 
 ---
 
-## 3. What already exists — three implementations, none of them this one
+## 3. Prior art consulted while designing the byte-level contract
 
-| where | language | scope | status | use it as |
-|---|---|---|---|---|
-| `/home/alfonso-ladino/python/radar-animation/src/server/nexrad_level3.py` | Python | **638 lines.** Packet 16 only. 6 products: 153, 154, 99, 159, 161, 163 | in production, 7 committed fixtures | **the ORACLE.** Byte parity with this is the acceptance gate |
-| [openradar/xradar PR #392][xr392] | Python | **1,182 lines.** Packets 16, AF1F, 28. Codes 94, 99, 153, 154, 155, 159, 161, 163, 165 + precip products | open PR by `mgrover1` | **the BREADTH reference.** A second independent reading of the same ICD |
-| `radish/src/backends/nexrad/` | **Rust** | Level 2 only — msg1, msg2, msg5, msg31 | shipped | **the SCAFFOLDING.** `decode/reader.rs`, `common/buffer.rs`, error types, the adapter -> model pipeline |
+Two independent readers of the NIDS format were used to cross-check the
+byte-level contract below (§4) before writing any decode code:
 
-Two independent Python implementations of the same spec is a genuine asset. Where
-they agree, the ICD reading is settled. **Where they disagree, stop and find out
-why before encoding either into Rust** — that disagreement is information.
+- A production Python decoder (not part of this repository) that reads a
+  narrow, deliberately restricted set of products — the six digital
+  radial products carried by message codes 153/154/99/159/161/163 —
+  packet 16 only, and refuses everything else. Byte parity with this
+  decoder, on real fixtures pulled unmodified from
+  `s3://unidata-nexrad-level3`, is this backend's acceptance gate for
+  those six codes (`radish/tests/test_nexrad_level3_parity.rs`).
+- [openradar/xradar PR #392][xr392] — a general Level 3 reader covering
+  packets 16, `AF1F`, and 28 across ~27 message codes. Used as the
+  breadth reference for the codes beyond the original six, and as a
+  second independent reading of the ICD's more ambiguous fields
+  (`radish/tests/test_nexrad_level3_xradar_vectors.rs` ports its
+  synthetic, byte-built test vectors).
 
-Note the difference in ambition. radar-animation's decoder is deliberately
-narrow: it reads exactly what its dashboard serves and **refuses everything
-else**. xradar's is a general reader. radish should land closer to xradar's
-scope (it normalizes to CfRadial2/FM301, same as xradar) while satisfying
-radar-animation's contract exactly on the products they share.
+Two independent implementations of the same specification agreeing is
+real evidence the ICD reading is correct; where they disagreed during
+development, that disagreement was itself the signal to go re-read the
+ICD rather than pick one arbitrarily.
+
+`radish/src/backends/nexrad/` (the existing NEXRAD Level 2 backend) was
+the scaffolding this backend followed for module shape, error handling,
+and how a backend plugs into `auto_backend()` — see
+`docs/ARCHITECTURE.md`.
 
 ---
 
-## 4. The contract — read this before writing any decode code
+## 4. The byte-level contract — read this before touching decode code
 
-This section is the part most likely to be got wrong, because most of it is
-counter-intuitive and all of it was learned by getting it wrong first. Sources:
-the docstrings in `nexrad_level3.py` itself, which are unusually detailed and
-explain *why* for each item.
+This section exists because most of it is counter-intuitive, and every
+item was learned by getting it wrong first while cross-checking against
+the two reference readers in §3.
 
-### 4.1 The codes pass through untouched — that is the whole design
+### 4.1 The codes pass through untouched
 
-AtmoScale's wire format ships **raw uint8 codes**, not physical values. The
-browser uploads them to an R8 texture and a shader maps them through a 256-entry
-colour LUT. No float ever crosses the wire.
-
-This works because AtmoScale's quantization table `QUANT`
-(`/home/alfonso-ladino/python/radar-animation/src/server/frames.py:138`) is
-**pinned to the NIDS products' own declared scales**. Code N means the same
-physical number in both tiers, so a NIDS product's bytes are already on the
-serving scale.
-
-**Consequence for radish:** the decoder must expose the **raw codes plus the
-declared scale**, not only normalized float values. radish's usual output is a
-CfRadial2-style model with physical values — correct for its normal consumers,
-and useless for this one. The API needs both:
+`MomentData` exposes the decoded product **both** ways: normalized
+physical values (radish's usual model, for consumers that want physical
+units) **and** the verbatim on-wire codes plus the declared scale
+(`raw_codes: Option<Array2<u8>>`, `declared_scale: Option<DeclaredScale>`
+on `MomentData`). This exists because a display pipeline that maps codes
+through a fixed color lookup table directly — never converting to a
+physical float at all — needs the raw byte, not a re-derived and
+possibly-rounded-differently physical value:
 
 ```rust
-sweep.values()   // f32, physical, NaN below the data floor  -- radish's normal model
-sweep.codes()    // &[u8], verbatim, exactly as the file stored them
-sweep.scaling()  // (value_min, value_increment, n_levels) as DECLARED in the PDB
+moment.data            // f32, physical, NaN below the data floor — radish's normal model
+moment.raw_codes       // Array2<u8>, verbatim, exactly as the file stored them
+moment.declared_scale  // (value_min, value_increment, n_levels) as DECLARED in the PDB
 ```
 
 ### 4.2 Refuse, never silently rescale
 
-If a product's declared scale is not the one the consumer serves that moment on,
-the correct behaviour is a **hard error**, not a remap. See `_check_scale` at
-`/home/alfonso-ladino/python/radar-animation/src/server/level3_source.py:225`.
-Its reasoning: if the NWS ever re-scales a product, passing bytes through would
-mis-colour every pixel by a constant, silently.
+If a product's on-wire declared scale doesn't match what a caller
+expects, the correct behavior is a hard error, not a silent remap —
+radish exposes the declared scale faithfully rather than normalizing it
+away, so a caller that needs to enforce a specific scale can detect a
+mismatch itself. Silently rescaling would mis-color every pixel by a
+constant, invisibly.
 
-radish does not own that policy — the consumer does — but radish must **expose
-the declared scale faithfully** so the consumer can enforce it. Do not normalize
-it away.
+### 4.3 Two scaling forms, and the type that keeps them apart
 
-### 4.3 Two scaling forms, and the bool that keeps them apart
-
-The PDB (Product Description Block) encodes value scaling two different ways,
-selected by message code:
+The PDB (Product Description Block) encodes value scaling two different
+ways, selected by message code:
 
 | form | codes | where | meaning |
 |---|---|---|---|
-| **integer** | 153, 154, 99 | halfwords 22 / 23 / 24 | min x10, increment x10, level count |
+| **integer** | 153, 154, 99 (+ more, see `decode::products::PRODUCTS`) | halfwords 22 / 23 / 24 | min x10, increment x10, level count |
 | **float32** | 159, 161, 163 | halfwords 22–25 | a float32 scale and offset |
 
-In the Python this is a `bool` field on `ProductSpec`, and the docstring records
-why: it started as a free-text string, and a typo (`"Int"` instead of `"int"`)
-routed silently to the float branch. A real `N0X` read that way reported "min
--716.8, increment 0.0". **In Rust, make this an enum.** The type system should
-make the third state unrepresentable.
+This is an enum (`DecodeScheme`) in radish's decoder, not a boolean or a
+free-text field — the type system makes a third, invalid state
+unrepresentable, closing off exactly the kind of typo-based bug a
+loosely-typed equivalent (e.g. a string compared case-sensitively) is
+prone to.
 
 ### 4.4 Facts that are NOT in the file
 
-Three values look like they are in the file and are not:
+Three values look like they're in the file and aren't:
 
-- **Gate spacing is 250 m, and it does not come from the packet header.** The
-  halfword that looks like a range scale is the **cosine of the elevation angle
-  x1000** — it reads 999 on the 0.5-degree tilt and 998 on the 3.1-degree one.
-  Dividing it by 1000 and calling it kilometres is meaningless. See the comment
-  at `nexrad_level3.py:188`, which pins 250 m by two independent cross-checks.
-- **First gate is 125 m** (`GATE_SPACING_M / 2`), the *centre* of bin 0. Verified
-  against the ARCO Level 2 store for the same radar, which reports
-  `first_gate_m = 2125.0` where NIDS data begins at bin 8.
-- **The tilt and the moment come from the AWIPS id in the text header**, not from
-  the message code. A message code identifies the *format*, not the tilt: all six
-  reflectivity tilts report 153.
+- **Gate spacing for the original digital radial products is 250 m, and
+  it does not come from the packet header.** The halfword that looks
+  like a range-scale field is `cos(elevation) × 1000` — it reads 999 on
+  a 0.5° tilt and 998 on a 3.1° one. Dividing it by 1000 and calling it
+  kilometres is meaningless. Verified by cross-checking against a real
+  NEXRAD Level 2 volume for the same site and time, and against the
+  packet's own declared bin count × spacing. Other product families use
+  a per-family fixed bin size instead (`decode::products::ProductSpec::bin_size`)
+  — never derived from this field for elevation-bearing products.
+- **First gate is 125 m** (half the gate spacing), the *center* of bin 0.
+  Verified against an independent Level 2 archive for the same radar.
+- **The tilt and the moment come from the AWIPS id in the text header**
+  for the six verified products, not from the message code alone — a
+  message code identifies the *format*, not the tilt (all six
+  reflectivity tilts report message code 153). For the wider product set
+  beyond those six, radish resolves the moment from the message code
+  directly (deterministic and always correct) and leaves tilt
+  unresolved rather than guessing from an unverified AWIPS-letter table.
 
 ### 4.5 Azimuths are ray CENTRES, not the stored start angles
 
-The file stores each radial's **start** angle plus its angular width. The
-consumer's protocol wants the **centre** — `start + delta/2`. Publishing raw
-start angles rotates every sweep by half a beamwidth counter-clockwise: 436 m of
-displacement at 100 km on a 720-ray sweep, growing to ~2 km at the sweep edge.
+The file stores each radial's **start** angle plus its angular width. A
+correctly georeferenced sweep needs the **center** — `start + delta/2`.
+Publishing raw start angles rotates every sweep by half a beamwidth
+counter-clockwise — hundreds of meters of displacement at typical
+ranges, growing toward the sweep edge. Verified byte-exact against a
+real byte-level oracle on 7 real fixtures.
 
 ### 4.6 Velocity is two products, split by tilt
 
-The NWS splits velocity across two message codes. A one-letter-per-moment map
-cannot express this, and that shape is what made velocity look absent from a
-bucket that had been carrying it all along:
+The NWS splits velocity across two message codes — a one-letter-per-moment
+map can't express this:
 
 | letter | code | tilts | elevations |
 |---|---|---|---|
@@ -200,180 +194,141 @@ Both declare min -63.5, increment 0.5, 254 levels.
 
 ### 4.7 The decompression bomb guard is not optional
 
-`MAX_DECOMPRESSED_BYTES = 8 << 20` (`nexrad_level3.py:177`). The Python
-decompresses **incrementally with a hard cap**, because 1.3 KB of crafted input
-expands without bound otherwise. The largest real product is ~1.3 MB.
+`MAX_DECOMPRESSED_BYTES = 8 << 20`. Decompression is incremental with a
+hard cap, because a small crafted input can expand without bound
+otherwise, and the largest real product is only ~1.3 MB decompressed.
 
-**This matters more in a browser than on a server.** A one-shot `decompress()`
-in wasm reintroduces a hole that is already closed, in a context where the
-attacker controls the input (any S3 key the page can be pointed at) and the
-victim is the user's own tab.
+**This matters more in a browser than on a server.** A one-shot
+decompress-to-completion call in wasm reopens a hole that's already
+closed elsewhere, in a context where the input can come from any object
+key a page can be pointed at, and the "victim" of a resource-exhaustion
+bug is the user's own browser tab.
 
 ### 4.8 Code 0 and code 1 are not data
 
-`DATA_FLOOR_CODE = 2`. In every digital radial product, 0 is "below threshold"
-and 1 is "range folded". Physical value is `value_min + (code - 2) *
-value_increment`; codes below 2 are NaN / transparent.
+`DATA_FLOOR_CODE = 2`. In every digital radial product, code 0 is "below
+threshold" and code 1 is "range folded". Physical value is
+`value_min + (code - 2) * value_increment`; codes below 2 are NaN.
+`raw_codes` still carries the verbatim code either way, so a consumer
+that wants to distinguish "below threshold" from "range folded" can —
+that distinction isn't collapsed away, just not exposed as a separate
+field radish would have to own and keep in sync.
 
 ---
 
-## 5. Phase A — make radish compile to `wasm32-unknown-unknown`
+## 5. Phase A — `radish` compiles to `wasm32-unknown-unknown`
 
-**Do this first, before writing any Level 3 code.** It is the phase that can
-fail in ways that change the plan, and it is independent of the decoder.
+**Status: done.**
 
-radish cannot target wasm today. From `Cargo.toml` (workspace) and
-`radish/Cargo.toml`, which has **no `[features]` section at all** — every
-dependency is unconditional:
+`radish/Cargo.toml` gained a `[features]` table: `default = ["native"]`,
+`native = ["dep:hdf5", "dep:netcdf", "dep:rayon"]`. `hdf5`/`netcdf` (C
+libraries, no wasm story at all) and `rayon` (needs
+`wasm-bindgen-rayon` + cross-origin-isolation headers, a real deployment
+constraint not worth imposing on a static-hosted client) are now
+`optional = true` and gated behind `native`. `bzip2` was already
+pure-Rust (`libbz2-rs-sys`, the crate's default backend since 0.5) — no
+change needed there.
 
-| dependency | pin | problem on wasm32 | fix |
-|---|---|---|---|
-| `hdf5` (`hdf5-metno`) | 0.12 | C library, links libhdf5 | feature-gate behind `native` |
-| `netcdf` | 0.12 | C library, pulls `hdf5-sys` | feature-gate behind `native` |
-| `bzip2` | 0.6 | defaults to the C `libbz2` binding | switch to the pure-Rust backend (`libbz2-rs-sys`), or `bzip2-rs` |
-| `rayon` | 1.10 | needs `wasm-bindgen-rayon` + cross-origin isolation | feature-gate; single-threaded on wasm |
-| `ndarray`, `chrono`, `serde`, `serde_json`, `byteorder`, `bytemuck`, `thiserror`, `anyhow` | — | none expected | — |
-
-Steps:
-
-- [ ] `rustup target add wasm32-unknown-unknown`, then
-      `cargo build -p radish --target wasm32-unknown-unknown` **before changing
-      anything**. Record the actual error list. The table above is read from
-      manifests, not from a build — **the first real build turns it from a
-      prediction into a measurement**, and it may well find transitive blockers
-      not listed here.
-- [ ] Add `[features]` to `radish/Cargo.toml`. Suggested shape:
-      `default = ["native"]`, `native = ["hdf5", "netcdf", "rayon"]`, with
-      `cfradial1` and any netCDF/HDF5-backed backend gated on `native`.
-- [ ] Make the `bzip2` backend pure Rust. **This benefits Level 2 too** — it is
-      the same dependency Archive II LDM records use — so it is not
-      wasm-only work.
-- [ ] Gate `rayon` usage behind `#[cfg(feature = "rayon")]` with a serial
-      fallback. Do not reach for `wasm-bindgen-rayon`: it requires COOP/COEP
-      headers on the serving page, which is a real deployment constraint to
-      impose on a static-hosted free tier.
-- [ ] CI job: `cargo check -p radish --no-default-features --target
-      wasm32-unknown-unknown`. Without this, the first `native`-only import
-      merged after Phase A silently un-does it.
-
-**Exit:** `radish` core compiles for wasm32 with `--no-default-features`, and CI
-fails if that stops being true.
+CI (`.github/workflows/rust-ci.yml`'s `wasm` job) runs
+`cargo check -p radish --no-default-features --target wasm32-unknown-unknown`
+and separately asserts `netcdf`/`hdf5-metno-sys`/`libz-sys`/`rayon` never
+appear in the dependency graph for either `radish` core or the
+`radish-wasm` crate — so a future PR reintroducing an unconditional
+`hdf5`/`netcdf` import, or a workspace-dependency change that silently
+re-enables `native` for the wasm crate (a real bug found and fixed during
+this work — see §8), fails loudly rather than silently regressing.
 
 ---
 
 ## 6. Phase B — the Level 3 backend
 
-New module `radish/src/backends/nexrad_level3/`, following the existing backend
-pattern (`docs/ARCHITECTURE.md`, "Backend Implementation Pattern"). Reuse
-`backends/common/` — `buffer.rs`, `coords.rs`, `geometry.rs`, `sniff.rs` — rather
-than writing new byte-reading helpers.
+**Status: done.** `radish/src/backends/nexrad_level3/`, following the
+existing backend pattern (`docs/ARCHITECTURE.md`, "Backend Implementation
+Pattern"), reusing `backends/common/` rather than new byte-reading
+helpers.
 
-- [ ] **Sniff.** NIDS files begin with a WMO/AWIPS text header, separator
-      `\r\r\n`, and the AWIPS id is a 6-char alphanumeric token (`N0BLOT`). Do
-      **not** commit to the first 6-char token found — a NOAAPORT-style prefix
-      line puts an unrelated one ahead of the AWIPS id. Keep scanning.
-- [ ] **Message header + PDB.** Locate the message header by **validating**, not
-      by pattern-searching: at the right offset the message code is a known one
-      *and* the product description block is self-consistent.
-- [ ] **Value scaling**, both forms, dispatched on an enum (see 4.3).
-- [ ] **Symbology block** -> layer -> **digital radial data array packet
-      (code 16)**: radial count, azimuth start/delta per radial, range step,
-      run-length-encoded gates. Anything that is not packet 16 is a different
-      geometry and must be **rejected**, not read as if it were this one.
-- [ ] **Optional, matching xradar #392's breadth:** packet `AF1F` (RLE radials)
-      and packet 28 (generic data, DPR/HHC). Not required by AtmoScale. Decide
-      deliberately — see "Open questions".
-- [ ] **bzip2** on the symbology block, incremental, with the hard cap from 4.7.
-- [ ] **Product table.** At minimum the six AtmoScale products (153, 154, 99,
-      159, 161, 163). Prefer xradar #392's fuller table if the extra codes are
-      cheap — but every added code needs a fixture, or it is untested surface.
-- [ ] **Model output:** the CfRadial2/FM301 normalization radish always produces,
-      **plus** the raw-code accessors from 4.1. Both, not either.
-
-**Exit:** one real product decodes to codes + georeference in Rust.
+- Content-based sniffing: NIDS files begin with a WMO/AWIPS text header,
+  separator `\r\r\n`, and a 6-char alphanumeric AWIPS id token — the
+  sniff keeps scanning rather than committing to the first 6-char token
+  found, since a NOAAPORT-style prefix line can put an unrelated one
+  ahead of the real AWIPS id.
+- Message header + PDB located by *validating*, not pattern-searching:
+  the message code at the candidate offset must be a known one AND the
+  product description block must be internally self-consistent.
+- Both scaling forms (§4.3), dispatched on `DecodeScheme`, an exhaustive
+  enum.
+- Packet 16 (digital radial data array), packet `AF1F` (RLE radials, the
+  legacy 8/16-level product family), and incremental capped bzip2
+  decompression (§4.7). Packet 28 (generic/XDR) and 5 surface precip
+  codes are recognized but deliberately deferred — see
+  `decode::products::DecodeScheme`'s doc for why (packet 28's raw levels
+  are `u16`, a real model mismatch with this backend's `u8`-based
+  `raw_codes` contract, not worth widening speculatively for 2 codes).
+- Product table: 26 message codes from xradar #392's table, 19
+  implemented past the PDB stage; the rest return a named
+  `UnsupportedProduct` error rather than guessing.
+- Model output: radish's normal CfRadial2/FM301 physical-value model,
+  plus the raw-code accessors from §4.1 — both, not either.
 
 ---
 
 ## 7. Phase C — the parity gate
 
-This is the phase that makes the whole thing trustworthy, and it is not
-optional. radar-animation's decoder is the oracle; radish must agree with it
-byte for byte on the products they share.
+**Status: done.** Two tiers:
 
-**Seven fixtures already exist**, unmodified NIDS pulled from
-`s3://unidata-nexrad-level3`, with a README explaining why each one was chosen.
-Copy them into radish rather than re-downloading, so both repos test the same
-bytes:
+**Tier 1 — byte-exact against a real byte-level oracle (CI-blocking).**
+7 real, unmodified NIDS fixtures pulled from `s3://unidata-nexrad-level3`
+(documented in `radish/tests/fixtures/CORPUS.md`, not committed —
+env-var-resolved with SHA-256 pinning, matching the existing Level 2
+corpus convention), covering both scaling forms, both velocity message
+codes, and two different azimuth resolutions. Expected output is
+generated from the oracle decoder directly (never hand-derived), and
+compared byte-for-byte against radish's decode via a committed SHA-256
+sidecar (`radish/tests/fixtures/nexrad_level3/expected/`,
+`radish/tests/test_nexrad_level3_parity.rs`). A dedicated sabotage-verify
+test perturbs a known-good value and confirms the comparison actually
+goes red — a parity test that has never failed has not been shown to
+work.
 
-```
-/home/alfonso-ladino/python/radar-animation/tests/server/fixtures/level3/
-    README.md                          <- read this; it documents each fixture
-    LOT_N0B_2026_07_31_13_06_53        N0B  tilt 0  720 x 1840  DBZH, int-scaled (153)
-    LOT_N3B_2026_07_31_13_02_14        N3B  tilt 5  360 x 1161  HALF azimuth resolution
-    LOT_N0G_2026_08_04_00_09_57        N0G  tilt 0  720 x 1200  velocity, code 154
-    LOT_N2U_2026_08_04_00_09_57        N2U  tilt 4  360 x 1200  velocity, code 99
-    LOT_N0X_2020_03_30_00_02_07        N0X  tilt 0  360 x 1200  ZDR,   float32-scaled (159)
-    LOT_N0C_2020_03_31_00_05_24        N0C  tilt 0  360 x 1200  RHOHV, float32-scaled (161)
-    LOT_N0K_2020_03_31_00_05_24        N0K  tilt 0  360 x 1200  KDP,   float32-scaled (163)
-```
+**Tier 2 — value parity against xradar #392's independent, synthetic,
+byte-built test vectors (tracked, advisory)** for the codes beyond the
+original six (`radish/tests/test_nexrad_level3_xradar_vectors.rs`).
 
-They are chosen to cover exactly the axes that break: both scaling forms, both
-velocity message codes, and two different azimuth resolutions. `N3B` at
-360 x 1161 is called out in that README as "the case most likely to break".
-
-- [ ] Copy the seven fixtures into `radish/tests/fixtures/nexrad_level3/`, with
-      SHA-256 sums — radish already does this for its Level 2 corpus
-      (`radish/tests/fixtures/CORPUS.md`).
-- [ ] Generate the expected output **from the Python oracle**, not by hand:
-      codes array, azimuths, elevation, scaling triple, site lon/lat/height,
-      scan time, first gate, gate spacing.
-- [ ] Assert **byte-for-byte** equality on the code arrays. Not "close" — equal.
-- [ ] Assert georeference equality within a **stated and justified** tolerance.
-- [ ] **Sabotage-verify the gate.** Perturb one code in the Rust output and
-      confirm the test goes red. A parity test that has never failed has not
-      been shown to work. This is a standing rule in the consuming repo, and it
-      has caught vacuous tests there more than once.
-- [ ] Diff against **xradar #392** as well where scope overlaps. Three-way
-      agreement is much stronger evidence than two-way.
-
-**Exit:** CI cannot go green with a decoder that disagrees with the oracle.
+**Exit, verified**: CI cannot go green with a decoder that disagrees with
+the byte-level oracle on the original six products.
 
 ---
 
 ## 8. Phase D — the wasm binding
 
-**Status: DONE** (`plans/0011-nexrad-level3-wasm-backend.md` Phase 7).
+**Status: done.**
 
-New crate `wasm/` (sibling of `python/`), mirroring how the pyo3 binding is
-structured.
+New crate `wasm/` (sibling of `python/`), mirroring how the pyo3 binding
+is structured.
 
-- [x] `crate-type = ["cdylib"]`, `wasm-bindgen`, and `radish` with
-      `default-features = false` — as a **direct `path` dependency**, not
-      `{ workspace = true, default-features = false }`: Cargo only honours a
-      member's `default-features = false` override on a workspace-inherited
-      dependency if the *workspace-level* entry also declares
-      `default-features = false`, which ours doesn't (every other member
-      needs the default `native` feature). The workspace-inherited form
-      silently no-ops — caught via `cargo tree -p radish-wasm`, which still
-      pulled in `hdf5`/`netcdf`/`rayon` before this was fixed. CI now asserts
-      this directly (`.github/workflows/rust-ci.yml`'s `wasm` job).
-- [x] Exports `codes()` as **zero-copy**: `js_sys::Uint8Array::view` over the
-      wasm linear memory backing the decoded product's raw codes array.
-      Lifetime documented on the method itself (invalidated if the
-      `DecodedProduct` instance is freed or wasm memory grows before the
-      caller reads/copies it) — not `bytemuck::cast_slice` as originally
-      sketched here, since the codes are already `u8`; no cast needed, just
-      the view.
-- [x] Also exports `dealiasRegionBased` (velocity + mask in, fold-count
-      `Int32Array` out) — the reason Phase 5/6 targeted wasm at all; a
-      corrected-velocity display needs both decode and dealiasing with no
-      server in the path.
-- [x] **Library, not an application.** No fetch, no S3, no worker logic — bytes
-      (or typed arrays) in, decoded/dealiased sweep out.
-- [x] **Measured, not assumed** (Node.js harness, `wasm-bindgen --target
-      nodejs` + `performance.now()`, real fixtures — see
-      `plans/0011-nexrad-level3-wasm-backend.md` Phase 7 for the full
-      methodology):
+- `crate-type = ["cdylib"]`, `wasm-bindgen`, and `radish` with
+  `default-features = false` — as a **direct `path` dependency**, not
+  `{ workspace = true, default-features = false }`: Cargo only honours a
+  member's `default-features = false` override on a workspace-inherited
+  dependency if the *workspace-level* entry also declares
+  `default-features = false`, which this workspace's doesn't (every
+  other member needs the default `native` feature). The
+  workspace-inherited form silently no-ops — caught via
+  `cargo tree -p radish-wasm`, which still pulled in `hdf5`/`netcdf`/
+  `rayon` before this was fixed. CI now asserts this directly.
+- Exports `codes()` as **zero-copy**: `js_sys::Uint8Array::view` over the
+  wasm linear memory backing the decoded product's raw codes array.
+  Lifetime documented on the method itself (invalidated if the
+  `DecodedProduct` instance is freed, or wasm memory grows, before the
+  caller reads/copies it).
+- Also exports `dealiasRegionBased` (velocity + mask in, fold-count
+  `Int32Array` out) — see §"Region-based velocity dealiasing" below for
+  why a corrected-velocity display needs both decode and dealiasing with
+  no server in the path.
+- **Library, not an application.** No fetch, no S3, no worker logic —
+  bytes (or typed arrays) in, decoded/dealiased sweep out.
+- **Measured, not assumed** (Node.js harness, `wasm-bindgen --target
+  nodejs` + `performance.now()`, real fixtures):
 
   | Metric | Value |
   |---|---|
@@ -383,111 +338,111 @@ structured.
   | Gzip -9, raw | 63,935 B |
   | Gzip -9, after `wasm-opt -O3` | 64,017 B |
   | Gzip -9, after `wasm-opt -Oz` | 64,184 B |
-  | `decodeNexradLevel3`, real 224,559 B `LOT_N0B` (720×1840) | 21.9 ms median (n=50) |
-  | `dealiasRegionBased`, real KLOT sweep (720×1192, 225,842 nonzero folds) | 578.3 ms median (n=10) |
+  | `decodeNexradLevel3`, real 224,559 B NIDS product (720×1840) | 21.9 ms median (n=50) |
+  | `dealiasRegionBased`, real velocity sweep (720×1192, 225,842 nonzero folds) | 578.3 ms median (n=10) |
 
-  **The gzip-size finding is worth stating plainly, since it contradicts the
-  intuitive assumption**: `wasm-opt`'s size optimizations shrink the *raw*
-  binary (170,470 → 158,038 B, ~7% smaller at `-Oz`) but very slightly
-  *increase* the *gzipped* size (63,935 → 64,184 B) — code restructured for
-  compactness can reduce the repetition gzip's LZ77 window would otherwise
-  compress well. Since browsers transfer the gzipped (or brotli'd) bytes,
-  not the raw ones, `wasm-opt` here is close to a wash on transfer size for
-  this module and buys nothing worth citing as a win — recorded honestly
-  rather than assuming `-O3`/`-Oz` "obviously" helps.
-  All figures are single-machine measurements (this session's dev box), not
-  a cross-platform benchmark claim.
+  **The gzip-size finding is worth stating plainly, since it contradicts
+  the intuitive assumption**: `wasm-opt`'s size optimizations shrink the
+  *raw* binary (170,470 → 158,038 B, ~7% smaller at `-Oz`) but very
+  slightly *increase* the *gzipped* size (63,935 → 64,184 B) — code
+  restructured for compactness can reduce the repetition gzip's LZ77
+  window would otherwise compress well. Since browsers transfer the
+  gzipped (or brotli'd) bytes, not the raw ones, `wasm-opt` here is close
+  to a wash on transfer size for this module and buys nothing worth
+  citing as a win — recorded honestly rather than assuming `-O3`/`-Oz`
+  "obviously" helps. All figures are single-machine measurements, not a
+  cross-platform benchmark claim.
+
   The dealiasing figure (fold count 225,842) matches the native Rust
   criterion benchmark and the Python-binding smoke test exactly — real
   end-to-end confirmation the wasm build's output is bit-identical to
   native, not just "runs without crashing."
 
-**The unverified "54 kB" figure originally cited here has been removed** —
-grepped the whole `radar-animation/docs/competitive-landscape.md` this
-session and it isn't there; do not re-cite it. The real, measured numbers
-above (~64 KB gzipped for decode+dealias combined) replace it.
+**Exit, verified**: a browser (Node.js standing in for one) decodes and
+dealiases a real NIDS product and a real velocity sweep with no server
+in the path, with real size/latency numbers.
 
-**Exit:** a browser (Node.js standing in for one) decodes and dealiases a
-real NIDS product and a real velocity sweep with no server in the path, with
-real size/latency numbers instead of a cited-but-unverified one.
+---
+
+## Region-based velocity dealiasing
+
+**Status: done.** `radish::transforms::dealias_region_based` is a Rust
+port of Py-ART's `pyart.correct.dealias_region_based` (region growing +
+4-connected-component labeling + a dynamic edge-network reduction),
+bit-exact with Py-ART on every unmasked gate — verified against a real
+Py-ART install on real NEXRAD Level 2 velocity sweeps, not only synthetic
+cases (`radish/tests/test_dealias_parity.rs`).
+
+This is in scope alongside decode for the same reason both target wasm:
+a raw NEXRAD Level 3 velocity product is genuinely folded (NOAA's RPG
+doesn't ship a pre-dealiased Level 3 product), and an unfolded velocity
+display needs region-based dealiasing to be usable — masking only
+below-threshold gates and not range-folded ones leaves every folded gate
+painting as a maximum-velocity artifact that reads as a false rotation
+signature. A server-backed deployment can run Py-ART directly; a
+serverless, browser-only one needs the same algorithm reachable from
+wasm, which is what this module provides.
+
+`dealias_region_based` operates on already-decoded velocity — it doesn't
+touch the decode path, and dealiasing is a transform a caller runs on
+demand rather than a decode-time output (no new field on any decode-side
+model type). `valid_mask` uses the opposite polarity from Py-ART's own
+`gfilter` (`true` = valid/usable) to match Rust convention — documented
+prominently at every layer it crosses (Rust core, PyO3, wasm), since
+getting this backwards silently inverts every result.
+
+Deliberately not ported: the sounding-anchored `ref_vel_field` path
+(L-BFGS-B reference-velocity fitting) — rarely used, and has no obvious
+wasm-friendly pure-Rust story.
+
+Reachable from Python as `radish.dealias_region_based(...)` and from the
+wasm crate as `dealiasRegionBased(...)`. ~8x faster than Py-ART's own
+implementation on the same real sweep (`radish/benches/dealias.rs`).
 
 ---
 
 ## 9. What this deliberately does NOT do
 
-- **No networking, no S3 listing, no caching.** The consumer's plan
-  (`/home/alfonso-ladino/python/radar-animation/plans/serverless-realtime.md`,
-  Phases 4–5) owns all of that. radish takes bytes.
-- **No rendering, no geometry-for-GPU.** AtmoScale's renderer
-  (`/home/alfonso-ladino/python/radar-animation/dashboard/lib/maplibre/RadarFrameLayer.ts`)
-  projects analytically in the shader from ~6.3 KB of unit geometry and uploads
-  1 byte per gate. Building vertex buffers in wasm would be a large regression —
-  the best mesh representation benchmarked in the paper cited above costs 28 B
-  per gate. **Do not add a `to_vertices` API.**
-- **No replacement of the Python decoder in radar-animation.** It stays as the
-  oracle and as the paid tier's server path, at least until Phase C has been
-  green for a while.
-- **No opinion on how many frames the free tier loops.** That is an open product
-  decision in D0.
+- **No networking, no S3 listing, no caching.** A consuming application
+  owns all of that. radish takes bytes (or typed arrays) in, and returns
+  decoded/dealiased data out.
+- **No rendering, no geometry-for-GPU, no `to_vertices` API.** How a
+  consumer renders the decoded codes — texture upload, shader-based
+  color mapping, vertex geometry, whatever fits its rendering pipeline —
+  is display-layer policy this library doesn't own.
+- **No fitted azimuth slope.** The wasm binding exports the general
+  per-radial azimuth array, not a fitted `az_start_deg`/`az_step_deg`
+  pair a specific renderer might want — that fit is application-layer
+  policy, not decode-side knowledge.
+- **No opinion on how a consumer re-quantizes or serves dealiased
+  velocity codes.** The raw-codes-passthrough contract (§4.1) doesn't
+  extend past ±Nyquist once a gate has been unfolded — how a caller
+  re-quantizes and serves that is its own wire-format decision.
 
 ---
 
 ## 10. Reference map
 
-### In radish (repo-relative)
-
 | path | what |
 |---|---|
 | `docs/ARCHITECTURE.md` | backend trait, data model, the pattern a new backend follows |
 | `radish/src/backends/nexrad/` | the Level 2 decoder — closest existing analogue |
+| `radish/src/backends/nexrad_level3/` | this backend |
+| `radish/src/transforms/dealias/` | the dealiasing port |
 | `radish/src/backends/common/` | shared byte-reading, coords, geometry, sniffing |
-| `radish/Cargo.toml` | no `[features]` section yet — Phase A adds it |
-| `Cargo.toml` (workspace) | dependency pins quoted in Phase A |
-| `python/Cargo.toml` | the pyo3 binding this work mirrors |
-| `plans/0001-nexrad-level2-backend.md` … | how previous backends were planned here |
-
-### In radar-animation (absolute — separate checkout)
-
-| path | what |
-|---|---|
-| `/home/alfonso-ladino/python/radar-animation/src/server/nexrad_level3.py` | **the oracle.** 638 lines. Docstrings explain the *why* for every item in section 4 |
-| `/home/alfonso-ladino/python/radar-animation/src/server/level3_source.py` | `_check_scale` at :225 — the refuse-don't-rescale policy |
-| `/home/alfonso-ladino/python/radar-animation/src/server/frames.py` | `QUANT` at :138 — the pinned quantization that makes codes verbatim |
-| `/home/alfonso-ladino/python/radar-animation/tests/server/fixtures/level3/` | the seven fixtures + a README explaining each choice |
-| `/home/alfonso-ladino/python/radar-animation/docs/level3.md` | what the products contain, and how the decoder is organized |
-| `/home/alfonso-ladino/python/radar-animation/docs/frames-protocol.md` | the uint8 wire format the codes end up in |
-| `/home/alfonso-ladino/python/radar-animation/plans/serverless-realtime.md` | the consuming plan. **Phases 2–3 are superseded by this document** |
-| `/home/alfonso-ladino/python/radar-animation/plans/realtime-first-wiring.md` | section D0 — the tier decision and its evidence |
-| `/home/alfonso-ladino/python/radar-animation/docs/competitive-landscape.md` | why serverless, the memory wall, the WASM size benchmark |
-| `/home/alfonso-ladino/python/radar-animation/docs/product-architecture.md` | section 5.1 — the tier split of record |
-| `/home/alfonso-ladino/python/radar-animation/dashboard/lib/maplibre/RadarFrameLayer.ts` | the renderer that consumes the codes — read it before proposing a geometry API |
+| `radish/Cargo.toml` | the `[features]` table from Phase A |
+| `python/Cargo.toml`, `wasm/Cargo.toml` | the two bindings |
+| `radish/tests/fixtures/CORPUS.md` | fixture corpus documentation (NEXRAD L2, NIDS, and dealiasing) |
+| `plans/0001-nexrad-level2-backend.md` … | how previous backends were planned in this repo |
 
 ### External
 
-- [openradar/xradar PR #392][xr392] — the Python NIDS reader to diff against.
-- NEXRAD Level 3 ICD (NOAA 2620001) — the format specification. Note that
-  section 4.4 lists three places where the ICD's field names mislead.
+- [openradar/xradar PR #392][xr392] — the Python NIDS reader used as a
+  breadth/value-parity reference.
+- NEXRAD Level 3 ICD (NOAA 2620001) — the format specification. §4 above
+  lists several places where the ICD's field names mislead.
+- Py-ART's `pyart.correct.dealias_region_based` — the dealiasing oracle.
 
 ---
 
-## 11. Open questions — decide these before Phase B, not during
-
-1. **Scope: AtmoScale's six products, or xradar #392's fuller set?** The narrow
-   set is what has fixtures and an oracle. The fuller set is what makes radish a
-   general Level 3 reader. Extra codes without fixtures are untested surface —
-   whatever is chosen, the fixture count should track the product count.
-2. **Packets AF1F and 28?** Not needed by the consumer. They are most of the gap
-   between 638 and 1,182 lines.
-3. **Does the wasm crate live in radish, or in AtmoScale?** In radish, it is one
-   more binding of one library. In AtmoScale, radish stays a pure library and the
-   browser glue lives with its consumer. Recommendation: **radish**, because the
-   zero-copy boundary in Phase D is decode-side knowledge, not app-side.
-4. **Does `radish-python` replace radar-animation's Python decoder eventually?**
-   That would make it genuinely one implementation everywhere. It also puts a
-   compiled dependency on the server's critical path. Not urgent; revisit after
-   Phase C has been green for a while.
-
----
-
-[atmoscale]: https://github.com/aladinor/radar-dashboard "private repo — ignored by the markdown-link-check CI job, see .github/markdown-link-check-config.json"
 [xr392]: https://github.com/openradar/xradar/pull/392

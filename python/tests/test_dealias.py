@@ -1,4 +1,4 @@
-"""Tests for `radish.dealias_region_based` (plan 0011 Phase 5).
+"""Tests for `radish.dealias_region_based`.
 
 The Py-ART cross-check (`test_matches_real_pyart_on_a_dense_multi_region_sweep`)
 skips cleanly when `pyart` isn't importable — it's a bonus confirmation on
@@ -181,9 +181,9 @@ def test_matches_real_pyart_on_a_dense_multi_region_sweep():
     internals on the SAME array `radish.dealias_region_based` just ran,
     end to end, and compares fold counts. Skips cleanly if Py-ART isn't
     installed in this environment (it's a dev/cross-check dependency,
-    not a runtime one — see `plans/0011-nexrad-level3-wasm-backend.md`
-    Phase 6 for the formal, pinned-version golden-corpus gate this is a
-    lightweight preview of)."""
+    not a runtime one — see `radish/tests/test_dealias_parity.rs` for the
+    formal, pinned-version golden-corpus gate this is a lightweight
+    preview of)."""
     pytest.importorskip("pyart")
     from pyart.correct.region_dealias import (
         _combine_regions,

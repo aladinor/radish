@@ -9,8 +9,8 @@
 //! ```
 //!
 //! Benchmarks radish's own cost only — Py-ART isn't callable from a Rust
-//! criterion harness. `plans/0011-nexrad-level3-wasm-backend.md` Phase 6
-//! records a separate, one-off `timeit`-based measurement of Py-ART's own
+//! criterion harness. `docs/NEXRAD_LEVEL3_WASM.md` records a separate,
+//! one-off `timeit`-based measurement of Py-ART's own
 //! `dealias_region_based` on the same sweep for a rough side-by-side
 //! comparison; treat that number as a single-machine anecdote, not a
 //! tracked regression gate the way this benchmark is.

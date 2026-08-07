@@ -2,8 +2,9 @@
 //! `network` into the same pipeline `dealias_region_based`'s sweep loop
 //! runs (`pyart/correct/region_dealias.py`), producing per-gate fold
 //! counts. The `ref_vel_field` sounding-anchoring path (L-BFGS-B) is
-//! deliberately NOT ported — see `plans/0011-nexrad-level3-wasm-backend.md`
-//! Phase 5's "explicitly deferred" note.
+//! deliberately NOT ported — it's rarely used and has no obvious
+//! wasm-friendly pure-Rust story (see `super`'s (`dealias/mod.rs`) module
+//! doc for what is in scope).
 
 use ndarray::Array2;
 

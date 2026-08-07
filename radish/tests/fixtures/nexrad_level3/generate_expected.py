@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Generate byte-parity golden files for the NEXRAD Level 3 (NIDS) test
-corpus, from the Python oracle (`nexrad_level3.py` in the sibling
-`radar-animation` checkout — see `docs/NEXRAD_LEVEL3_WASM.md`).
+corpus, from an independent Python NIDS decoder used as the byte-level
+oracle — see `docs/NEXRAD_LEVEL3_WASM.md` for what that oracle needs to
+provide and how it was cross-checked.
 
 This is a one-time generation step, run by a developer when the fixture
 list changes — NOT part of `cargo test` or CI. The committed OUTPUT
 (`expected/<fixture>.json`) is what `test_nexrad_level3_parity.rs` actually
-reads; it does not need Python, numpy, or the sibling checkout available at
+reads; it does not need Python, numpy, or the oracle decoder available at
 test time.
 
 Deliberately does NOT commit the raw codes array (up to ~1.3 MB per
@@ -18,9 +19,14 @@ prefix sample is kept for a human-readable diff on failure.
 
 Usage (from the radish repo root)::
 
-    RADAR_ANIMATION_DIR=/home/alfonso-ladino/python/radar-animation \\
-    RADISH_NEXRAD_LEVEL3_FIXTURE_DIR=/home/alfonso-ladino/python/radar-animation/tests/server/fixtures/level3 \\
+    NEXRAD_LEVEL3_ORACLE_DIR=/path/to/oracle/checkout \\
+    RADISH_NEXRAD_LEVEL3_FIXTURE_DIR=/path/to/oracle/checkout/tests/fixtures/level3 \\
         python3 radish/tests/fixtures/nexrad_level3/generate_expected.py
+
+`NEXRAD_LEVEL3_ORACLE_DIR` must point at a checkout exposing a
+`server.nexrad_level3` module with the same `decode(bytes) -> Sweep`
+contract described in `docs/NEXRAD_LEVEL3_WASM.md` — this script itself
+carries no oracle implementation, only the harness that drives one.
 """
 
 from __future__ import annotations
@@ -43,18 +49,22 @@ FIXTURES = [
 
 
 def main() -> int:
-    radar_animation_dir = Path(
-        os.environ.get(
-            "RADAR_ANIMATION_DIR", "/home/alfonso-ladino/python/radar-animation"
+    oracle_env = os.environ.get("NEXRAD_LEVEL3_ORACLE_DIR")
+    if not oracle_env:
+        print(
+            "NEXRAD_LEVEL3_ORACLE_DIR must be set to a checkout of the oracle "
+            "decoder — see this script's module doc.",
+            file=sys.stderr,
         )
-    )
+        return 1
+    oracle_dir = Path(oracle_env)
     fixture_dir = Path(
         os.environ.get(
             "RADISH_NEXRAD_LEVEL3_FIXTURE_DIR",
-            str(radar_animation_dir / "tests/server/fixtures/level3"),
+            str(oracle_dir / "tests/fixtures/level3"),
         )
     )
-    sys.path.insert(0, str(radar_animation_dir / "src"))
+    sys.path.insert(0, str(oracle_dir / "src"))
     from server import nexrad_level3 as l3  # noqa: E402  (path injected above)
 
     out_dir = Path(__file__).parent / "expected"

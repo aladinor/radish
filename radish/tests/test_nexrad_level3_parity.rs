@@ -1,11 +1,11 @@
-//! NEXRAD Level 3 (NIDS) decode parity — Tier 1: byte-exact vs. the local
-//! Python oracle (`radar-animation/src/server/nexrad_level3.py`).
+//! NEXRAD Level 3 (NIDS) decode parity — Tier 1: byte-exact vs. an
+//! independent Python decode oracle.
 //!
 //! See `radish/tests/fixtures/CORPUS.md`'s "NEXRAD Level 3 (NIDS) corpus"
 //! section for how the fixtures and their `expected/*.json` sidecars were
-//! produced, and `plans/0011-nexrad-level3-wasm-backend.md` Phase 4 for
-//! why this is the CI-blocking gate for the 6 AtmoScale products (plus
-//! N3B, a same-family grid-shape case).
+//! produced, and `docs/NEXRAD_LEVEL3_WASM.md` for why this is the
+//! CI-blocking gate for the 6 byte-verified products (plus N3B, a
+//! same-family grid-shape case).
 //!
 //! Fixture-parity cases are `#[ignore]`d and skip cleanly (not fail) when
 //! `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR` is unset or a file is missing — the

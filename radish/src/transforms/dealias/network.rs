@@ -1,7 +1,7 @@
 //! Region/edge network reduction: ports Py-ART's `_RegionTracker`,
 //! `_EdgeTracker`, and `_combine_regions`
 //! (`pyart/correct/region_dealias.py`) — replication points 5, 6 and 7 of
-//! the 8 in `plans/0011-nexrad-level3-wasm-backend.md` Phase 5.
+//! the 8 listed in `super`'s (`dealias/mod.rs`) module doc.
 //!
 //! Node ids are region labels directly (`1..=n_features`), plus an unused
 //! index `0` — mirroring the source's `nnodes = nfeatures + 1` /

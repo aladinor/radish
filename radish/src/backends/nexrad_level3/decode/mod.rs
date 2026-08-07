@@ -91,7 +91,7 @@ pub(crate) struct DecodedProduct {
     pub first_gate_m: f32,
     pub gate_spacing_m: f32,
     /// The product's own linear scale, when it has one (`LinearHw`/
-    /// `FloatScale` — the original 6 AtmoScale products plus 94/155).
+    /// `FloatScale` — the original 6 byte-verified products plus 94/155).
     pub declared_scale: Option<DeclaredLinearScale>,
     /// Physical values, always populated regardless of decode scheme —
     /// every backend consumer expects `MomentData::data` to be usable.

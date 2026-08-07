@@ -1,12 +1,12 @@
 //! Errors raised by the NEXRAD Level 3 (NIDS) byte-level decoder.
 //!
-//! One variant per `Level3Error` raise site in the Python oracle
-//! (`radar-animation/src/server/nexrad_level3.py`) this backend must match
-//! byte-for-byte on — see `docs/NEXRAD_LEVEL3_WASM.md`. Kept 1:1 with the
-//! oracle deliberately: the parity test suite (Phase 4) needs to assert
-//! "this input fails to decode" as precisely as "this input decodes to
-//! these bytes", and a merged catch-all variant would blur which check
-//! actually fired.
+//! One variant per raise site in the independent Python decode oracle
+//! this backend must match byte-for-byte on — see
+//! `docs/NEXRAD_LEVEL3_WASM.md`. Kept 1:1 with the oracle deliberately:
+//! the parity test suite (`radish/tests/test_nexrad_level3_parity.rs`)
+//! needs to assert "this input fails to decode" as precisely as "this
+//! input decodes to these bytes", and a merged catch-all variant would
+//! blur which check actually fired.
 
 use thiserror::Error;
 
@@ -154,8 +154,8 @@ pub(crate) enum Level3DecodeError {
     /// array (16) nor RLE radials (`AF1F`) — most commonly the generic
     /// data packet (28, XDR: DPR rate / hybrid hydrometeor class), which
     /// this backend does not decode yet (its raw levels are `u16`, not
-    /// `u8` — see `decode::products`'s module doc and
-    /// `plans/0011-nexrad-level3-wasm-backend.md` Phase 3's exit notes).
+    /// `u8` — see `decode::products`'s module doc for why that's a real
+    /// model mismatch, not just unimplemented).
     #[error("unsupported symbology packet code {code} (0x{code:04x})")]
     UnsupportedPacketCode { code: i16 },
 

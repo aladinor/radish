@@ -1,10 +1,9 @@
 //! Shared helpers for the fixture-backed golden-corpus parity tests
 //! (`test_nexrad_level3_parity.rs`, `test_dealias_parity.rs`). Pulled out
-//! after an adversarial review flagged `hex32`/`fixture_path`/
-//! `load_expected` as byte-for-byte-identical (or near-identical, module
-//! aside) across those two files — see
-//! `plans/0011-nexrad-level3-wasm-backend.md` Phase 4/6's parity-gate
-//! sections.
+//! after a review flagged `hex32`/`fixture_path`/`load_expected` as
+//! byte-for-byte-identical (or near-identical, module aside) across those
+//! two files — see those files' module docs and `radish/tests/fixtures/
+//! CORPUS.md` for what each parity gate checks.
 //!
 //! `test_nexrad.rs` (pre-existing, Level 2 corpus) has its own inline
 //! `hex32` too — not migrated here to keep this change scoped to the

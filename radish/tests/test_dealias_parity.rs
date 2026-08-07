@@ -1,13 +1,12 @@
 //! Velocity dealiasing parity — bit-exact vs. a real Py-ART install, on
 //! real NEXRAD Level 2 velocity sweeps. See
-//! `plans/0011-nexrad-level3-wasm-backend.md` Phase 6 and
 //! `radish/tests/fixtures/dealias/generate_expected.py` (the golden-
-//! corpus generator) for how the `expected/*.json` sidecars were built.
+//! corpus generator) for how the `expected/*.json` sidecars were built,
+//! and `radish/tests/fixtures/CORPUS.md` for the corpus itself.
 //!
-//! **Py-ART version pinned**: `2.2.0` (installed at
-//! `/home/alfonso-ladino/radar-segmentation/.venv` when the sidecars were
-//! generated this session). Re-run the generator and update this comment
-//! if the pinned version changes.
+//! **Py-ART version pinned**: `2.2.0`. Re-run the generator against a
+//! Py-ART install of that version and update this comment if the pinned
+//! version changes.
 //!
 //! Fixture-parity cases are `#[ignore]`d and skip cleanly (not fail) when
 //! `RADISH_NEXRAD_FIXTURE_DIR` is unset or the fixture is missing — same

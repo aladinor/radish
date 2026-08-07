@@ -2,7 +2,7 @@
 //! `_fast_edge_finder` (`pyart/correct/_fast_edge_finder.pyx`) and the
 //! lexsort/dedup half of `_edge_sum_and_count`
 //! (`pyart/correct/region_dealias.py`) — replication points 2, 3 and 4
-//! of the 8 in `plans/0011-nexrad-level3-wasm-backend.md` Phase 5.
+//! of the 8 listed in `super`'s (`dealias/mod.rs`) module doc.
 
 use ndarray::Array2;
 

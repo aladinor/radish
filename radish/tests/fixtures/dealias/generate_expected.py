@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""Generate the Phase 6 golden-corpus sidecar for the dealiasing parity
-gate (`radish/tests/test_dealias_parity.rs`).
+"""Generate the golden-corpus sidecar for the dealiasing parity gate
+(`radish/tests/test_dealias_parity.rs`).
 
 Uses a REAL, already-decoded NEXRAD Level 2 velocity sweep — decoded by
 `radish` ITSELF (not Py-ART's own NEXRAD reader, which pads every sweep

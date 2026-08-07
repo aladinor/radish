@@ -1,25 +1,27 @@
 //! Manual smoke test for the NEXRAD Level 3 (NIDS) backend — decodes a real
-//! product and prints the fields the Python oracle
-//! (`radar-animation/src/server/nexrad_level3.py`) reports, for eyeball
-//! cross-checking. Phase 4 (`plans/0011-nexrad-level3-wasm-backend.md`)
-//! turns this comparison into an automated byte-for-byte test; this
-//! example is the fast manual version used while building the decoder.
+//! product and prints the decoded fields for eyeball cross-checking against
+//! the byte-level oracle used by `radish/tests/test_nexrad_level3_parity.rs`
+//! (see `radish/tests/fixtures/CORPUS.md`). That test is the automated,
+//! byte-for-byte version of this comparison; this example is the fast
+//! manual version useful while iterating on the decoder.
 //!
 //! ```text
 //! cargo run --example nexrad_level3_smoke -- /path/to/LOT_N0B_...
 //! ```
 //!
-//! Defaults to this session's fixture path in the sibling `radar-animation`
-//! checkout if no argument is given.
+//! Falls back to `$RADISH_NEXRAD_LEVEL3_FIXTURE_DIR/LOT_N0B_2026_07_31_13_06_53`
+//! if no argument is given (see `radish/tests/fixtures/CORPUS.md` for how to
+//! populate that directory).
 
 use radish::backends::{NexradLevel3Backend, RadarBackend};
 use std::path::Path;
 
 fn main() {
-    let default_path = "/home/alfonso-ladino/python/radar-animation/tests/server/fixtures/level3/LOT_N0B_2026_07_31_13_06_53";
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| default_path.to_string());
+    let path = std::env::args().nth(1).unwrap_or_else(|| {
+        let dir = std::env::var("RADISH_NEXRAD_LEVEL3_FIXTURE_DIR")
+            .expect("pass a NIDS file path, or set RADISH_NEXRAD_LEVEL3_FIXTURE_DIR — see radish/tests/fixtures/CORPUS.md");
+        format!("{dir}/LOT_N0B_2026_07_31_13_06_53")
+    });
 
     let backend = NexradLevel3Backend::new();
     println!("can_read: {}", backend.can_read(Path::new(&path)));

@@ -4,19 +4,19 @@
 //! this session — not vendored, see the URL below).
 //!
 //! Tracked/advisory, not CI-blocking the way `test_nexrad_level3_parity.rs`
-//! (Tier 1, byte-exact against the local Python oracle on real fixtures)
-//! is — see `plans/0011-nexrad-level3-wasm-backend.md` Phase 4. These
-//! tests still run on every `cargo test`, unconditionally (pure synthetic
-//! bytes, no fixtures needed); "advisory" describes the strength of the
-//! evidence a pass/fail here carries, not whether the test executes.
+//! (Tier 1, byte-exact against an independent decode oracle on real
+//! fixtures) is — see `docs/NEXRAD_LEVEL3_WASM.md`. These tests still run
+//! on every `cargo test`, unconditionally (pure synthetic bytes, no
+//! fixtures needed); "advisory" describes the strength of the evidence a
+//! pass/fail here carries, not whether the test executes.
 //!
 //! **Scope, deliberately narrow**: only the codes/schemes this backend
 //! actually implements (packet 16 + AF1F, `LinearHw`/`FloatScale`/
 //! `Legacy16`/`ClassInt` — see `decode::products::PRODUCTS`). Packet 28
 //! (XDR) and the `Precip`/`Rate` schemes (codes 170/172-175/176/177) are
-//! deliberately unimplemented (Phase 3's documented, honest boundary) —
-//! this file cross-checks that they still reject cleanly through the
-//! public API, not that they decode.
+//! deliberately unimplemented (a documented, honest boundary — see
+//! `decode::products`'s module doc) — this file cross-checks that they
+//! still reject cleanly through the public API, not that they decode.
 //!
 //! **One deliberate NON-port, documented rather than silently skipped**:
 //! xradar's `_radial_packet16`/`_radial_packet_af1f` test helpers assign

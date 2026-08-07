@@ -182,7 +182,7 @@ during decoder Phase 6:
   marked `#[ignore]` so they don't slow `cargo test`. Run with
   `cargo test -- --ignored` once the corpus is in place.
 
-## NEXRAD Level 3 (NIDS) corpus (plan 0011)
+## NEXRAD Level 3 (NIDS) corpus
 
 Unmodified NIDS products pulled from `s3://unidata-nexrad-level3` (a flat
 bucket — object keys ARE the filenames below, no date-prefixed path).
@@ -197,7 +197,7 @@ export RADISH_NEXRAD_LEVEL3_FIXTURE_DIR="$HOME/.cache/radish/fixtures/nexrad_lev
 
 | file | bytes | sha256 | product | why this one |
 | --- | ---: | --- | --- | --- |
-| `LOT_N0B_2026_07_31_13_06_53` | 224559 | `e4f0dd21d74dd5415bb5eb95e32d1126d0674f82662b9969cd7129dc2c54510b` | N0B | lowest tilt, packet 16, `LinearInteger` scaling — the free tier's first product |
+| `LOT_N0B_2026_07_31_13_06_53` | 224559 | `e4f0dd21d74dd5415bb5eb95e32d1126d0674f82662b9969cd7129dc2c54510b` | N0B | lowest tilt, packet 16, `LinearInteger` scaling — the primary reflectivity product |
 | `LOT_N3B_2026_07_31_13_02_14` | 18644 | `fa66cfb820b08d37a401fe8f00afe6f58c30aec19daf745b8fdabcac6b319689` | N3B | half the azimuth resolution (360 vs 720 radials) — a genuinely different grid |
 | `LOT_N0X_2020_03_30_00_02_07` | 54368 | `e25169aa65e0f191ca1e7022cb51d12d9c05490ffc0c0dcf48b9ff3bdc2b2fb4` | N0X | ZDR, the float32 scale/offset form |
 | `LOT_N0C_2020_03_31_00_05_24` | 57703 | `dc705bb0a49482420944044c4cfcaf5bdf28a99af51811ab7e273de037652838` | N0C | RHOHV, float32 form |
@@ -251,8 +251,8 @@ for name in names:
 ### Expected-output sidecars (Tier 1 byte-parity)
 
 `radish/tests/fixtures/nexrad_level3/expected/<fixture>.json` — **committed**
-(small JSON, no raw arrays). Generated once, offline, from the Python decode
-oracle (`radar-animation/src/server/nexrad_level3.py`) by
+(small JSON, no raw arrays). Generated once, offline, from an independent
+Python NIDS decoder used as the byte-level oracle, by
 `radish/tests/fixtures/nexrad_level3/generate_expected.py`. Each sidecar
 carries every scalar the decoder produces (site/product/moment/tilt/
 message_code/vcp/elevation/scan_time/lat/lon/height/geometry/scale triple),
@@ -261,8 +261,8 @@ row-major `codes` array bytes, giving full-array byte-exactness without
 committing the array itself (same reasoning as the Level 2 corpus's
 uncommitted-fixtures policy above, applied to expected output instead of
 input). Re-run the generator only when the fixture list changes; it needs
-Python, numpy, and a checkout of `radar-animation` — none of which the
-Rust test (`test_nexrad_level3_parity.rs`) needs at run time.
+Python, numpy, and access to that oracle decoder — none of which the Rust
+test (`test_nexrad_level3_parity.rs`) needs at run time.
 
 ## Test gating (NIDS)
 
@@ -276,7 +276,7 @@ Rust test (`test_nexrad_level3_parity.rs`) needs at run time.
   runs on every `cargo test` and needs no fixtures, since it only
   perturbs an in-memory byte array and checks the comparison catches it.
 
-## Velocity dealiasing golden corpus (plan 0011 Phase 6)
+## Velocity dealiasing golden corpus
 
 Reuses the NEXRAD Level 2 corpus above — no separate fixture download.
 `radish/tests/test_dealias_parity.rs` decodes real velocity (`VRADH`)
@@ -289,15 +289,12 @@ array as the shared input to both sides, so this gate isolates
 dealiasing-only parity from decode parity, which
 `test_nexrad_internal_parity.rs` already covers separately).
 
-**Py-ART version pinned: `2.2.0`** (the version installed in
-`/home/alfonso-ladino/radar-segmentation/.venv` when the sidecars below
-were generated this session — a local dev venv, not part of this repo;
-any Py-ART install of the same version will reproduce identical sidecars,
-since the golden output only depends on Py-ART's own deterministic
-algorithm, not anything venv-specific). Re-run
-`generate_expected.py` and update this pin if upgrading the reference
-Py-ART version — the plan's own risk section flags this as a real
-maintenance point, not a one-time setup step.
+**Py-ART version pinned: `2.2.0`** — any Py-ART install of the same
+version will reproduce identical sidecars, since the golden output only
+depends on Py-ART's own deterministic algorithm, not anything
+environment-specific. Re-run `generate_expected.py` and update this pin
+if upgrading the reference Py-ART version — a real maintenance point, not
+a one-time setup step.
 
 ### Expected-output sidecars
 

@@ -1,14 +1,16 @@
-//! NEXRAD Level 3 (NIDS) backend — digital radial products (packet 16).
+//! NEXRAD Level 3 (NIDS) backend — single-tilt, single-moment digital
+//! radial products.
 //!
 //! See `docs/NEXRAD_LEVEL3_WASM.md` for the design this backend
 //! implements (why it exists, the byte-level contract, what's
-//! deliberately NOT read from the file) and
-//! `plans/0011-nexrad-level3-wasm-backend.md` for how it was built and
-//! what's tested against the Python oracle.
+//! deliberately NOT read from the file) and what's tested against the
+//! byte-level oracle.
 //!
-//! Scope, this phase: the 6 AtmoScale products (DBZH/VRADH/ZDR/RHOHV/KDP,
-//! message codes 153/154/99/159/161/163), packet 16 only. Packets AF1F/28
-//! and the rest of xradar #392's 27-code breadth are a later phase.
+//! Scope: packet 16 (digital radial data array) and packet `AF1F` (RLE
+//! radials, the legacy 8/16-level product family) — 19 of 26 message
+//! codes from xradar #392's product table decode past the PDB stage; the
+//! rest (packet 28/XDR + 5 surface precip codes) return a named
+//! `UnsupportedProduct` error — see `decode::products`'s module doc.
 
 mod adapter;
 pub(crate) mod decode;

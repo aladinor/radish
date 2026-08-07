@@ -1,21 +1,21 @@
 //! wasm-bindgen bindings for `radish`'s NEXRAD Level 3 (NIDS) decoder and
-//! region-based velocity dealiasing — the browser-reachable surface for
-//! AtmoScale's serverless free tier. See `docs/NEXRAD_LEVEL3_WASM.md` and
-//! `plans/0011-nexrad-level3-wasm-backend.md` Phase 7.
+//! region-based velocity dealiasing — the browser-reachable surface for a
+//! serverless, browser-only NEXRAD Level 3 client. See
+//! `docs/NEXRAD_LEVEL3_WASM.md` for the full design this crate
+//! implements.
 //!
 //! **Library only.** No `fetch`, no S3, no worker logic — bytes in,
-//! decoded/dealiased sweep out. AtmoScale's own TypeScript glue owns
+//! decoded/dealiased sweep out. The calling JavaScript/TypeScript owns
 //! everything upstream (fetching NIDS bytes over the network) and
 //! downstream (rendering, GPU geometry — see `docs/NEXRAD_LEVEL3_WASM.md`
 //! §9's "no `to_vertices` API").
 //!
-//! **Boundary clarification, not in the design doc explicitly**:
-//! AtmoScale's `RadarFrameLayer.ts` wants a *fitted* `az_start_deg`/
-//! `az_step_deg` slope pair, not a per-radial array. This crate exports
-//! the **general per-radial azimuth array**
-//! ([`DecodedProduct::azimuths`]) and leaves slope-fitting to the
-//! AtmoScale TS glue — that's application-layer display policy, not
-//! decode-side knowledge.
+//! **Boundary clarification, not in the design doc explicitly**: a caller
+//! wanting a fitted `az_start_deg`/`az_step_deg` slope pair (rather than a
+//! per-radial array) has to derive it itself. This crate exports the
+//! **general per-radial azimuth array** ([`DecodedProduct::azimuths`]) and
+//! leaves slope-fitting to the caller — that's application-layer display
+//! policy, not decode-side knowledge.
 
 use ndarray::Array2;
 use wasm_bindgen::prelude::*;
@@ -307,9 +307,10 @@ pub fn decode_nexrad_level3(bytes: &[u8]) -> Result<DecodedProduct, JsValue> {
 
 /// Dealias one sweep's Doppler velocity using Py-ART's region-based
 /// algorithm — bit-exact with `pyart.correct.dealias_region_based` on
-/// every unmasked gate (see `plans/0011-nexrad-level3-wasm-backend.md`
-/// Phase 6). Same reason Phase 5/6 target wasm at all: Nesbitt's original
-/// plan didn't.
+/// every unmasked gate (see `radish/tests/test_dealias_parity.rs` for the
+/// parity gate this is checked against). Reachable from wasm precisely
+/// because a serverless, browser-only deployment has no server to run
+/// Py-ART on — see `docs/NEXRAD_LEVEL3_WASM.md`.
 ///
 /// `velocity` and `valid_mask` are flat, row-major, `n_rays * n_gates`
 /// long. `valid_mask[i] != 0` means gate `i` is valid and should be

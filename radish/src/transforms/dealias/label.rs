@@ -1,6 +1,6 @@
 //! 4-neighbor connected-component labeling, numbered to match
 //! `scipy.ndimage.label`'s exact convention bit-for-bit — replication
-//! point 1 of the 8 in `plans/0011-nexrad-level3-wasm-backend.md` Phase 5.
+//! point 1 of the 8 listed in `super`'s (`dealias/mod.rs`) module doc.
 //!
 //! scipy's default structuring element for a 2D array is the 4-connected
 //! cross (no diagonals) — confirmed empirically this session, not assumed:

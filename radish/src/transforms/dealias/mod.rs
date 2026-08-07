@@ -1,14 +1,15 @@
 //! Region-based velocity dealiasing — a Rust port of Py-ART's
 //! `pyart.correct.dealias_region_based` (`region_dealias.py` +
-//! `_fast_edge_finder.pyx`), reachable from both the `python` and future
-//! `wasm` bindings. `docs/ARCHITECTURE.md` already named `transforms/` as
+//! `_fast_edge_finder.pyx`), reachable from both the `python` and `wasm`
+//! bindings. `docs/ARCHITECTURE.md` already named `transforms/` as
 //! dealiasing's eventual home; this is its first real content.
 //!
-//! See `plans/0011-nexrad-level3-wasm-backend.md` Phase 5 for the full
-//! design, why dealiasing is in scope at all (closes a real gap AtmoScale's
-//! own docs already flagged, that a shipping competitor solves server-side
-//! — this crate's free tier has no server), and the 8 correctness-critical
-//! replication points this module's submodules each own:
+//! See `docs/NEXRAD_LEVEL3_WASM.md` for the full design and why dealiasing
+//! is in scope at all — a raw NEXRAD Level 3 velocity product is genuinely
+//! folded, and a serverless, browser-only deployment (no server to run
+//! Py-ART on) needs the same unfolding algorithm reachable from wasm. The
+//! 8 correctness-critical replication points this module's submodules
+//! each own:
 //!
 //! 1. [`label`] — 4-connected component labeling, numbered like
 //!    `scipy.ndimage.label`.
@@ -25,9 +26,8 @@
 //! 8. [`sweep`] — edge cases (all-masked, single-region, no-edges).
 //!
 //! **Deliberately not ported**: the `ref_vel_field` sounding-anchored
-//! path (L-BFGS-B reference-velocity fitting) — rarely used, no
-//! obvious pure-Rust/wasm-friendly story, and out of this phase's scope
-//! per the plan.
+//! path (L-BFGS-B reference-velocity fitting) — rarely used, and no
+//! obvious pure-Rust/wasm-friendly story.
 //!
 //! **Not a decode-time output.** Unlike `MomentData::raw_codes` etc.,
 //! dealiasing is a transform a caller runs on demand — there is no new
@@ -85,8 +85,8 @@ impl Default for DealiasOptions {
 
 /// Dealias one sweep's Doppler velocity using Py-ART's region-based
 /// algorithm — bit-exact with `pyart.correct.dealias_region_based` on
-/// every unmasked gate (see `plans/0011-nexrad-level3-wasm-backend.md`
-/// Phase 6 for the parity gate this is checked against).
+/// every unmasked gate (see `radish/tests/test_dealias_parity.rs` for the
+/// parity gate this is checked against).
 ///
 /// Returns per-gate **fold counts**, not corrected velocities: gate
 /// `(r, c)`'s corrected velocity is `velocity[[r, c]] + folds[[r, c]]

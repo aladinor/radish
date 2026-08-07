@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plausible record size) and by object name (`YYYYMMDD-HHMMSS-NNN-[SIE]`),
   so `radish.open_datatree(one_chunk_bytes)` and chunk paths route to the
   NEXRAD backend without `backend="nexrad"`.
-- **NEXRAD Level 3 (NIDS) backend** (plan 0011), a new `NexradLevel3Backend`
+- **NEXRAD Level 3 (NIDS) backend**, a new `NexradLevel3Backend`
   decoding single-tilt, single-moment NIDS products — reflectivity,
   velocity, spectrum width, ZDR/RHOHV/KDP, hydrometeor classification, and
   the legacy 8/16-level `AF1F`-encoded family (26 message codes total, 19

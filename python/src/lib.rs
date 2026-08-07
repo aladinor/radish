@@ -1400,7 +1400,7 @@ fn auto_backend_name_for_bytes(head: Vec<u8>) -> PyResult<String> {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Velocity dealiasing (plan 0011 Phase 5)
+// Velocity dealiasing
 // ────────────────────────────────────────────────────────────────────
 
 /// `RadishError::Dealias` is always a caller-fixable input problem (shape
@@ -1418,8 +1418,9 @@ fn dealias_err(error: RadishError) -> PyErr {
 
 /// Dealias one sweep's Doppler velocity using Py-ART's region-based
 /// algorithm — bit-exact with `pyart.correct.dealias_region_based` on
-/// every unmasked gate (see `plans/0011-nexrad-level3-wasm-backend.md`
-/// Phase 6 for the parity gate this is checked against).
+/// every unmasked gate (see `docs/NEXRAD_LEVEL3_WASM.md` and
+/// `radish/tests/test_dealias_parity.rs` for the parity gate this is
+/// checked against).
 ///
 /// `velocity` and `valid_mask` must be the same 2D shape
 /// (`[n_rays, n_gates]`). `valid_mask[i, j] = True` means gate `(i, j)`

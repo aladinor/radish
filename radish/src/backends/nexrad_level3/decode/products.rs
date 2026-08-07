@@ -1,33 +1,31 @@
 //! The product table this backend can decode: message code -> moment,
 //! decode scheme, and geometry. Plus a small, SEPARATE tilt-ordinal table
-//! for the 6 products AtmoScale's oracle independently verified against
-//! `s3://unidata-nexrad-level3`.
+//! for the 6 products whose AWIPS letter -> tilt mapping was independently
+//! verified against real files pulled from `s3://unidata-nexrad-level3`.
 //!
 //! **Two tables, on purpose, for two different questions:**
 //!
 //! - "What moment/decode scheme does message code N carry?" — [`PRODUCTS`],
 //!   keyed by message code. Ported from xradar #392's `PRODUCT_TABLE`
 //!   (openradar/xradar, commit `fcc31ae`), which is the breadth reference
-//!   for the 20 codes beyond AtmoScale's original 6 — see
-//!   `docs/NEXRAD_LEVEL3_WASM.md` §3 and `plans/0011-nexrad-level3-wasm-backend.md`
-//!   Phase 3. This is the ONLY correct way to resolve moment: a message
+//!   for the 20 codes beyond the original 6 — see `docs/NEXRAD_LEVEL3_WASM.md`
+//!   §3. This is the ONLY correct way to resolve moment: a message
 //!   code identifies the *format*, and unlike tilt, every file with that
 //!   code carries the *same* moment regardless of which tilt it's at.
 //! - "Which of the 6 canonical tilt ordinals (0-5) does AWIPS letter L at
 //!   this file's site belong to?" — [`TILT_LETTER_TABLE`] /
-//!   [`tilt_letter_lookup`], the exact table Phase 2 built, **unchanged**.
-//!   It only covers the 6 letters (`B`,`G`,`U`,`X`,`C`,`K`) the AtmoScale
-//!   oracle independently confirmed present in the bucket. Fabricating
+//!   [`tilt_letter_lookup`]. It only covers the 6 letters (`B`,`G`,`U`,`X`,
+//!   `C`,`K`) independently confirmed present in the bucket. Fabricating
 //!   AWIPS letters for the other 20 codes was deliberately NOT done here —
 //!   this repo has no S3-verified source for them the way the original 6
-//!   have, and the design doc's own standing rule is "every added code
-//!   needs a fixture [or verified source], or it is untested surface."
+//!   have, and the standing rule for this decoder is "every added code
+//!   needs a fixture or a verified source, or it is untested surface."
 //!   `DecodedProduct::tilt` is `Option<usize>`: `Some` only when this
 //!   table resolves it, `None` otherwise — never guessed from elevation
 //!   angle. The real elevation always comes from the PDB regardless.
 
-/// `(AWIPS tilt prefix, ordinal)` — elevation order, matching the oracle's
-/// `TILTS` (`nexrad_level3.py:67-74`).
+/// `(AWIPS tilt prefix, ordinal)` — elevation order, matching the byte-level
+/// oracle's own tilt-prefix table.
 pub(crate) const TILT_PREFIXES: [&str; 6] = ["N0", "NA", "N1", "NB", "N2", "N3"];
 
 /// How a product's raw levels become physical values. Six schemes, matching
@@ -90,7 +88,9 @@ const KT_TO_MS: f32 = 0.514444;
 /// Codes marked "deferred" below decode their PDB fields (so
 /// `find_message_header`/`read_pdb_fields` work) but symbology decode
 /// returns [`super::error::Level3DecodeError`]'s unsupported-product path —
-/// see Phase 3's exit notes in `plans/0011-nexrad-level3-wasm-backend.md`.
+/// see this module's own doc comment and `UnsupportedPacketCode`'s doc for
+/// why (packet 28's `u16` raw levels are a real model mismatch with this
+/// backend's `u8`-based contract, not just unimplemented).
 pub(crate) const PRODUCTS: &[(i16, ProductSpec)] = &[
     // --- packet AF1F (RLE), legacy 16-level scheme ---
     (

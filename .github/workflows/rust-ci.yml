@@ -132,8 +132,8 @@ jobs:
         fi
         echo "confirmed: no netcdf/hdf5/libz-sys in the wasm32 dependency graph"
 
-    # The actual deliverable (plan 0011 Phase 7): build the wasm-bindgen
-    # crate itself, in release mode, for the real wasm32 target.
+    # The actual deliverable: build the wasm-bindgen crate itself, in
+    # release mode, for the real wasm32 target.
     - name: Build radish-wasm for wasm32-unknown-unknown (release)
       run: cargo build -p radish-wasm --release --target wasm32-unknown-unknown
 
