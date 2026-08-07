@@ -12,6 +12,7 @@ this folder is for content that's too detailed to fit there.
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Data model, backend trait, design rationale, Mermaid diagrams |
 | [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md) | Phased roadmap and current implementation status |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog format) |
+| [`NEXRAD_LEVEL3_WASM.md`](NEXRAD_LEVEL3_WASM.md) | Design: a NEXRAD Level 3 (NIDS) backend, and a `wasm32` target so radish decodes in the browser. Written for a session with no prior context; cross-repo paths are absolute |
 | `RELEASING.md` | Release walkthrough — added by the `ci/release-pipeline` PR (link wired up once that lands) |
 
 ## Conventions

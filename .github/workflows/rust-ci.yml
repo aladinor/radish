@@ -91,6 +91,62 @@ jobs:
     - name: Build examples
       run: cargo build --examples --verbose
 
+  wasm:
+    name: wasm32 (radish core, --no-default-features)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-wasm32-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v5
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-wasm32-${{ hashFiles('**/Cargo.lock') }}
+
+    # No `libnetcdf`/`libhdf5` install here on purpose: this job's whole
+    # point is proving `radish` never links them under `--no-default-features`.
+    # If a future PR reintroduces an unconditional `hdf5`/`netcdf` import,
+    # this is the job that catches it — see `docs/NEXRAD_LEVEL3_WASM.md` §5.
+    - name: Check radish core for wasm32-unknown-unknown
+      run: cargo check -p radish --no-default-features --target wasm32-unknown-unknown
+
+    - name: Assert netcdf/hdf5 never entered the wasm32 dependency graph
+      run: |
+        set -euo pipefail
+        if cargo tree -p radish --no-default-features --target wasm32-unknown-unknown -e normal \
+            | grep -iE "netcdf|hdf5-metno-sys|libz-sys"; then
+          echo "::error::netcdf/hdf5/libz-sys leaked into the wasm32 --no-default-features build" >&2
+          exit 1
+        fi
+        echo "confirmed: no netcdf/hdf5/libz-sys in the wasm32 dependency graph"
+
+    # The actual deliverable: build the wasm-bindgen crate itself, in
+    # release mode, for the real wasm32 target.
+    - name: Build radish-wasm for wasm32-unknown-unknown (release)
+      run: cargo build -p radish-wasm --release --target wasm32-unknown-unknown
+
+    - name: Assert netcdf/hdf5/rayon never entered radish-wasm's dependency graph
+      run: |
+        set -euo pipefail
+        if cargo tree -p radish-wasm --target wasm32-unknown-unknown -e normal \
+            | grep -iE "netcdf|hdf5-metno-sys|libz-sys|rayon"; then
+          echo "::error::netcdf/hdf5/libz-sys/rayon leaked into radish-wasm's dependency graph" >&2
+          exit 1
+        fi
+        echo "confirmed: no netcdf/hdf5/libz-sys/rayon in radish-wasm's dependency graph"
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest

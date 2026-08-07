@@ -25,7 +25,6 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use ndarray::Array2;
 use radish_types::{PlatformType, SweepMode};
-use rayon::prelude::*;
 
 use crate::{
     Coordinates, MomentData, RadishError, Result, SweepData, SweepMetadata, VolumeData,
@@ -39,7 +38,7 @@ use super::decode::products::{CfpMomentValue, DataMoment, MomentValue, Product};
 use super::mapping::{moment_meta, SUPPORTED_PRODUCTS};
 use super::sniff;
 use crate::backends::common::{
-    assemble_ppi_coordinates, build_range_axis, decode_into_array, sort_indices_by_key,
+    assemble_ppi_coordinates, build_range_axis, decode_into_array, par_map, sort_indices_by_key,
     MomentGeometry,
 };
 
@@ -101,17 +100,14 @@ pub(super) fn convert_scan(
         retain_sweeps_in_metadata(&mut metadata, &kept);
     }
 
-    let sweeps: Vec<SweepData> = selected
-        .par_iter()
-        .map(|(idx, sweep)| {
-            let data = convert_sweep(sweep, *idx, cuts.get(*idx))?;
-            Ok(if policy == IncompleteSweepPolicy::Pad && !sweep.complete {
-                pad_sweep_to_full_rotation(data, sweep)
-            } else {
-                data
-            })
+    let sweeps: Vec<SweepData> = par_map(&selected, |(idx, sweep)| {
+        let data = convert_sweep(sweep, *idx, cuts.get(*idx))?;
+        Ok::<_, RadishError>(if policy == IncompleteSweepPolicy::Pad && !sweep.complete {
+            pad_sweep_to_full_rotation(data, sweep)
+        } else {
+            data
         })
-        .collect::<Result<_>>()?;
+    })?;
     Ok(VolumeData::new(metadata, sweeps))
 }
 

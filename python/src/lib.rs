@@ -1399,6 +1399,93 @@ fn auto_backend_name_for_bytes(head: Vec<u8>) -> PyResult<String> {
         .map_err(|e| PyRuntimeError::new_err(format!("No backend matched: {e}")))
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Velocity dealiasing
+// ────────────────────────────────────────────────────────────────────
+
+/// `RadishError::Dealias` is always a caller-fixable input problem (shape
+/// mismatch, bad Nyquist, invalid option) — `ValueError`, matching how
+/// `demux_err` treats `Unsupported`. No other `RadishError` variant can
+/// reach here (`radish::transforms::dealias_region_based`'s only error
+/// path is `Dealias`), but the fallback keeps this total rather than
+/// panicking on a future variant.
+fn dealias_err(error: RadishError) -> PyErr {
+    match error {
+        RadishError::Dealias(msg) => PyValueError::new_err(msg),
+        other => PyRuntimeError::new_err(other.to_string()),
+    }
+}
+
+/// Dealias one sweep's Doppler velocity using Py-ART's region-based
+/// algorithm — bit-exact with `pyart.correct.dealias_region_based` on
+/// every unmasked gate (see `docs/NEXRAD_LEVEL3_WASM.md` and
+/// `radish/tests/test_dealias_parity.rs` for the parity gate this is
+/// checked against).
+///
+/// `velocity` and `valid_mask` must be the same 2D shape
+/// (`[n_rays, n_gates]`). `valid_mask[i, j] = True` means gate `(i, j)`
+/// is **valid** and should be dealiased — the opposite polarity of
+/// Py-ART's own `gfilter`, which excludes on `True` (see
+/// `radish::transforms::dealias_region_based`'s Rust doc for why this
+/// binding keeps that convention rather than flipping it back).
+///
+/// Returns per-gate fold counts (`int32`), not corrected velocities —
+/// `corrected = velocity + folds.astype(velocity.dtype) * 2.0 * nyquist`
+/// is a cheap multiply-add a caller does itself. A masked-out gate always
+/// reads fold `0`.
+///
+/// `interval_splits`/`skip_between_rays`/`skip_along_ray`/`centered`
+/// default to Py-ART's own defaults (3, 100, 100, `True`) — kept in sync
+/// with `radish::transforms::DealiasOptions::default()`
+/// (`radish/src/transforms/dealias/mod.rs`) BY HAND; nothing enforces
+/// this automatically, so update both together.
+#[pyfunction]
+#[pyo3(signature = (
+    velocity, valid_mask, nyquist, rays_wrap_around,
+    interval_splits = 3, skip_between_rays = 100, skip_along_ray = 100, centered = true,
+))]
+#[allow(clippy::too_many_arguments)]
+fn dealias_region_based<'py>(
+    py: Python<'py>,
+    velocity: numpy::PyReadonlyArray2<'_, f32>,
+    valid_mask: numpy::PyReadonlyArray2<'_, bool>,
+    nyquist: f32,
+    rays_wrap_around: bool,
+    interval_splits: usize,
+    skip_between_rays: i32,
+    skip_along_ray: i32,
+    centered: bool,
+) -> PyResult<Bound<'py, PyArray2<i32>>> {
+    // `.to_owned()`, not a borrowed `ArrayView2`: `py.detach()` below
+    // releases the GIL for the (potentially ~100s of ms) computation, and
+    // holding a view into Python-owned numpy memory across that boundary
+    // would be unsound — another Python thread can run while the GIL is
+    // released and mutate this same buffer through ordinary Python code,
+    // racing the read happening here. Copying first (still under the
+    // GIL) makes the buffer this thread reads private and immutable for
+    // the duration of the detached call.
+    let velocity = velocity.as_array().to_owned();
+    let valid_mask = valid_mask.as_array().to_owned();
+    let opts = radish::transforms::DealiasOptions {
+        interval_splits,
+        skip_between_rays,
+        skip_along_ray,
+        centered,
+    };
+    let folds = py
+        .detach(|| {
+            radish::transforms::dealias_region_based(
+                &velocity,
+                &valid_mask,
+                nyquist,
+                rays_wrap_around,
+                opts,
+            )
+        })
+        .map_err(dealias_err)?;
+    Ok(PyArray2::from_owned_array(py, folds))
+}
+
 #[pymodule]
 fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVolumeData>()?;
@@ -1426,6 +1513,7 @@ fn _radish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decode_sweep_moment, m)?)?;
     m.add_function(wrap_pyfunction!(record_moment_encoding, m)?)?;
     m.add_function(wrap_pyfunction!(sweep_moment_encoding, m)?)?;
+    m.add_function(wrap_pyfunction!(dealias_region_based, m)?)?;
     // `create_exception!` stamps `__module__ = "_radish"`, but the
     // extension actually lives at `radish._radish` and the exception is
     // re-exported from `radish`. Without this the class is unpicklable,

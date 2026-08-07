@@ -3,13 +3,23 @@
 use crate::{Result, SweepData, VolumeData, VolumeMetadata};
 use std::path::Path;
 
+// `cfradial1` is the only backend that directly links `hdf5`/`netcdf` (C
+// libraries with no `wasm32-unknown-unknown` build story — see
+// `docs/NEXRAD_LEVEL3_WASM.md` §5), so it's gated behind the `native`
+// feature. `nexrad`, `sigmet`, and (once added) `nexrad_level3` are pure
+// byte-parsing backends with no C dependency and stay unconditional; only
+// their `rayon` usage is feature-gated (`backends::common::parallel`).
+#[cfg(feature = "native")]
 pub mod cfradial1;
 pub(crate) mod common;
 pub mod nexrad;
+pub mod nexrad_level3;
 pub mod sigmet;
 
+#[cfg(feature = "native")]
 pub use cfradial1::CfRadial1Backend;
 pub use nexrad::{IncompleteSweepPolicy, NexradBackend};
+pub use nexrad_level3::NexradLevel3Backend;
 pub use sigmet::SigmetBackend;
 
 /// Trait for radar file format backends
@@ -79,11 +89,20 @@ pub trait RadarBackend: Send + Sync {
 }
 
 /// Get all available backends
+///
+/// Under `--no-default-features` (wasm builds), `cfradial1` is absent — it
+/// links `hdf5`/`netcdf`, which don't target `wasm32-unknown-unknown`. Every
+/// other backend is unconditional.
 pub fn available_backends() -> Vec<Box<dyn RadarBackend>> {
     vec![
+        #[cfg(feature = "native")]
         Box::new(CfRadial1Backend::new()),
         Box::new(NexradBackend::new()),
         Box::new(SigmetBackend::new()),
+        // Last: its sniff is content-based (scans up to 128 bytes for an
+        // AWIPS token) rather than a cheap extension/magic-prefix check,
+        // so formats with a fast positive signal get first refusal.
+        Box::new(NexradLevel3Backend::new()),
     ]
 }
 
@@ -144,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn auto_backend_for_bytes_routes_hdf5_to_cfradial1() {
         let head = b"\x89HDF\r\n\x1a\nrest";
         let backend = auto_backend_for_bytes(head).expect("HDF5 → some backend");
@@ -162,6 +182,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn cfradial1_default_read_bytes_returns_unsupported() {
         // Documents the contract: cfradial1 accepts the bytes-sniff but
         // decoding from a buffer is not supported (libnetcdf needs a file).

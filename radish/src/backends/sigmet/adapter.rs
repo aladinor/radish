@@ -11,9 +11,10 @@ use std::path::Path;
 
 use ndarray::Array2;
 use radish_types::SweepMode;
-use rayon::prelude::*;
 
-use crate::backends::common::{assemble_ppi_coordinates, decode_into_array, sort_indices_by_key};
+use crate::backends::common::{
+    assemble_ppi_coordinates, decode_into_array, par_enumerate_map, sort_indices_by_key,
+};
 use crate::{
     MomentData, RadishError, Result, SigmetSweepAttrs, SigmetVolumeAttrs, SweepData, SweepMetadata,
     VolumeData, VolumeMetadata,
@@ -45,20 +46,15 @@ pub(super) fn convert_volume(decoded: DecodedVolume, source: &Path) -> Result<Vo
         .filter(|id| seen.contains(id))
         .collect();
 
-    let sweeps: Vec<SweepData> = decoded
-        .sweeps
-        .par_iter()
-        .enumerate()
-        .map(|(idx, sweep)| {
-            convert_sweep(
-                sweep,
-                idx,
-                decoded.scan_mode,
-                &decoded.range_axis_m,
-                &active_ids,
-            )
-        })
-        .collect::<Result<_>>()?;
+    let sweeps: Vec<SweepData> = par_enumerate_map(&decoded.sweeps, |idx, sweep| {
+        convert_sweep(
+            sweep,
+            idx,
+            decoded.scan_mode,
+            &decoded.range_axis_m,
+            &active_ids,
+        )
+    })?;
 
     Ok(VolumeData::new(metadata, sweeps))
 }

@@ -38,6 +38,9 @@
 //! * Sigmet: [`SigmetVolumeAttrs`] (TASK_CONFIGURATION + INGEST_HEADER:
 //!   PRF, Nyquist, scan mode, IRIS firmware) and [`SigmetSweepAttrs`]
 //!   (per-sweep mode + fixed angle).
+//! * NEXRAD Level 3 (NIDS): [`NidsSweepAttrs`] (AWIPS id, message code,
+//!   VCP, tilt ordinal) — a single already-scanned tilt has no
+//!   volume-level counterpart, so there is no `NidsVolumeAttrs`.
 //!
 //! # Errors
 //!
@@ -54,8 +57,8 @@ pub mod transforms;
 pub use backends::RadarBackend;
 pub use error::{RadishError, Result};
 pub use model::{
-    Coordinates, MomentData, NexradSweepAttrs, NexradVolumeAttrs, SigmetSweepAttrs,
-    SigmetVolumeAttrs, SweepData, SweepMetadata, VolumeData, VolumeMetadata,
+    Coordinates, DeclaredScale, MomentData, NexradSweepAttrs, NexradVolumeAttrs, NidsSweepAttrs,
+    SigmetSweepAttrs, SigmetVolumeAttrs, SweepData, SweepMetadata, VolumeData, VolumeMetadata,
 };
 
 #[cfg(test)]

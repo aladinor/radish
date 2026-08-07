@@ -2,6 +2,44 @@
 
 use ndarray::Array2;
 
+/// A product's declared value scaling, verbatim from its source encoding —
+/// e.g. a NEXRAD Level 3 (NIDS) product description block.
+///
+/// Exists because some consumers need the **codes**, not the physical
+/// values: NEXRAD Level 3 defines its wire format directly in terms of a
+/// product's own declared scale (see `docs/NEXRAD_LEVEL3_WASM.md` §4.1) —
+/// re-deriving a scale from [`MomentData::data`] and re-quantizing would
+/// both waste work and risk a rounding disagreement with the source file.
+/// [`MomentData::raw_codes`] carries the verbatim `u8` codes; this struct is
+/// what a caller needs to turn a code back into the same physical value the
+/// source file declares, without assuming any particular quantization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeclaredScale {
+    /// Physical value at [`data_floor_code`](Self::data_floor_code).
+    pub value_min: f32,
+    /// Physical value change per code above the floor.
+    pub value_increment: f32,
+    /// Number of codes that carry data (from the floor code through 255,
+    /// inclusive) — NEXRAD Level 3's digital radial products declare or
+    /// imply 254.
+    pub n_levels: u16,
+    /// The lowest code that carries data. Codes below this are sentinels
+    /// (e.g. NEXRAD Level 3: 0 = below threshold, 1 = range folded) —
+    /// never `value_min + (code - data_floor_code) * value_increment`.
+    pub data_floor_code: u8,
+}
+
+impl DeclaredScale {
+    /// Physical value for one code, or `None` below [`data_floor_code`](Self::data_floor_code)
+    /// (a sentinel, not data).
+    pub fn decode(&self, code: u8) -> Option<f32> {
+        if code < self.data_floor_code {
+            return None;
+        }
+        Some(self.value_min + (code - self.data_floor_code) as f32 * self.value_increment)
+    }
+}
+
 /// Radar moment data (e.g., reflectivity, velocity)
 #[derive(Debug, Clone)]
 pub struct MomentData {
@@ -40,6 +78,26 @@ pub struct MomentData {
 
     /// Additional attributes
     pub attributes: std::collections::HashMap<String, String>,
+
+    /// Verbatim on-wire codes, when the source format defines its wire
+    /// format in terms of codes rather than physical values (currently:
+    /// NEXRAD Level 3 / NIDS digital radial products). `None` for every
+    /// other backend — this is deliberately *additional* to
+    /// [`data`](Self::data), not a replacement: `data` stays the physical
+    /// values every other radish consumer expects, and `raw_codes` +
+    /// [`declared_scale`](Self::declared_scale) are there for a consumer
+    /// that needs the source's own quantization untouched (see
+    /// `docs/NEXRAD_LEVEL3_WASM.md` §4.1 — "the codes pass through
+    /// untouched, that is the whole design"). Same shape as `data`
+    /// (`[rays × gates]`) when present.
+    pub raw_codes: Option<Array2<u8>>,
+
+    /// The scale [`raw_codes`](Self::raw_codes) is declared on, verbatim
+    /// from the source file. `None` whenever `raw_codes` is `None`, and
+    /// also `None` for a categorical product (e.g. hydrometeor
+    /// classification) whose codes index a fixed label table rather than a
+    /// linear physical scale.
+    pub declared_scale: Option<DeclaredScale>,
 }
 
 impl MomentData {
@@ -58,6 +116,8 @@ impl MomentData {
             valid_max: None,
             coordinates: None,
             attributes: std::collections::HashMap::new(),
+            raw_codes: None,
+            declared_scale: None,
         }
     }
 
