@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-07
+
+The "browser-reachable NEXRAD Level 3 + region-based velocity dealiasing" release. Adds a NEXRAD Level 3 (NIDS) decode backend and a Rust port of Py-ART's region-based velocity dealiasing, plus a new `wasm32-unknown-unknown` target and `radish-wasm` crate so both can run entirely client-side, no server in the loop. Also folds in the NEXRAD real-time-chunks work (incomplete-sweep detection, chunk-list validation, single-chunk auto-detection), the low-level per-moment NEXRAD decoders for chunked/lazy consumers, a full pass of Sigmet/IRIS correctness fixes verified against xradar, and a security-audit cleanup that brings `cargo audit` back to green. (#41, #43, #44)
+
 ### Added
 
 - **NEXRAD real-time chunks: incomplete-sweep detection + `incomplete_sweep`
@@ -691,7 +695,11 @@ First public release on PyPI as
 - CfRadial2 native reader and ODIM H5 backend are planned for
   Phase 2 (see `docs/PROJECT_SUMMARY.md`).
 
-[Unreleased]: https://github.com/aladinor/radish/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/aladinor/radish/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/aladinor/radish/compare/v0.2.5...v0.3.0
+[0.2.5]: https://github.com/aladinor/radish/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/aladinor/radish/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/aladinor/radish/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/aladinor/radish/compare/v0.2.0...v0.2.2
 [0.2.0]: https://github.com/aladinor/radish/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/aladinor/radish/releases/tag/v0.1.0
