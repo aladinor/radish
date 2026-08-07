@@ -118,11 +118,30 @@ def main() -> int:
         raw_data = f.raw_data
         # The ICD-authoritative bin count, read from xradar's own
         # unmodified packet header — upstream of its Note-1-unaware
-        # override. Only meaningful for packet 16; AF1F has no
-        # comparable header field to disagree with `raw_data`'s shape.
+        # override. `packet_header["nbins"]` is populated identically
+        # for AF1F too (the same struct, read before xradar dispatches
+        # on packet code), but AF1F's RLE expansion is exact by
+        # construction (xradar's own `_read_packet_af1f` requires every
+        # radial's runs to sum to exactly `nbins`, no tolerance) — so a
+        # mismatch is only ever expected on packet 16.
         icd_n_bins = getattr(f, "packet_header", {}).get("nbins")
-        padded = icd_n_bins is not None and icd_n_bins != raw_data.shape[1]
+        actual_n_bins = raw_data.shape[1]
+        padded = icd_n_bins is not None and actual_n_bins != icd_n_bins
         if padded:
+            # ICD Note 1 is specific: exactly ONE inert pad byte, and
+            # only when the wire declares MORE than the header claims
+            # (never fewer). Anything else — a smaller actual width, or
+            # a gap bigger than 1 — is a real anomaly, not this known
+            # case; assert on the exact relationship first so a mismatch
+            # in the wrong direction fails LOUDLY here rather than
+            # slicing `raw_data[:, icd_n_bins:]` into a silently-empty,
+            # vacuously-"all zero" array (numpy does not raise on an
+            # out-of-range slice) and writing a mislabeled sidecar.
+            assert actual_n_bins == icd_n_bins + 1, (
+                f"{name}: header n_bins={icd_n_bins} but raw_data has "
+                f"{actual_n_bins} columns — not the documented ICD Note 1 "
+                f"case (exactly +1), do not trim without investigating"
+            )
             pad_col = raw_data[:, icd_n_bins:]
             assert (pad_col == 0).all(), (
                 f"{name}: expected the ICD Note 1 pad column to be all-zero, "
