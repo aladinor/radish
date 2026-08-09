@@ -10,24 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **NEXRAD Level 3 tilt-letter table extended**: `TILT_LETTER_TABLE` now
-  resolves `S` (Storm Relative Mean Radial Velocity, code 56 — only 4 of 6
-  tilts, `N0`/`N1`/`N2`/`N3`, confirmed against the live bucket) and `H`
-  (Hydrometeor Classification, code 165, all 6 tilts). A new
-  `SPECIAL_AWIPS_IDS` table (`NSW` -> tilt 0) covers `WRADH`'s legacy
-  spectrum width, whose AWIPS id isn't `{tilt prefix}{letter}`-shaped and so
-  can't go in the generic table at all — `decode()` now checks it as a
-  fallback after `tilt_letter_lookup`. `P` (`ACCUM`, codes 78/79/80)
-  deliberately stays unresolved: its letter encodes accumulation *period*,
-  not elevation, and `N1P`/`N3P` share a prefix with real, unrelated tilt
-  ordinals — adding it would silently mislabel a 1-hour accumulation as a
-  1.3° tilt.
+  resolves `S` (Storm Relative Mean Radial Velocity, code 56 — 4 of 6 tilt
+  ordinals, `N0`/`N1`/`N2`/`N3`, a decode-scheme fact that holds for any date
+  the archive tier reads) and `H` (Hydrometeor Classification, code 165, all
+  6 tilts). This table records what the AWIPS-id SCHEME resolves to, not
+  what is currently broadcasting — for `S` specifically, only `N0S` has live
+  2026 data; `N1S`/`N2S`/`N3S` stopped broadcasting 2023-05-22 (confirmed on
+  two live sites). The consumer (`radar-animation`'s free-tier capability
+  table) is what decides which of a scheme's tilts to actually advertise as
+  selectable; this crate answers "what does this AWIPS id decode to",
+  unconditionally. A new `SPECIAL_AWIPS_IDS` table (`NSW` -> tilt 0) covers
+  `WRADH`'s legacy spectrum width, whose AWIPS id isn't
+  `{tilt prefix}{letter}`-shaped and so can't go in the generic table at
+  all — `decode()` now checks it as a fallback after `tilt_letter_lookup`.
+  `P` (`ACCUM`, codes 78/79/80) deliberately stays unresolved: its letter
+  encodes accumulation *period*, not elevation, and `N1P`/`N3P` share a
+  prefix with real, unrelated tilt ordinals — adding it would silently
+  mislabel a 1-hour accumulation as a 1.3° tilt.
 - **`export_product_catalogue_json`**, an `#[ignore]`d test in
   `nexrad_level3::decode::products` that writes `generated/
   nexrad_level3_products.json` — `PRODUCTS`, `TILT_LETTER_TABLE`, and
   `SPECIAL_AWIPS_IDS`, machine-readable, for non-Rust consumers (a sibling
   repo's build step) that need this table but cannot link the crate. Run
-  explicitly: `cargo test --release -p radish
-  export_product_catalogue_json -- --ignored`.
+  explicitly: `RADISH_WRITE_PRODUCT_CATALOGUE=1 cargo test --release -p
+  radish export_product_catalogue_json -- --ignored` — a second, in-body env
+  var gate beyond `#[ignore]`, matching the fixture-gated tests in
+  `backends/nexrad/decode/integration_test.rs`, so a `cargo test --
+  --ignored` sweep cannot overwrite `generated/` as a side effect nobody
+  asked for.
+- Regression tests for `special_awips_id_lookup`/`tilt_letter_lookup` against
+  non-UTF-8 input (both must return `None`, never panic — the AWIPS-id bytes
+  they receive come straight off the wire, unvalidated), and a test that
+  `SPECIAL_AWIPS_IDS` and `TILT_LETTER_TABLE` cannot structurally collide.
 
 ## [0.3.0] - 2026-08-07
 

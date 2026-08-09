@@ -555,10 +555,50 @@ mod tests {
     }
 
     #[test]
+    fn special_awips_id_lookup_does_not_panic_on_non_utf8_bytes() {
+        // `[super::decode]` calls this with the raw AWIPS-id bytes straight
+        // off the wire, unvalidated — a corrupt or truncated product header
+        // is exactly the input this needs to survive without panicking.
+        // `from_utf8().ok()?` is the whole guard; this pins it against a
+        // regression (e.g. an `.unwrap()` creeping back in) rather than
+        // trusting the `?` reads correctly by inspection.
+        assert_eq!(special_awips_id_lookup(&[0xFF, 0xFE, 0xFD]), None);
+        assert_eq!(special_awips_id_lookup(&[]), None);
+    }
+
+    #[test]
     fn tilt_letter_lookup_rejects_unverified_letters() {
         assert_eq!(tilt_letter_lookup(b"NSW"), None); // WRADH: not tilt-shaped at all — see special_awips_id_lookup instead
         assert_eq!(tilt_letter_lookup(b"XYZ"), None);
         assert_eq!(tilt_letter_lookup(b"N0"), None); // wrong length
+    }
+
+    #[test]
+    fn tilt_letter_lookup_does_not_panic_on_non_utf8_bytes() {
+        assert_eq!(tilt_letter_lookup(&[0xFF, 0xFE, 0xFD]), None);
+    }
+
+    #[test]
+    fn special_awips_ids_and_tilt_letters_do_not_overlap() {
+        // The two tables answer the same question (`awips id -> tilt`) for
+        // disjoint SHAPES of id — [`SPECIAL_AWIPS_IDS`]'s own doc comment is
+        // explicit that it exists only for ids `TILT_LETTER_TABLE` cannot
+        // express. If a future entry's `awips_id` ever collided with one of
+        // `TILT_LETTER_TABLE`'s single-letter suffixes, `mod.rs`'s
+        // `tilt_letter_lookup(..).or_else(special_awips_id_lookup)` would
+        // still resolve it — `tilt_letter_lookup` only matches a 3-byte
+        // `{prefix}{letter}` shape, so a distinct multi-character id like
+        // `NSW` cannot collide with it structurally. This test locks that
+        // structural distinction in, rather than trusting the two lists
+        // happen to stay disjoint by convention as more entries are added.
+        for (id, _tilt) in SPECIAL_AWIPS_IDS {
+            assert_eq!(
+                tilt_letter_lookup(id.as_bytes()),
+                None,
+                "{id} is in both SPECIAL_AWIPS_IDS and resolves via \
+                 TILT_LETTER_TABLE — pick one table per id"
+            );
+        }
     }
 
     #[test]
@@ -633,6 +673,22 @@ mod tests {
     #[test]
     #[ignore = "writes a file; run explicitly to regenerate the export"]
     fn export_product_catalogue_json() {
+        // A SECOND gate beyond `#[ignore]`, matching the fixture-gated tests
+        // in `backends/nexrad/decode/integration_test.rs`
+        // (`RADISH_NEXRAD_FIXTURE_DIR` et al.): `#[ignore]` alone still runs
+        // under `cargo test -- --ignored`, which some workflows use to sweep
+        // every ignored test in one pass, and that sweep should not have the
+        // side effect of overwriting `generated/` on a machine that never
+        // asked for a regeneration. The env var makes the intent explicit
+        // the same way the fixture-dir tests do.
+        if std::env::var_os("RADISH_WRITE_PRODUCT_CATALOGUE").is_none() {
+            eprintln!(
+                "skipping: set RADISH_WRITE_PRODUCT_CATALOGUE=1 to regenerate \
+                 generated/nexrad_level3_products.json"
+            );
+            return;
+        }
+
         let products: Vec<serde_json::Value> = PRODUCTS
             .iter()
             .map(|(code, spec)| {

@@ -479,10 +479,13 @@ consumer, not this one). Recorded here rather than left implicit, since
 actually needs. **Tracked, not owned by that plan** — this is where the
 real work belongs; it's cross-repo from the consumer's point of view.
 
-- **170/172/173/174/175** (`DAA`/`DTA`/`DU3`/`DU6`/`DOD`/`DSD` — the
-  modern digital precip-accumulation family). §6 already says "packet
-  type unconfirmed" — that holds after independent cross-check: decoding
-  real objects and reading PDB halfwords 22-25 under BOTH `LinearHw` and
+- **170/172/173/174/175** — 5 message codes, 6 mnemonics: `DAA` (170),
+  `DTA` (172), `DU3`/`DU6` (both 173 — one message code shared by two
+  AWIPS ids, the 3 h/6 h accumulation window is an RPG configuration
+  choice, not a separate code), `DOD` (174), `DSD` (175). The modern
+  digital precip-accumulation family. §6 already says "packet type
+  unconfirmed" — that holds after independent cross-check: decoding real
+  objects and reading PDB halfwords 22-25 under BOTH `LinearHw` and
   `FloatScale` (this backend's only two linear-scale forms) produced
   implausible numbers for every one of them, converging with this
   module's own prior conclusion reached separately. Needs real ICD
