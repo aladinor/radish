@@ -121,7 +121,8 @@ pub(crate) fn decode(raw: &[u8]) -> Result<DecodedProduct> {
     // for the verified subset, a tilt ordinal — never the moment, which
     // is `spec.moment` above regardless of what letter shows up.
     let (awips_id, site) = find_awips_token(raw)?;
-    let tilt = products::tilt_letter_lookup(awips_id.as_bytes());
+    let tilt = products::tilt_letter_lookup(awips_id.as_bytes())
+        .or_else(|| products::special_awips_id_lookup(awips_id.as_bytes()));
 
     let pdb = mhb + 18;
     // Without this, every PDB read below would need its own truncation
@@ -386,14 +387,30 @@ mod tests {
     }
 
     #[test]
+    fn decode_resolves_tilt_for_special_awips_ids_via_the_fallback() {
+        // NSW isn't `{prefix}{letter}`-shaped, so `tilt_letter_lookup` alone
+        // can't resolve it — this proves `decode()` actually falls through
+        // to `special_awips_id_lookup` rather than the fallback existing
+        // only as dead code nothing calls.
+        let mut raw = build_minimal_n0b();
+        raw[0..6].copy_from_slice(b"NSWLOT");
+        let product = decode(&raw).unwrap();
+        assert_eq!(product.awips_id, "NSW");
+        assert_eq!(product.tilt, Some(0));
+    }
+
+    #[test]
     fn decode_resolves_tilt_none_for_unverified_letters_but_still_decodes() {
         // Swap the AWIPS letter to a code with no verified tilt table
         // (still message code 153, so decode succeeds; tilt is just
-        // unresolved rather than guessed).
+        // unresolved rather than guessed). `J` deliberately: not a real
+        // AWIPS letter anywhere in `PRODUCTS`/`TILT_LETTER_TABLE` today,
+        // so this test doesn't go stale the next time a real letter
+        // (like `H` before it) gets verified and added to the table.
         let mut raw = build_minimal_n0b();
-        raw[0..6].copy_from_slice(b"N0HLOT");
+        raw[0..6].copy_from_slice(b"N0JLOT");
         let product = decode(&raw).unwrap();
-        assert_eq!(product.awips_id, "N0H");
+        assert_eq!(product.awips_id, "N0J");
         assert_eq!(product.tilt, None);
         assert_eq!(product.moment, "DBZH"); // still resolved via message code
     }

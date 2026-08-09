@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **NEXRAD Level 3 tilt-letter table extended**: `TILT_LETTER_TABLE` now
+  resolves `S` (Storm Relative Mean Radial Velocity, code 56 — only 4 of 6
+  tilts, `N0`/`N1`/`N2`/`N3`, confirmed against the live bucket) and `H`
+  (Hydrometeor Classification, code 165, all 6 tilts). A new
+  `SPECIAL_AWIPS_IDS` table (`NSW` -> tilt 0) covers `WRADH`'s legacy
+  spectrum width, whose AWIPS id isn't `{tilt prefix}{letter}`-shaped and so
+  can't go in the generic table at all — `decode()` now checks it as a
+  fallback after `tilt_letter_lookup`. `P` (`ACCUM`, codes 78/79/80)
+  deliberately stays unresolved: its letter encodes accumulation *period*,
+  not elevation, and `N1P`/`N3P` share a prefix with real, unrelated tilt
+  ordinals — adding it would silently mislabel a 1-hour accumulation as a
+  1.3° tilt.
+- **`export_product_catalogue_json`**, an `#[ignore]`d test in
+  `nexrad_level3::decode::products` that writes `generated/
+  nexrad_level3_products.json` — `PRODUCTS`, `TILT_LETTER_TABLE`, and
+  `SPECIAL_AWIPS_IDS`, machine-readable, for non-Rust consumers (a sibling
+  repo's build step) that need this table but cannot link the crate. Run
+  explicitly: `cargo test --release -p radish
+  export_product_catalogue_json -- --ignored`.
+
 ## [0.3.0] - 2026-08-07
 
 The "browser-reachable NEXRAD Level 3 + region-based velocity dealiasing" release. Adds a NEXRAD Level 3 (NIDS) decode backend and a Rust port of Py-ART's region-based velocity dealiasing, plus a new `wasm32-unknown-unknown` target and `radish-wasm` crate so both can run entirely client-side, no server in the loop. Also folds in the NEXRAD real-time-chunks work (incomplete-sweep detection, chunk-list validation, single-chunk auto-detection), the low-level per-moment NEXRAD decoders for chunked/lazy consumers, a full pass of Sigmet/IRIS correctness fixes verified against xradar, and a security-audit cleanup that brings `cargo audit` back to green. (#41, #43, #44)
