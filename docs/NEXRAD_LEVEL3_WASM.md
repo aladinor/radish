@@ -470,4 +470,47 @@ implementation on the same real sweep (`radish/benches/dealias.rs`).
 
 ---
 
+## 11. Open work — the 7 deferred codes (2026-08-09)
+
+Raised while scoping `radar-animation`'s free-tier product expansion
+(`plans/level3-product-expansion.md` in that repo — this backend's
+consumer, not this one). Recorded here rather than left implicit, since
+§6 above already names the 7 deferred codes but not what closing each one
+actually needs. **Tracked, not owned by that plan** — this is where the
+real work belongs; it's cross-repo from the consumer's point of view.
+
+- **170/172/173/174/175** (`DAA`/`DTA`/`DU3`/`DU6`/`DOD`/`DSD` — the
+  modern digital precip-accumulation family). §6 already says "packet
+  type unconfirmed" — that holds after independent cross-check: decoding
+  real objects and reading PDB halfwords 22-25 under BOTH `LinearHw` and
+  `FloatScale` (this backend's only two linear-scale forms) produced
+  implausible numbers for every one of them, converging with this
+  module's own prior conclusion reached separately. Needs real ICD
+  research into whatever third scale-field layout this product family
+  actually uses — a genuinely open question, not a known shape waiting to
+  be typed in.
+- **176** (`DPR`, Digital Instantaneous Precipitation Rate — a real,
+  live, currently-broadcast product; not a legacy one). Packet 28 (XDR),
+  `u16` raw levels — the model mismatch with `raw_codes: Array2<u8>` §6
+  already names for `HHC` applies here too, independently confirmed by
+  decoding a real `DPR` object and getting radish's own
+  `UnsupportedProduct` refusal (not a guess from source-reading).
+- **177** (`HHC`, Hybrid Hydrometeor Classification). Same packet-28/XDR
+  blocker, same confirmation method — decoding a real object gets the
+  same named refusal. Note for whoever picks this up: an earlier,
+  independent quick byte-level read (in the consumer repo, not here)
+  mistakenly read `HHC`'s packet as 16 from a single sample; that was
+  wrong, corrected after checking radish's own behavior directly against
+  a real object. Trust `packet_family_implemented`/the real decode
+  result over a one-off manual byte read.
+
+None of these are close variants of what's already implemented — 170-175
+need ICD research before any code, and 176/177 need `u16`-level support,
+a real model change to this backend's `u8`-based `raw_codes` contract
+(§4.1), not a speculative widening for a couple of codes as §6 already
+says. Worth a dedicated pass with its own scope, not a bolt-on to
+whichever change happens to be touching `decode/products.rs` next.
+
+---
+
 [xr392]: https://github.com/openradar/xradar/pull/392
