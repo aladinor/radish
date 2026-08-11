@@ -123,6 +123,12 @@ moment.raw_codes       // Array2<u8>, verbatim, exactly as the file stored them
 moment.declared_scale  // (value_min, value_increment, n_levels) as DECLARED in the PDB
 ```
 
+**Widened, additively, for packet 28 (plan 0012, §11).** Packet 28's raw
+levels are `u16`, not `u8` — `raw_codes_u16: Option<Array2<u16>>` carries
+those (`RATE`/176 today), alongside `raw_codes`, never both populated for
+the same moment. Every packet 16/AF1F product keeps using `raw_codes`
+exactly as above, unmodified.
+
 ### 4.2 Refuse, never silently rescale
 
 If a product's on-wire declared scale doesn't match what a caller
@@ -180,6 +186,17 @@ counter-clockwise — hundreds of meters of displacement at typical
 ranges, growing toward the sweep edge. Verified byte-exact against a
 real byte-level oracle on 7 real fixtures.
 
+**Applies to packet 28 too — confirmed against the ICD text itself, not
+assumed from packet 16/AF1F (plan 0012, §11).** NEXRAD ICD 2620001AC,
+Appendix E, Figure E-4 ("Radial Information Data Structure") documents
+packet 28's `Azimuth` field as "Azimuth of the LEADING EDGE of the
+radial" — the identical convention, for a structurally unrelated packet
+format. An earlier pass concluded no correction was needed there, from
+reading two independent Python readers' low-level XDR-parsing code
+(neither takes a position on centering at that layer) without checking
+either reader's higher-level azimuth-exposing method — worth remembering
+before trusting a reference implementation's silence as an answer.
+
 ### 4.6 Velocity is two products, split by tilt
 
 The NWS splits velocity across two message codes — a one-letter-per-moment
@@ -206,13 +223,22 @@ bug is the user's own browser tab.
 
 ### 4.8 Code 0 and code 1 are not data
 
-`DATA_FLOOR_CODE = 2`. In every digital radial product, code 0 is "below
+`DATA_FLOOR_CODE = 2` for `LinearHw`/`FloatScale`. In every digital
+radial product using one of those TWO schemes, code 0 is "below
 threshold" and code 1 is "range folded". Physical value is
 `value_min + (code - 2) * value_increment`; codes below 2 are NaN.
 `raw_codes` still carries the verbatim code either way, so a consumer
 that wants to distinguish "below threshold" from "range folded" can —
 that distinction isn't collapsed away, just not exposed as a separate
 field radish would have to own and keep in sync.
+
+**NOT universal beyond those two schemes (plan 0012, §11) — `Precip`/
+`Rate` have their own, per-FILE floor**, read from a product-family flag-
+count field further into the PDB (`pdb::precip_family_scale`), most
+commonly `1` rather than `2` — confirmed against real `DAA`/`DTA`/`DU3`/
+`DU6`/`DPR` fixtures. Applying this section's floor-of-2 to that family
+would silently shift every physical value by one code, which reads
+exactly like "implausible numbers" rather than an obviously-wrong crash.
 
 ### 4.9 An odd `n_bins` gets one halfword-alignment pad byte, not a dropped gate
 
@@ -283,15 +309,13 @@ helpers.
 - Both scaling forms (§4.3), dispatched on `DecodeScheme`, an exhaustive
   enum.
 - Packet 16 (digital radial data array), packet `AF1F` (RLE radials, the
-  legacy 8/16-level product family), and incremental capped bzip2
-  decompression (§4.7). Packet 28 (generic/XDR) and 5 surface precip
-  codes are recognized but deliberately deferred — see
-  `decode::products::DecodeScheme`'s doc for why (packet 28's raw levels
-  are `u16`, a real model mismatch with this backend's `u8`-based
-  `raw_codes` contract, not worth widening speculatively for 2 codes).
-- Product table: 26 message codes from xradar #392's table, 19
-  implemented past the PDB stage; the rest return a named
-  `UnsupportedProduct` error rather than guessing.
+  legacy 8/16-level product family), packet 28 (XDR generic data packet,
+  `u16` raw levels — `decode::nexrad_level3::xdr`), and incremental
+  capped bzip2 decompression (§4.7). See §11 for how packet 28 and the
+  `Precip`/`Rate` schemes closed.
+- Product table: 26 message codes from xradar #392's table, ALL
+  implemented past the PDB stage as of plan 0012 (§11) — an unrecognised
+  message code still returns a named error rather than guessing.
 - Model output: radish's normal CfRadial2/FM301 physical-value model,
   plus the raw-code accessors from §4.1 — both, not either.
 
@@ -470,49 +494,81 @@ implementation on the same real sweep (`radish/benches/dealias.rs`).
 
 ---
 
-## 11. Open work — the 7 deferred codes (2026-08-09)
+## 11. The 7 formerly-deferred codes — closed (2026-08-09, plan 0012)
 
 Raised while scoping `radar-animation`'s free-tier product expansion
 (`plans/level3-product-expansion.md` in that repo — this backend's
-consumer, not this one). Recorded here rather than left implicit, since
-§6 above already names the 7 deferred codes but not what closing each one
-actually needs. **Tracked, not owned by that plan** — this is where the
-real work belongs; it's cross-repo from the consumer's point of view.
+consumer, not this one), tracked here since §6 named the 7 deferred codes
+without saying what closing each one needed, then closed by
+`plans/0012-nexrad-level3-deferred-codes.md` (this repo). All 7 decode
+today; `packet_family_implemented` returns `true` for every code in
+`PRODUCTS`. What follows is what was actually true, not the assumptions
+this section originally recorded — two of those assumptions turned out to
+be wrong, corrected only by reading real bytes.
 
-- **170/172/173/174/175** — 5 message codes, 6 mnemonics: `DAA` (170),
-  `DTA` (172), `DU3`/`DU6` (both 173 — one message code shared by two
-  AWIPS ids, the 3 h/6 h accumulation window is an RPG configuration
-  choice, not a separate code), `DOD` (174), `DSD` (175). The modern
-  digital precip-accumulation family. §6 already says "packet type
-  unconfirmed" — that holds after independent cross-check: decoding real
-  objects and reading PDB halfwords 22-25 under BOTH `LinearHw` and
-  `FloatScale` (this backend's only two linear-scale forms) produced
-  implausible numbers for every one of them, converging with this
-  module's own prior conclusion reached separately. Needs real ICD
-  research into whatever third scale-field layout this product family
-  actually uses — a genuinely open question, not a known shape waiting to
-  be typed in.
-- **176** (`DPR`, Digital Instantaneous Precipitation Rate — a real,
-  live, currently-broadcast product; not a legacy one). Packet 28 (XDR),
-  `u16` raw levels — the model mismatch with `raw_codes: Array2<u8>` §6
-  already names for `HHC` applies here too, independently confirmed by
-  decoding a real `DPR` object and getting radish's own
-  `UnsupportedProduct` refusal (not a guess from source-reading).
-- **177** (`HHC`, Hybrid Hydrometeor Classification). Same packet-28/XDR
-  blocker, same confirmation method — decoding a real object gets the
-  same named refusal. Note for whoever picks this up: an earlier,
-  independent quick byte-level read (in the consumer repo, not here)
-  mistakenly read `HHC`'s packet as 16 from a single sample; that was
-  wrong, corrected after checking radish's own behavior directly against
-  a real object. Trust `packet_family_implemented`/the real decode
-  result over a one-off manual byte read.
-
-None of these are close variants of what's already implemented — 170-175
-need ICD research before any code, and 176/177 need `u16`-level support,
-a real model change to this backend's `u8`-based `raw_codes` contract
-(§4.1), not a speculative widening for a couple of codes as §6 already
-says. Worth a dedicated pass with its own scope, not a bolt-on to
-whichever change happens to be touching `decode/products.rs` next.
+- **170/172/173/174/175** (`DAA`/`DTA`/`DU3`+`DU6`/`DOD`/`DSD` — the
+  digital precip-accumulation family, `DecodeScheme::Precip`). §6's
+  "packet type unconfirmed" is resolved: **packet 16**, confirmed by
+  reading the raw symbology-block packet-code halfword directly on 4 real
+  objects (`DAA`, `DTA`, `DU3`, `DU6`). The PDB scale field IS the same
+  8-byte float32 pair `FloatScale` reads (halfwords 22-25) — what earlier
+  attempts got wrong was the FLOOR code, not the scale field: this family
+  does not use the universal `DATA_FLOOR_CODE = 2` §4.8 documents for
+  every OTHER packet-16 scheme. It has its own per-file leading/trailing
+  flag-count field further into the PDB (halfwords 27-29), read by
+  `pdb::precip_family_scale` — real fixtures show `leading = 1` (not 2),
+  so an earlier attempt computing `(raw - 2) * scale + offset` would have
+  been systematically wrong by exactly one code, which reads exactly like
+  "implausible numbers" while the scale floats themselves parse fine.
+  `172`/`DTA` has a caveat: xradar's own PR-392 reader (used as a
+  cross-check oracle for the other four) warns that its handling of
+  `DTA`'s product version 3 is unverified, so 172 has no byte-exact
+  real-fixture oracle confirmation of its own — see
+  `generate_expected_xradar.py`'s module doc. It shares the identical,
+  code-agnostic decode path the other four ARE confirmed on, so this is a
+  residual gap in evidence, not a known or suspected bug.
+- **176** (`DPR`, Digital Instantaneous Precipitation Rate —
+  `DecodeScheme::Rate`). Packet 28 (XDR), `u16` raw levels, confirmed
+  against a real object. This needed the real, additive model change §6
+  anticipated: `MomentData::raw_codes_u16: Option<Array2<u16>>`,
+  alongside (not replacing) `raw_codes` — see `model/moment.rs`. Also
+  needed a from-scratch XDR (RFC 1832) unpacker
+  (`decode::nexrad_level3::xdr`) with every length-prefixed read bounded
+  against a cap BEFORE allocating, the same decompression-bomb discipline
+  §4.7 already required of `decompress_bzip2_capped`, extended to XDR's
+  own untrusted length prefixes. The `azimuth` field's convention took
+  TWO passes to get right: the first concluded it needed no
+  `+ width/2` correction (packet 16/AF1F's, from `azimuth_centre_deg`),
+  based on reading two independent Python readers' low-level XDR-parsing
+  code, both of which store the field verbatim and take no position on
+  centering — without checking either reader's HIGHER-level
+  azimuth-exposing method. The actual NEXRAD ICD (2620001AC, Appendix E,
+  Figure E-4) settles it: `Azimuth` is documented as "Azimuth of the
+  LEADING EDGE of the radial" for this exact packet-28 field — the SAME
+  correction packet 16/AF1F need, not a different convention. Verified
+  byte-exact (codes AND azimuths) against a real `DPR` object and xradar's
+  independent reader after the fix
+  (`test_nexrad_level3_xradar_oracle.rs::decode_matches_xradar_raw_data_u16`).
+- **177** (`HHC`, Hybrid Hydrometeor Classification —
+  `DecodeScheme::ClassInt`, the SAME scheme as `HCLASS`/165). **Packet
+  16, not packet 28.** This section previously recorded the opposite,
+  and explicitly warned a future reader to "trust
+  `packet_family_implemented`/the real decode result over a one-off
+  manual byte read" — that warning had it backwards. `packet_family_implemented`
+  returning `false` for 177 was never evidence of packet 28: it's gated
+  purely on the MESSAGE code, before symbology is ever parsed, so
+  `UnsupportedProduct` fires identically regardless of what packet type
+  the file actually uses — decoding a real object never happened before
+  this pass. Once actually checked — 3 independently-fetched real `HHC`
+  objects, byte-level packet-code read — all 3 declared packet 16.
+  Consequence: 177 needed almost no new code at all, just removing the
+  `code != 177` exclusion in `packet_family_implemented`'s `ClassInt` arm
+  — it decodes through the exact same path 165 already used, with
+  `has_elevation: false` (already correctly set in `PRODUCTS`) the only
+  real difference. The lesson, stated plainly for whoever reads this
+  next: a deferred/unsupported result is evidence about what this
+  backend HASN'T checked, never evidence about what the file actually
+  contains.
 
 ---
 

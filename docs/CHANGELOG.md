@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NEXRAD Level 3: all 7 previously-deferred message codes now decode**
+  (plan 0012) — `packet_family_implemented` returns `true` for every code
+  in `PRODUCTS`; there is no longer a known-but-unimplemented product.
+  - **170/172/173/174/175** (`DAA`/`DTA`/`DU3`+`DU6`/`DOD`/`DSD`, the
+    digital precip-accumulation family, `DecodeScheme::Precip`) — packet
+    16, confirmed on 4 real objects (`DAA`/`DTA`/`DU3`/`DU6`). Same
+    8-byte float32 PDB scale/offset pair `FloatScale` reads, but with a
+    product-family-specific floor code read from further into the PDB
+    (`leading = 1` on real fixtures, not the universal `DATA_FLOOR_CODE =
+    2` every OTHER packet-16 scheme uses) and a fixed `0.01 in -> mm`
+    conversion factor. `172`/`DTA` decodes through the identical,
+    code-agnostic path as the other four but has no byte-exact
+    real-fixture oracle confirmation of its own (xradar's own reader
+    warns its handling of `DTA`'s product version 3 is unverified) — a
+    known, stated gap, not a silent one.
+  - **176** (`DPR`, Digital Instantaneous Precipitation Rate,
+    `DecodeScheme::Rate`) — packet 28 (XDR, RFC 1832), confirmed on a
+    real object. New: a from-scratch XDR unpacker
+    (`nexrad_level3::decode::xdr`, every length-prefixed read capped
+    against an untrusted length prefix BEFORE allocating), and
+    `MomentData::raw_codes_u16: Option<Array2<u16>>` — additive, alongside
+    `raw_codes`, for packet 28's `u16` raw levels. Same PDB scale/flag
+    logic as `Precip`, factor `1 in -> mm`.
+  - **177** (`HHC`, Hybrid Hydrometeor Classification,
+    `DecodeScheme::ClassInt` — the same scheme as `HCLASS`/165) — **packet
+    16, not packet 28.** An earlier assumption (this project's own design
+    doc) had it backwards; 3 independently-fetched real `HHC` objects all
+    declared packet 16 on direct byte inspection. Needed almost no new
+    code: decodes through the exact same path 165 already used, with
+    `has_elevation: false` the only real difference.
+  - **wasm**: `DecodedProduct.codesU16()`/`.codesWidth` — additive, zero-copy
+    `Uint16Array` accessor for packet-28 products, mirroring `.codes()`'s
+    existing contract; `.codes()` itself is unchanged for every existing
+    (packet 16/AF1F) caller.
+  - **pyo3**: `MomentData.raw_codes()`/`.raw_codes_u16()`/`.value_min`/
+    `.value_increment`/`.n_levels`/`.data_floor_code` — new Python
+    surface; neither `raw_codes` nor `declared_scale` reached Python at
+    all before this (confirmed by grep, not assumed).
+- **NEXRAD Level 3 azimuth convention corrected for packet 28**: the
+  `Azimuth` field is the ray's LEADING edge, per NEXRAD ICD 2620001AC
+  Appendix E Figure E-4 — the same `+ width/2` correction packet 16/AF1F
+  already apply, not a different convention. Verified byte-exact
+  (codes AND azimuths) against a real `DPR` object and an independent
+  reader.
 - **NEXRAD Level 3 tilt-letter table extended**: `TILT_LETTER_TABLE` now
   resolves `S` (Storm Relative Mean Radial Velocity, code 56 — 4 of 6 tilt
   ordinals, `N0`/`N1`/`N2`/`N3`, a decode-scheme fact that holds for any date
