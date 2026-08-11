@@ -264,17 +264,31 @@ input). Re-run the generator only when the fixture list changes; it needs
 Python, numpy, and access to that oracle decoder — none of which the Rust
 test (`test_nexrad_level3_parity.rs`) needs at run time.
 
-### xradar cross-check corpus (value parity, packet `AF1F` + categorical + reject-cleanly)
+### xradar cross-check corpus (value parity, packet `AF1F` + categorical + `Precip`/`Rate`)
 
-Extends real-file coverage to the two product families the Tier 1 oracle
-above cannot decode at all (it hard-rejects anything but packet 16 — see
-`docs/NEXRAD_LEVEL3_WASM.md`): packet `AF1F` (storm-relative velocity)
-and packet-16 `ClassInt` (hydrometeor class), plus two extra packet-16
-tilts for grid-shape diversity, plus three real files of currently
-unimplemented product families used only to confirm a clean rejection.
-All seven come from `openradar/open-radar-data#101` (open at generation
-time — [PR #101][ord101]), one coherent KLOT scene, `2026-07-17 19:30
-UTC`. Same "not committed, env-var resolved" policy as above.
+Extends real-file coverage to product families the Tier 1 oracle above
+cannot decode at all (it hard-rejects anything but packet 16 — see
+`docs/NEXRAD_LEVEL3_WASM.md`): packet `AF1F` (storm-relative velocity),
+packet-16 `ClassInt` (hydrometeor class), two extra packet-16 tilts for
+grid-shape diversity, and — since plan 0012 closed the 7 previously-
+deferred codes — `Precip` (`DAA`, packet 16) and `Rate` (`DPR`, packet
+28/XDR). All seven come from `openradar/open-radar-data#101` (open at
+generation time — [PR #101][ord101]), one coherent KLOT scene,
+`2026-07-17 19:30 UTC`. Same "not committed, env-var resolved" policy as
+above.
+
+**`DPR` and `HHC` were originally added here for "reject-cleanly only"
+coverage** (radish didn't implement packet 28 or `HCLASS`-via-packet-16
+yet) — `test_nexrad_level3_xradar_oracle.rs`'s
+`unimplemented_real_products_reject_cleanly` test used to cover exactly
+these two plus `DAA`. Plan 0012 closed all three; that test (and its
+cases) is gone, replaced by real value-parity coverage: `DAA`/`HHC` reuse
+`decode_matches_xradar_raw_data`'s existing `u8` comparison (same sidecar
+shape, `generate_expected_xradar.py`); `DPR` gets its own
+`decode_matches_xradar_raw_data_u16` test and sidecar generator
+(`generate_expected_xradar_u16.py`) since its raw codes are `u16`, not
+`u8` — see that script's module doc for why a shared generator with a
+dtype branch wasn't worth it for one fixture.
 
 | file | bytes | sha256 | product | why this one |
 | --- | ---: | --- | --- | --- |
@@ -282,15 +296,16 @@ UTC`. Same "not committed, env-var resolved" policy as above.
 | `LOT_N0H_2026_07_17_19_30_15` | 23729 | `0d9b6dd71d457729dc45be3d5bc83f48ea6873b3df503268ace4626c215c1f14` | N0H | hydrometeor class, `ClassInt` (categorical, no linear scale) |
 | `LOT_N1B_2026_07_17_19_30_15` | 163460 | `bef16073178200a9463658462ce824326dddbbc42e790c15dcf8349bcc98e576` | N1B | reflectivity, tilt 1 — an ODD `n_bins` (1687), exercising the ICD Note 1 halfword-pad case (see below) |
 | `LOT_N2B_2026_07_17_19_30_15` | 47873 | `3627b309929f9e2347b650ccb95d6a9522c7128797ace0f99f988fb9e65514a1` | N2B | reflectivity, tilt 2 — even `n_bins`, no padding, a plain control case |
-| `LOT_DPR_2026_07_17_19_30_15` | 31842 | `61ba9537a23a4f42e91fa9fe03e69631f98a56f8d99bb6ee253e6d5889986ea9` | DPR | precip rate, packet 28/XDR — radish doesn't implement this packet family; real bytes, reject-cleanly only |
-| `LOT_HHC_2026_07_17_19_30_15` | 9491 | `11988fb738c868ed0f291fbefb6cdfb5a8791396f5a2bd083c38693134e0e8a0` | HHC | hybrid hydro class — reject-cleanly only |
-| `LOT_DAA_2026_07_17_19_30_15` | 32989 | `8e1119f452cdd644a9f91ba058796e8d3570ae341b8508fbc5b81bc846b34374` | DAA | digital accumulation — reject-cleanly only |
+| `LOT_DPR_2026_07_17_19_30_15` | 31842 | `61ba9537a23a4f42e91fa9fe03e69631f98a56f8d99bb6ee253e6d5889986ea9` | DPR | `Rate` (176), packet 28/XDR, `u16` raw levels — `decode_matches_xradar_raw_data_u16` |
+| `LOT_HHC_2026_07_17_19_30_15` | 9491 | `11988fb738c868ed0f291fbefb6cdfb5a8791396f5a2bd083c38693134e0e8a0` | HHC | `ClassInt` (177) — confirmed via 3 independently-fetched real objects to arrive via packet 16, NOT packet 28 as this repo's plan originally assumed (see `products.rs`'s module doc) |
+| `LOT_DAA_2026_07_17_19_30_15` | 32989 | `8e1119f452cdd644a9f91ba058796e8d3570ae341b8508fbc5b81bc846b34374` | DAA | `Precip` (170), packet 16 — the digital accumulation family |
+| `LOT_DU3_2026_08_09_21_12_25` | 80313 | `92cbdc15ba11ec94b24d5320d2b313a2a143657a3a93b04994f17049da126f4d` | DU3 | `Precip` (173), packet 16 — a second, independently-fetched scene/site-time (not part of the PR #101 KLOT scene above), confirming `Precip` byte-for-byte on a different AWIPS id sharing the same message code as `DU6`. `DTA`/172 deliberately has no fixture here — see `generate_expected_xradar.py`'s module doc for why (xradar's own reader warns its product-version handling for 172 is unverified) |
 
 ```bash
 for f in LOT_N0S_2026_07_17_19_30_15 LOT_N0H_2026_07_17_19_30_15 \
          LOT_N1B_2026_07_17_19_30_15 LOT_N2B_2026_07_17_19_30_15 \
          LOT_DPR_2026_07_17_19_30_15 LOT_HHC_2026_07_17_19_30_15 \
-         LOT_DAA_2026_07_17_19_30_15; do
+         LOT_DAA_2026_07_17_19_30_15 LOT_DU3_2026_08_09_21_12_25; do
   aws s3 cp --no-sign-request "s3://unidata-nexrad-level3/$f" ~/.cache/radish/fixtures/nexrad_level3/
 done
 ```
@@ -349,11 +364,10 @@ it.
   runs on every `cargo test` and needs no fixtures, since it only
   perturbs an in-memory byte array and checks the comparison catches it.
 - `test_nexrad_level3_xradar_oracle.rs`'s fixture cases (both
-  `decode_matches_xradar_raw_data` and
-  `unimplemented_real_products_reject_cleanly`) follow the same
-  `#[ignore]`/env-var-missing-skips-cleanly discipline, against the same
-  `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR`. Its own sabotage-verify test is not
-  `#[ignore]`d either.
+  `decode_matches_xradar_raw_data` and `decode_matches_xradar_raw_data_u16`)
+  follow the same `#[ignore]`/env-var-missing-skips-cleanly discipline,
+  against the same `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR`. Its own
+  sabotage-verify tests are not `#[ignore]`d either.
 
 ## Velocity dealiasing golden corpus
 

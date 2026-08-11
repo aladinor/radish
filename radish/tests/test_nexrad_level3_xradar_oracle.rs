@@ -42,13 +42,19 @@
 //! never builds or runs xradar's PR branch; these tests read only the
 //! committed JSON.
 //!
-//! Also covers three real files (DPR, HHC, DAA) radish deliberately does
-//! not implement (packet 28/XDR + a second categorical family) — no
-//! oracle needed for those, just confirming a **real**, not synthetic,
-//! product of each currently-unsupported kind rejects cleanly through
-//! the public API rather than panicking or silently misdecoding. The
-//! synthetic-byte version of this same check lives in
-//! `test_nexrad_level3_xradar_vectors.rs`.
+//! **Extended by plan 0012** (closing the 7 previously-deferred codes):
+//! `DAA` (170, `Precip`) and `HHC` (177, `ClassInt` — confirmed via real
+//! fixtures to arrive via packet 16, NOT packet 28 as originally assumed;
+//! see `products.rs`'s module doc) reuse this exact `u8`/`raw_codes`
+//! comparison, added to `decode_matches_xradar_raw_data`'s cases below.
+//! `DPR` (176, `Rate`, packet 28/XDR) needs a SEPARATE comparison
+//! (`decode_matches_xradar_raw_data_u16`) since its raw codes are `u16`
+//! (`raw_codes_u16`, not `raw_codes`) — see
+//! `generate_expected_xradar_u16.py`'s module doc for why that's a
+//! distinct generator script, not a branch in this one. All three used to
+//! be covered by `unimplemented_real_products_reject_cleanly` below,
+//! before this pass — moved out of it now that they decode (a stale
+//! "this rejects" case testing dead code is worse than no test).
 //!
 //! Fixture-parity cases are `#[ignore]`d and skip cleanly (not fail) when
 //! `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR` is unset or a file is missing —
@@ -114,6 +120,9 @@ fn assert_codes_match(name: &str, actual: &Array2<u8>, expected_sha256: &str) {
 #[case::n0h_classint("LOT_N0H_2026_07_17_19_30_15")]
 #[case::n1b("LOT_N1B_2026_07_17_19_30_15")]
 #[case::n2b("LOT_N2B_2026_07_17_19_30_15")]
+#[case::daa_precip("LOT_DAA_2026_07_17_19_30_15")]
+#[case::hhc_classint_via_packet16("LOT_HHC_2026_07_17_19_30_15")]
+#[case::du3_precip("LOT_DU3_2026_08_09_21_12_25")]
 #[ignore = "needs RADISH_NEXRAD_LEVEL3_FIXTURE_DIR; see CORPUS.md"]
 fn decode_matches_xradar_raw_data(#[case] name: &str) {
     let Some(path) = fixture_path("RADISH_NEXRAD_LEVEL3_FIXTURE_DIR", name) else {
@@ -176,41 +185,107 @@ fn decode_matches_xradar_raw_data(#[case] name: &str) {
     assert_codes_match(name, codes, &expected.codes_sha256);
 }
 
-/// Real (not synthetic) bytes for three products radish deliberately
-/// does not implement — packet 28/XDR (DPR) and two categorical-family
-/// products it doesn't ship a table for (HHC, DAA). Confirms the public
-/// API rejects each with `RadishError::Decode` NAMING that specific
-/// message code, not merely a decode error of some kind (any of ~25
-/// `Level3DecodeError` variants maps to `RadishError::Decode` — checking
-/// only the outer variant wouldn't catch an unrelated decode regression
-/// misfiring on the same fixture) — the same claim
-/// `test_nexrad_level3_xradar_vectors.rs`'s
-/// `deferred_packet28_and_precip_codes_reject_through_the_public_backend_api`
-/// makes with hand-built bytes, now against what the RPG actually emits.
+/// Mirrors [`XradarExpected`] for the `u16` sidecar shape
+/// `generate_expected_xradar_u16.py` writes — same fields, no
+/// `codes_sha256` reuse across the two structs since the `u8`/`u16` hash
+/// inputs are computed differently (see [`codes_sha256_u16`]'s doc).
+#[derive(Debug, Deserialize)]
+struct XradarExpectedU16 {
+    fixture: String,
+    fixture_sha256: String,
+    message_code: u16,
+    n_radials: usize,
+    n_bins: usize,
+    azimuths: Vec<f32>,
+    codes_sha256: String,
+}
+
+/// `u16` counterpart to `codes_sha256` — hashes each element's BIG-ENDIAN
+/// bytes explicitly, not `codes.as_slice()`'s raw memory (native-endian,
+/// i.e. little-endian on every real deployment target this crate ships
+/// for: x86_64, aarch64, wasm32). `generate_expected_xradar_u16.py`
+/// hashes `raw_data.astype(">u2").tobytes()` — this must match that exact
+/// byte order or the comparison would fail on every platform even when
+/// the DATA is identical, for a reason that has nothing to do with a real
+/// decode bug.
+fn codes_sha256_u16(codes: &Array2<u16>) -> String {
+    let flat = codes
+        .as_slice()
+        .expect("freshly-decoded Array2<u16> is always contiguous, row-major");
+    let mut be_bytes = Vec::with_capacity(flat.len() * 2);
+    for &v in flat {
+        be_bytes.extend_from_slice(&v.to_be_bytes());
+    }
+    hex32(&Sha256::digest(&be_bytes).into())
+}
+
+/// [`RATE`]/code 176 (`DPR`) — packet 28 (XDR), the one packet family this
+/// backend produces `u16` raw codes for (`raw_codes_u16`, not
+/// `raw_codes`). Same structure as [`decode_matches_xradar_raw_data`], a
+/// separate function because the field it reads off `MomentData` and the
+/// hash computation both genuinely differ by width — not because the
+/// comparison itself is conceptually different.
 #[rstest]
-#[case::dpr_packet28("LOT_DPR_2026_07_17_19_30_15", 176)]
-#[case::hhc_categorical("LOT_HHC_2026_07_17_19_30_15", 177)]
-#[case::daa_accumulation("LOT_DAA_2026_07_17_19_30_15", 170)]
+#[case::dpr_rate_packet28("LOT_DPR_2026_07_17_19_30_15")]
 #[ignore = "needs RADISH_NEXRAD_LEVEL3_FIXTURE_DIR; see CORPUS.md"]
-fn unimplemented_real_products_reject_cleanly(#[case] name: &str, #[case] message_code: i16) {
+fn decode_matches_xradar_raw_data_u16(#[case] name: &str) {
     let Some(path) = fixture_path("RADISH_NEXRAD_LEVEL3_FIXTURE_DIR", name) else {
         eprintln!("skipping {name}: RADISH_NEXRAD_LEVEL3_FIXTURE_DIR not set or file missing");
         return;
     };
+    let expected: XradarExpectedU16 =
+        load_expected_file(&expected_dir(), &format!("{name}.xradar.u16.json"));
+    assert_eq!(expected.fixture, name, "sidecar/fixture name mismatch");
+
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{name}: read fixture: {e}"));
-    let backend = NexradLevel3Backend::new();
-    let err = match backend.read_bytes_volume(bytes) {
-        Err(e) => e,
-        Ok(_) => panic!("{name}: expected a clean rejection, got Ok"),
-    };
-    assert!(
-        matches!(err, radish::RadishError::Decode(_)),
-        "{name}: expected RadishError::Decode, got {err:?}"
+    assert_eq!(
+        hex32(&Sha256::digest(&bytes).into()),
+        expected.fixture_sha256,
+        "{name}: on-disk fixture doesn't match the sidecar's recorded fixture_sha256 \
+         (wrong or stale file at this path?)"
     );
-    let msg = err.to_string();
-    assert!(
-        msg.contains(&message_code.to_string()),
-        "{name}: error should name message code {message_code}: {msg}"
+    let backend = NexradLevel3Backend::new();
+    let volume = backend
+        .read_bytes_volume(bytes)
+        .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
+    let sweep = &volume.sweeps[0];
+
+    let nids = sweep
+        .metadata
+        .nids
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name}: sweep.metadata.nids is None"));
+    assert_eq!(
+        nids.message_code, expected.message_code,
+        "{name}: message_code"
+    );
+    assert_eq!(sweep.num_rays(), expected.n_radials, "{name}: n_radials");
+    assert_eq!(sweep.num_gates(), expected.n_bins, "{name}: n_bins");
+    assert_eq!(
+        sweep.coordinates.azimuth, expected.azimuths,
+        "{name}: azimuth array diverges from xradar's raw_data-derived azimuths \
+         (see plan 0012 §3.3 step 6 for the leading-edge-correction convention \
+         both sides must apply identically here)"
+    );
+
+    assert_eq!(
+        sweep.moments.len(),
+        1,
+        "{name}: NIDS products carry exactly one moment"
+    );
+    let (_, moment) = sweep
+        .moments
+        .iter()
+        .next()
+        .unwrap_or_else(|| panic!("{name}: no moment decoded"));
+    let codes = moment
+        .raw_codes_u16
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name}: raw_codes_u16 is None"));
+    let actual_sha = codes_sha256_u16(codes);
+    assert_eq!(
+        actual_sha, expected.codes_sha256,
+        "{name}: codes array diverges from xradar's raw_data (SHA-256 mismatch)"
     );
 }
 
@@ -248,4 +323,24 @@ fn sabotage_codes_comparison_catches_a_mismatch() {
     let codes = Array2::from_shape_vec((2, 4), vec![2u8, 3, 4, 5, 6, 7, 8, 9]).unwrap();
     let deliberately_wrong_sha256 = "0".repeat(64);
     assert_codes_match("sabotage", &codes, &deliberately_wrong_sha256);
+}
+
+/// Sabotage-verify for [`codes_sha256_u16`] — same discipline as
+/// `codes_sha256`'s sibling above, and also locks in that a value change
+/// ABOVE 255 (impossible to represent, let alone perturb, in the `u8`
+/// version) is caught — the entire reason this function exists instead of
+/// reusing `codes_sha256` with a cast.
+#[test]
+fn sabotage_codes_sha256_u16_mismatch_is_detected() {
+    let good = Array2::from_shape_vec((2, 2), vec![0u16, 300, 7874, 65535]).unwrap();
+    let mut sabotaged = good.clone();
+    sabotaged[[1, 1]] -= 1; // 65535 -> 65534, a change only representable in u16
+
+    let good_hash = codes_sha256_u16(&good);
+    let sabotaged_hash = codes_sha256_u16(&sabotaged);
+
+    assert_ne!(
+        good_hash, sabotaged_hash,
+        "a single-element perturbation must change the SHA-256 digest"
+    );
 }

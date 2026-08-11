@@ -11,10 +11,25 @@ supports packets 16, `AF1F`, and 28 (generic/XDR), so it's used here
 instead, scoped to the two families radish actually implements: `AF1F`
 (N0S, storm-relative velocity) and packet-16 `ClassInt` (N0H, hydro
 class), plus two extra packet-16 tilts (N1B/N2B) for grid-shape
-diversity. radish's `raw_codes` output is exactly xradar's `raw_data`
-attribute for both: the same on-wire per-gate byte grid, before either
-side applies a scale/category table — WITH ONE DOCUMENTED EXCEPTION, see
-below.
+diversity, plus (added by plan 0012) `DAA`/170, `DU3`/173 (`Precip`) and
+`HHC`/177 (`ClassInt`, confirmed via real fixtures to be packet 16, not
+packet 28 as originally assumed — see `products.rs`'s module doc).
+radish's `raw_codes` output is exactly xradar's `raw_data` attribute for
+all of these: the same on-wire per-gate byte grid, before either side
+applies a scale/category table — WITH ONE DOCUMENTED EXCEPTION, see below.
+
+**`DTA`/172 deliberately NOT in `FIXTURES`.** xradar's PR-392 branch
+emits `UserWarning: Product version 3 is newer than the latest
+implemented version 1 for message code 172; decoded values may be wrong`
+when decoding a real `DTA` object — its own author flags version 3's
+byte layout as unverified in that branch. radish's `Precip` decode logic
+is scheme-generic (170/172-175 all dispatch through the exact same
+`pdb::precip_family_scale` + `decode/mod.rs` match arm, no code-172
+special-casing), so 172 is NOT untested — `DAA`/170 and `DU3`/173 above
+exercise the identical code path xradar itself doesn't warn about — but
+it does mean 172 has no BYTE-EXACT real-fixture oracle confirmation of
+its own the way the other four codes in this family do. Flagged as a
+known residual gap, not silently absent.
 
 **Packet 16's halfword-alignment pad byte (ICD Note 1) — trimmed here,
 not left for the Rust test to special-case.** NEXRAD ICD 2620001AC,
@@ -78,6 +93,22 @@ FIXTURES = [
     ("LOT_N0H_2026_07_17_19_30_15", 165),  # packet 16, ClassInt hydro class
     ("LOT_N1B_2026_07_17_19_30_15", 153),  # packet 16, LinearInteger (extra tilt)
     ("LOT_N2B_2026_07_17_19_30_15", 153),  # packet 16, LinearInteger (extra tilt)
+    # Added by plan 0012 (closing the 7 previously-deferred codes): both
+    # confirmed packet 16 (`u8` raw levels, same sidecar shape as the four
+    # above) by independently re-checking against real fixtures — DAA's
+    # `Precip` scheme and HHC/177's `ClassInt` scheme (NOT packet 28, the
+    # plan's original assumption — see `products.rs`'s module doc).
+    ("LOT_DAA_2026_07_17_19_30_15", 170),  # packet 16, Precip (surface accumulation)
+    ("LOT_HHC_2026_07_17_19_30_15", 177),  # packet 16, ClassInt (best-tilt composite)
+    # A second, independently-fetched Precip fixture (different scene,
+    # different AWIPS id — DU3, the 3h/6h user-selectable window sharing
+    # message code 173 with DU6) — xradar decodes it with no product-
+    # version warning (unlike DTA/172, see this script's module doc for
+    # why that one is deliberately NOT in this list).
+    (
+        "LOT_DU3_2026_08_09_21_12_25",
+        173,
+    ),  # packet 16, Precip (user-selectable accumulation)
 ]
 
 

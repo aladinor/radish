@@ -10,13 +10,15 @@
 //! fixtures needed); "advisory" describes the strength of the evidence a
 //! pass/fail here carries, not whether the test executes.
 //!
-//! **Scope, deliberately narrow**: only the codes/schemes this backend
-//! actually implements (packet 16 + AF1F, `LinearHw`/`FloatScale`/
-//! `Legacy16`/`ClassInt` — see `decode::products::PRODUCTS`). Packet 28
-//! (XDR) and the `Precip`/`Rate` schemes (codes 170/172-175/176/177) are
-//! deliberately unimplemented (a documented, honest boundary — see
-//! `decode::products`'s module doc) — this file cross-checks that they
-//! still reject cleanly through the public API, not that they decode.
+//! **Scope**: every scheme this backend implements — `LinearHw`/
+//! `FloatScale`/`Legacy16`/`ClassInt` (packet 16 + AF1F) plus, since plan
+//! 0012 closed the last 7 deferred codes, `Precip` (packet 16) and `Rate`
+//! (packet 28/XDR) — see `decode::products::PRODUCTS`. There is no longer
+//! a deferred/unimplemented code in the product table to cross-check a
+//! clean rejection for (an EARLIER version of this file did exactly that,
+//! for 170/176/177 — see `deferred_message_codes_still_reject_cleanly`
+//! below for what replaced it once those codes started succeeding
+//! instead).
 //!
 //! **One deliberate NON-port, documented rather than silently skipped**:
 //! xradar's `_radial_packet16`/`_radial_packet_af1f` test helpers assign
@@ -217,6 +219,59 @@ fn float_scale_value_parity_matches_xradar_formula() {
     assert!((data[3] - 4.5).abs() < 1e-6); // (200 - 128.0) / 16.0
 }
 
+// --- Precip (closed by plan 0012) -----------------------------------------
+
+/// `threshold_data` for `Precip`/`Rate`: the same 8-byte float32
+/// scale/offset pair as `FloatScale` (halfwords 22-25), plus the
+/// product-family flag-count field `pdb::precip_family_scale` reads
+/// further into the PDB (halfwords 27-29: max_val `u16`, leading/trailing
+/// `i16` each) — see that function's doc for the full derivation.
+fn precip_threshold(
+    scale: f32,
+    offset: f32,
+    max_val: u16,
+    leading: i16,
+    trailing: i16,
+) -> [u8; 32] {
+    let mut t = [0u8; 32];
+    t[0..4].copy_from_slice(&scale.to_be_bytes());
+    t[4..8].copy_from_slice(&offset.to_be_bytes());
+    t[10..12].copy_from_slice(&max_val.to_be_bytes());
+    t[12..14].copy_from_slice(&leading.to_be_bytes());
+    t[14..16].copy_from_slice(&trailing.to_be_bytes());
+    t
+}
+
+/// Tier 2 value-parity for `Precip` (code 170, `DAA`) — the formula plan
+/// 0012 §2.1 derived from xradar #392's `get_scale_offset`/
+/// `get_flag_counts`: `physical = code * (factor/scale) +
+/// (-offset*factor/scale)`, masked below `leading` and above
+/// `max_val - trailing` when the flag-count field is plausible. Real
+/// values (`scale=1.2555609941482544, offset=0.8744438886642456,
+/// leading=1`) read off a live `LOT_DAA` fixture (plan 0012 §2.4 step 2).
+#[test]
+fn precip_value_parity_matches_xradar_formula() {
+    let threshold = precip_threshold(1.255_561, 0.874_444, 255, 1, 0);
+    let raw = build_product(170, threshold, &packet16(&[&[0, 1, 2, 255]]));
+    let volume = decode(raw);
+    let moment = volume.sweeps[0].moments.get("ACCUM").unwrap();
+
+    let data = moment.data.row(0).to_vec();
+    const PRECIP_FACTOR: f32 = 0.01 * 25.4; // IN_TO_MM
+    let out_scale = PRECIP_FACTOR / 1.255_561;
+    let out_offset = -0.874_444 * PRECIP_FACTOR / 1.255_561;
+    assert!(data[0].is_nan(), "code 0 is below the floor (leading=1)");
+    assert!((data[1] - (1.0 * out_scale + out_offset)).abs() < 1e-5);
+    assert!((data[2] - (2.0 * out_scale + out_offset)).abs() < 1e-5);
+    assert!((data[3] - (255.0 * out_scale + out_offset)).abs() < 1e-4);
+
+    let scale = moment.declared_scale.unwrap();
+    assert_eq!(
+        scale.data_floor_code, 1,
+        "floor must be read from the PDB (1), not DATA_FLOOR_CODE's universal 2"
+    );
+}
+
 // --- Legacy16 (AF1F) -----------------------------------------------------
 
 /// ~ xradar's `TestParser.test_legacy16_decode_per_flag_scale`: legacy
@@ -317,35 +372,42 @@ fn class_int_value_parity_matches_xradar() {
     assert_eq!(data[3], 150.0);
 }
 
-// --- Deferred codes, through the public API -------------------------------
+// --- Unrecognised message codes, through the public API -------------------
 
-/// ~ xradar's `TestParser.test_deferred_product_raises` /
-/// `test_unknown_product_raises`, but through `NexradLevel3Backend`'s
-/// PUBLIC API (`read_bytes_volume` -> `decode_and_convert` ->
-/// `adapter::convert`), not `decode::decode` directly the way
-/// `decode/mod.rs`'s internal
-/// `decode_returns_unsupported_product_for_a_deferred_code_end_to_end`
-/// test does — a different code path, worth its own coverage since it's
-/// what the `wasm` crate (Phase 7) will actually call.
+/// ~ xradar's `TestParser.test_unknown_product_raises`, but through
+/// `NexradLevel3Backend`'s PUBLIC API (`read_bytes_volume` ->
+/// `decode_and_convert` -> `adapter::convert`), not `decode::decode`
+/// directly the way `decode/mod.rs`'s internal
+/// `decode_rejects_an_unrecognised_message_code_end_to_end` test does — a
+/// different code path, worth its own coverage since it's what the `wasm`
+/// crate actually calls.
+///
+/// FORMERLY covered 170/176/177 rejecting as "known but not implemented"
+/// (`deferred_packet28_and_precip_codes_reject_through_the_public_backend_api`)
+/// — plan 0012 closed all 7 previously-deferred codes, so `PRODUCTS` no
+/// longer has any code in that state; this test was rewritten rather than
+/// left asserting a rejection that no longer happens (this file's own
+/// module doc: a stale "this rejects" test testing dead code is worse
+/// than no test). The one rejection this stage can still produce is for a
+/// message code `PRODUCTS` doesn't recognise at all.
 #[test]
-fn deferred_packet28_and_precip_codes_reject_through_the_public_backend_api() {
-    for code in [170i16, 176, 177] {
-        let mut raw = b"N0ZLOT\r\r\n".to_vec();
-        while raw.len() < 30 {
-            raw.push(b' ');
-        }
-        raw.extend_from_slice(&code.to_be_bytes());
-        raw.extend_from_slice(&[0u8; 16]);
-        raw.extend_from_slice(&(-1i16).to_be_bytes()); // PDB divider
-        raw.extend_from_slice(&[0u8; 8]); // trailing slack for the scan window
-
-        let err = NexradLevel3Backend::new()
-            .read_bytes_volume(raw)
-            .expect_err(&format!("message code {code} should be rejected"));
-        let msg = err.to_string();
-        assert!(
-            msg.contains(&code.to_string()),
-            "error for code {code} should name it: {msg}"
-        );
+fn unrecognised_message_code_rejects_through_the_public_backend_api() {
+    let code = 9999i16;
+    let mut raw = b"N0ZLOT\r\r\n".to_vec();
+    while raw.len() < 30 {
+        raw.push(b' ');
     }
+    raw.extend_from_slice(&code.to_be_bytes());
+    raw.extend_from_slice(&[0u8; 16]);
+    raw.extend_from_slice(&(-1i16).to_be_bytes()); // PDB divider
+    raw.extend_from_slice(&[0u8; 8]); // trailing slack for the scan window
+
+    let err = NexradLevel3Backend::new()
+        .read_bytes_volume(raw)
+        .expect_err("an unrecognised message code should be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no digital radial message header found"),
+        "error should be NoMessageHeader: {msg}"
+    );
 }
