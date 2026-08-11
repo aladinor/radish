@@ -47,20 +47,29 @@ pub(crate) enum DecodeScheme {
     /// `(raw - offset) / scale`. Codes 159/161/163.
     FloatScale,
     /// Same byte layout as `FloatScale`, but the post-decode factor is
-    /// fixed at `0.01 in -> mm` regardless of `post_scale` — surface
-    /// accumulation products (170/172-175). **Deferred** — see Phase 3's
-    /// exit notes; packet type unconfirmed, not implemented this pass.
+    /// fixed at `0.01 in -> mm` regardless of `post_scale`, and the floor/
+    /// ceiling flag-count field comes from further into the PDB
+    /// (`pdb::precip_family_scale`) than `FloatScale` ever reads — surface
+    /// accumulation products (170/172-175). Packet 16, confirmed against
+    /// real `DAA`/`DTA`/`DU3`/`DU6` fixtures (plan 0012 §2.4).
     Precip,
-    /// Same as `Precip` but the factor is `1 in -> mm` (code 176, DPR
-    /// rate). **Deferred** — packet 28 (XDR) not implemented this pass.
+    /// Same PDB layout and flag-count logic as `Precip`, but the factor is
+    /// `1 in -> mm` (code 176, `DPR` rate) — arrives via packet 28 (XDR),
+    /// so its raw levels are `u16`, not `u8` (see [`super::RawCodes`]).
+    /// Confirmed against a real `DPR` fixture (plan 0012 §3).
     Rate,
     /// The 16-level flag-encoded legacy scheme: `threshold_data` is 16
     /// `(flag, value)` byte pairs, one entry per possible raw level 0-15.
     /// Codes 19/20/25/27/28/30/56/78/79/80, all via packet AF1F.
     Legacy16,
     /// Categorical — codes index a fixed label table, not a linear scale.
-    /// Code 165 (packet 16) is implemented; code 177 (packet 28, "hybrid"
-    /// hydrometeor classification) is **deferred** with 176.
+    /// Code 165 (`HCLASS`) and code 177 (`HHC`, best-tilt composite) BOTH
+    /// arrive via packet 16 — code 177 was originally assumed (plan 0012's
+    /// first draft) to need packet 28 like `Rate`/176, but three
+    /// independently-fetched real `HHC` fixtures all declared packet code
+    /// 16, not 28 (plan 0012 §3's implementation notes) — the assumption
+    /// was wrong, not the file. `packet_family_implemented`'s ClassInt
+    /// arm no longer needs to special-case 177 at all as a result.
     ClassInt,
 }
 
@@ -89,12 +98,9 @@ pub(crate) struct ProductSpec {
 const KT_TO_MS: f32 = 0.514444;
 
 /// Message code -> product spec. Ported from xradar #392's `PRODUCT_TABLE`.
-/// Codes marked "deferred" below decode their PDB fields (so
-/// `find_message_header`/`read_pdb_fields` work) but symbology decode
-/// returns [`super::error::Level3DecodeError`]'s unsupported-product path —
-/// see this module's own doc comment and `UnsupportedPacketCode`'s doc for
-/// why (packet 28's `u16` raw levels are a real model mismatch with this
-/// backend's `u8`-based contract, not just unimplemented).
+/// Every entry decodes today (plan 0012 closed the last 7: 170/172-175 via
+/// `Precip`, 176 via `Rate`/packet 28 (`u16` raw levels — see
+/// [`super::RawCodes`]), 177 via `ClassInt`/packet 16).
 pub(crate) const PRODUCTS: &[(i16, ProductSpec)] = &[
     // --- packet AF1F (RLE), legacy 16-level scheme ---
     (
@@ -290,7 +296,8 @@ pub(crate) const PRODUCTS: &[(i16, ProductSpec)] = &[
             post_scale: 1.0,
         },
     ),
-    // --- deferred: packet type not confirmed / packet 28 (XDR) ---
+    // --- packet 16 (`Precip`, 170/172-175) / packet 28 XDR (`Rate`, 176) /
+    //     packet 16 (`ClassInt`, 177) — closed by plan 0012 ---
     (
         170,
         ProductSpec {
@@ -363,29 +370,28 @@ pub(crate) const PRODUCTS: &[(i16, ProductSpec)] = &[
     ),
 ];
 
-/// Message codes whose symbology packet type this pass confirmed and
-/// implemented (packet 16 or AF1F, both `u8` raw levels). Codes in
-/// [`PRODUCTS`] but not here decode their PDB fine but return
-/// [`super::error::Level3DecodeError::UnsupportedProduct`] at the
-/// symbology stage — see the module doc for why (packet 28's `u16` raw
-/// levels don't fit this backend's `u8` code model yet, and the precip
-/// codes' packet type wasn't independently confirmed this pass).
+/// Whether `code`'s symbology packet type is implemented — as of plan
+/// 0012, every code in [`PRODUCTS`] is (`None` for an unknown code is the
+/// only `false` this function returns anymore).
 ///
-/// Exhaustively matched on `Option<DecodeScheme>`, not a blacklist: a
-/// future `DecodeScheme` variant forces a compile error here instead of
-/// silently reaching `decode/mod.rs`'s `unreachable!()` on real product
-/// input — the same "make the unrepresentable state a compile error"
-/// discipline [`DecodeScheme`]'s own doc comment asks for.
+/// Exhaustively matched on `Option<DecodeScheme>`, not a simplified
+/// `Some(_) => true`, on purpose: a future `DecodeScheme` variant forces a
+/// compile error here instead of silently being treated as implemented —
+/// the same "make the unrepresentable state a compile error" discipline
+/// [`DecodeScheme`]'s own doc comment asks for. Kept as a named function
+/// (not inlined at its one call site in `decode/mod.rs`) so that
+/// discipline has one place to live as the product table keeps growing.
 pub(crate) fn packet_family_implemented(code: i16) -> bool {
     match decode_scheme_for(code) {
         None => false,
-        Some(DecodeScheme::LinearHw | DecodeScheme::FloatScale | DecodeScheme::Legacy16) => true,
-        // Code 165 is packet 16 (implemented); code 177 is the same
-        // decode scheme but arrives via packet 28 (XDR, u16 raw levels —
-        // deferred, see the module doc). `ClassInt` alone can't tell them
-        // apart; the message code can.
-        Some(DecodeScheme::ClassInt) => code != 177,
-        Some(DecodeScheme::Precip | DecodeScheme::Rate) => false,
+        Some(
+            DecodeScheme::LinearHw
+            | DecodeScheme::FloatScale
+            | DecodeScheme::Legacy16
+            | DecodeScheme::ClassInt
+            | DecodeScheme::Precip
+            | DecodeScheme::Rate,
+        ) => true,
     }
 }
 
@@ -622,17 +628,20 @@ mod tests {
     }
 
     #[test]
-    fn packet_family_implemented_covers_16_and_af1f_only() {
+    fn packet_family_implemented_covers_every_product_table_entry() {
         // packet 16
         assert!(packet_family_implemented(153));
         assert!(packet_family_implemented(165));
         // packet AF1F
         assert!(packet_family_implemented(19));
         assert!(packet_family_implemented(78));
-        // deferred: precip (packet unconfirmed) and packet 28 (XDR, u16)
-        assert!(!packet_family_implemented(170));
-        assert!(!packet_family_implemented(176));
-        assert!(!packet_family_implemented(177));
+        // formerly deferred, closed by plan 0012: precip (packet 16),
+        // rate (packet 28/XDR), HCLASS-177 (packet 16, not 28 — see
+        // `DecodeScheme::ClassInt`'s doc)
+        assert!(packet_family_implemented(170));
+        assert!(packet_family_implemented(176));
+        assert!(packet_family_implemented(177));
+        // still the only `false` case: a code not in PRODUCTS at all
         assert!(!packet_family_implemented(9999));
     }
 

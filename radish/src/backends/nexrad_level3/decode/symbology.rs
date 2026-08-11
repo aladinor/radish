@@ -4,8 +4,9 @@
 
 use ndarray::Array2;
 
-use super::bytes::{read_i16_be, read_u16_be};
+use super::bytes::{read_i16_be, read_i32_be, read_u16_be};
 use super::error::{Level3DecodeError, Result};
+use super::xdr::{XdrCursor, MAX_XDR_RADIALS};
 
 /// The largest real product decompresses to ~1.3 MB. This bounds a
 /// decompression bomb, not a guess at product size: a ~1.3 KB crafted
@@ -25,6 +26,18 @@ const RADIAL_PACKET_CODE: i16 = 16;
 /// `i16` (matching every other signed halfword in this decoder) gives
 /// `-20705`, which is what xradar #392 compares against too.
 const AF1F_PACKET_CODE: i16 = -20705;
+
+/// Generic Data Packet — XDR-encoded, `u16` raw levels. Codes 176 (`RATE`)
+/// and 177 (`HCLASS`, best-tilt composite — see `decode_packet28`'s doc for
+/// why 177 was independently confirmed to use packet 16 instead, per a
+/// 2026-08-09 fixture-based re-check that overturned this plan's original
+/// assumption).
+const GENERIC_PACKET_CODE: i16 = 28;
+
+/// The only XDR component type this backend decodes — "radial" data.
+/// Cross-checked against xradar #392's and MetPy's readers of the same
+/// format, both of which also implement exactly this one type code.
+const RADIAL_COMPONENT_TYPE: i32 = 1;
 
 /// WMO/NOAAPORT end-of-message trailer: the header separator plus ETX.
 /// Present on the dual-pol products in the Unidata bucket, absent on
@@ -215,36 +228,95 @@ fn read_packet_header(body: &[u8]) -> Result<PacketHeader> {
     })
 }
 
-/// Symbology block -> (azimuths, codes). One layer, one radial packet —
-/// packet 16 (raw per-gate bytes) or `AF1F` (RLE-encoded nibbles,
-/// expanded here to the same `u8`-per-gate shape). Packet 28 (XDR,
-/// `u16` raw levels) is a different geometry this backend doesn't decode
-/// yet — see [`Level3DecodeError::UnsupportedPacketCode`]. Azimuths are
-/// ray CENTRES in degrees (`start + delta/2`), computed in `f64` to match
-/// the oracle's own `np.float64` arithmetic. Mirrors
-/// `nexrad_level3.py:560-638` (packet 16) and xradar #392's
-/// `_read_packet16`/`_read_packet_af1f`.
-pub(crate) fn decode_symbology(body: &[u8]) -> Result<SymbologyResult> {
-    let header = read_packet_header(body)?;
-    let (azimuths, codes) = match header.packet_code {
-        RADIAL_PACKET_CODE => decode_packet16(body, &header)?,
-        AF1F_PACKET_CODE => decode_packet_af1f(body, &header)?,
-        other => return Err(Level3DecodeError::UnsupportedPacketCode { code: other }),
-    };
-    Ok(SymbologyResult {
-        azimuths,
-        codes,
-        range_scale_raw: header.range_scale_raw,
-    })
+/// Peek the shared 16-byte symbology-block header (divider/block_id,
+/// validated) and the packet-code halfword right after it — common to
+/// EVERY packet family, before any family-specific header shape is
+/// assumed. Packet 16/AF1F and packet 28 diverge completely in what
+/// follows byte 18 (a 14-byte fixed radial-packet header vs. an 8-byte
+/// `(packet_code, reserved, num_bytes)` header into an XDR payload), so
+/// `decode_symbology` must know which family it's looking at before
+/// calling either [`read_packet_header`] (packet 16/AF1F-shaped) or
+/// [`decode_packet28`] (XDR-shaped).
+fn peek_packet_code(body: &[u8]) -> Result<i16> {
+    if body.len() < 18 {
+        return Err(Level3DecodeError::SymbologyTruncated { len: body.len() });
+    }
+    let divider = read_i16_be(body, 0).expect("checked len >= 18 above");
+    let block_id = read_i16_be(body, 2).expect("checked len >= 18 above");
+    if divider != -1 || block_id != 1 {
+        return Err(Level3DecodeError::BadSymbologyHeader { divider, block_id });
+    }
+    Ok(read_i16_be(body, 16).expect("checked len >= 18 above"))
 }
 
-/// Decoded symbology output, plus the packet's own range-scale halfword
-/// (verbatim — see [`PacketHeader::range_scale_raw`] for when it's usable
-/// as metres vs. when it's `cos(elevation) * 1000`).
-pub(crate) struct SymbologyResult {
-    pub azimuths: Vec<f64>,
-    pub codes: Array2<u8>,
-    pub range_scale_raw: u16,
+/// Symbology block -> decoded raw codes, one of two widths depending on
+/// packet family. Packet 16 (raw per-gate bytes) and `AF1F` (RLE-encoded
+/// nibbles, expanded here to the same `u8`-per-gate shape) both produce
+/// [`SymbologyResult::U8`]; packet 28 (XDR, generic data packet) produces
+/// [`SymbologyResult::U16`] — a real geometry and raw-code-width
+/// difference, not a variant on the other two (see `decode_packet28`'s
+/// doc and plan 0012 §3 for the full derivation). Azimuths are computed in
+/// `f64` to match the oracle's own `np.float64` arithmetic; ALL THREE
+/// packet families store the ray's LEADING EDGE, not its centre, and get
+/// the same `+ width/2` correction (packet 16/AF1F via
+/// `azimuth_centre_deg`, packet 28 inline in `parse_radial_component` —
+/// confirmed for 28 specifically against NEXRAD ICD 2620001AC Appendix E,
+/// Figure E-4, not assumed from the other two; see `decode_packet28`'s
+/// doc for why an earlier pass got this wrong). Mirrors
+/// `nexrad_level3.py:560-638` (packet 16) and xradar #392's
+/// `_read_packet16`/`_read_packet_af1f`/`_read_generic_packet`.
+pub(crate) fn decode_symbology(body: &[u8]) -> Result<SymbologyResult> {
+    match peek_packet_code(body)? {
+        RADIAL_PACKET_CODE | AF1F_PACKET_CODE => {
+            let header = read_packet_header(body)?;
+            let (azimuths, codes) = match header.packet_code {
+                RADIAL_PACKET_CODE => decode_packet16(body, &header)?,
+                AF1F_PACKET_CODE => decode_packet_af1f(body, &header)?,
+                _ => unreachable!("peek_packet_code only routed RADIAL/AF1F codes here"),
+            };
+            Ok(SymbologyResult::U8 {
+                azimuths,
+                codes,
+                range_scale_raw: header.range_scale_raw,
+            })
+        }
+        GENERIC_PACKET_CODE => {
+            let (azimuths, codes, gate_width_m, first_gate_m) = decode_packet28(body)?;
+            Ok(SymbologyResult::U16 {
+                azimuths,
+                codes,
+                gate_width_m,
+                first_gate_m,
+            })
+        }
+        other => Err(Level3DecodeError::UnsupportedPacketCode { code: other }),
+    }
+}
+
+/// Decoded symbology output — an enum, not a struct with optional fields,
+/// because "which width" is never ambiguous (exactly one packet family
+/// produced this result) and every downstream consumer (`decode::decode`,
+/// `adapter::convert`) needs to branch on it anyway; making the two shapes
+/// mutually exclusive at the type level closes off a "both fields
+/// populated" or "neither populated" state a pair of `Option`s would
+/// allow by construction. `U8` carries [`PacketHeader::range_scale_raw`]
+/// (verbatim — see its own doc for when it's usable as metres vs.
+/// `cos(elevation) * 1000`); `U16` carries the XDR radial component's own
+/// `gate_width`/`first_gate` directly, since packet 28 declares real
+/// metres unconditionally (no elevation-dependent packing to correct for
+/// — verified against a real `DPR` fixture, plan 0012 §3.1).
+pub(crate) enum SymbologyResult {
+    U8 {
+        azimuths: Vec<f64>,
+        codes: Array2<u8>,
+        range_scale_raw: u16,
+    },
+    U16 {
+        azimuths: Vec<f64>,
+        codes: Array2<u16>,
+        gate_width_m: f32,
+        first_gate_m: f32,
+    },
 }
 
 /// Ray CENTRE in degrees — `start_angle`/`delta` are tenths of a degree.
@@ -403,6 +475,254 @@ fn decode_packet_af1f(body: &[u8], header: &PacketHeader) -> Result<(Vec<f64>, A
     Ok((azimuths, codes))
 }
 
+/// Packet 28: the generic data packet — XDR-encoded (RFC 1832), `u16` raw
+/// levels, a completely different byte shape from packet 16/AF1F (not
+/// fixed-width radial rows at all). Returns `(azimuths, codes,
+/// gate_width_m, first_gate_m)` — unlike packet 16/AF1F, gate geometry is
+/// declared directly in metres inside the XDR payload itself (no
+/// elevation-dependent `cos(elevation) * 1000` packing to correct for;
+/// verified `gate_width=250.0`, `first_gate=125.0` against a real `DPR`
+/// fixture, matching packet 16's own 125 m convention — plan 0012 §3.1).
+///
+/// **Azimuth convention, resolved (plan 0012 §3.3 step 6) — the SAME
+/// `+ width/2` centering packet 16/AF1F's `azimuth_centre_deg` applies,
+/// not a different convention.** Confirmed against the actual NEXRAD ICD
+/// text (2620001AC, Appendix E, Figure E-4, "Radial Information Data
+/// Structure"): `Azimuth` is documented explicitly as "Azimuth of the
+/// LEADING EDGE of the radial" — the ICD's own words, for this exact
+/// packet-28 field, not inferred from packet 16/AF1F's unrelated
+/// convention. An EARLIER version of this function got this wrong,
+/// concluding no centering was needed: that conclusion came from checking
+/// two independent Python readers' low-level XDR-PARSING code (xradar
+/// #392's `_unpack_radial`, MetPy's `Level3XDRParser._unpack_radial`),
+/// both of which store the field verbatim and take no position on
+/// centering — without also checking either reader's HIGHER-LEVEL
+/// azimuth-exposing method. xradar's `get_azimuth()` (docstring: "Return
+/// ray start azimuth angles") DOES take a position, applying
+/// `+ get_azimuth_delta() / 2.0` uniformly across every packet family
+/// including 28 — which, per the ICD text above, was the correct
+/// convention all along. A real `DPR` fixture's round-looking
+/// `azimuth = 0.0, 1.0, 2.0, ...` values (at `width = 1.0`) are exactly as
+/// consistent with "leading edge on a regular grid" as with "already a
+/// centre" — that data alone couldn't distinguish the two conventions;
+/// only the ICD text could, and does.
+///
+/// Header layout, right after the shared 16-byte symbology block header:
+/// `GEN_DATA_PACK_HEADER` = `packet_code` (`i16`, already consumed by
+/// [`peek_packet_code`]) + `reserved` (`i16`) + `num_bytes` (`i32`, the
+/// XDR payload's own byte length) — 8 bytes total, XDR payload starts at
+/// byte 24.
+fn decode_packet28(body: &[u8]) -> Result<(Vec<f64>, Array2<u16>, f32, f32)> {
+    const HEADER_LEN: usize = 24; // 16 (symbology block) + 8 (GEN_DATA_PACK_HEADER)
+    if body.len() < HEADER_LEN {
+        return Err(Level3DecodeError::SymbologyTruncated { len: body.len() });
+    }
+    let num_bytes = read_i32_be(body, 20).expect("checked len >= 24 above");
+    let available = body.len() - HEADER_LEN;
+    if num_bytes < 0 || num_bytes as usize > available {
+        return Err(Level3DecodeError::XdrTruncated {
+            context: "generic data packet body",
+            have: available,
+            need: num_bytes.max(0) as usize,
+        });
+    }
+    let xdr_bytes = &body[HEADER_LEN..HEADER_LEN + num_bytes as usize];
+    let mut cursor = XdrCursor::new(xdr_bytes);
+
+    // Product description block — read and discard every field this
+    // backend doesn't need (the PDB already supplies lat/lon/height/vcp/
+    // elevation uniformly across every packet family); consumed strictly
+    // in field order so the cursor stays synced with what follows.
+    // Order cross-checked against two independent readers (xradar #392's
+    // `_Level3XDRParser.__call__`, MetPy's `Level3XDRParser.
+    // _unpack_prod_desc`) and verified byte-exact against a real `DPR`
+    // fixture — parsing this exact shape plus the one radial component
+    // below consumes the declared XDR payload to precisely zero bytes
+    // remaining (checked at the end of this function).
+    cursor.unpack_string()?; // name
+    cursor.unpack_string()?; // description
+    cursor.unpack_int()?; // code
+    cursor.unpack_int()?; // type
+    cursor.unpack_uint()?; // prod_time
+    cursor.unpack_string()?; // radar_name
+    cursor.unpack_float()?; // latitude
+    cursor.unpack_float()?; // longitude
+    cursor.unpack_float()?; // height
+    cursor.unpack_uint()?; // vol_time
+    cursor.unpack_uint()?; // el_time
+    cursor.unpack_float()?; // el_angle
+    cursor.unpack_int()?; // vol_num
+    cursor.unpack_int()?; // op_mode
+    cursor.unpack_int()?; // vcp_num
+    cursor.unpack_int()?; // el_num
+    cursor.unpack_int()?; // compression
+    cursor.unpack_int()?; // uncompressed_size
+
+    // Product-level parameters (name/value pairs) — real fixtures carry
+    // zero; consumed and discarded either way.
+    cursor.unpack_counted_list(|c, _i| {
+        c.unpack_string()?;
+        c.unpack_string()?;
+        Ok(())
+    })?;
+
+    let components = cursor.unpack_counted_list(|c, _i| {
+        let type_code = c.unpack_int()?;
+        if type_code != RADIAL_COMPONENT_TYPE {
+            return Err(Level3DecodeError::UnsupportedXdrComponent(type_code));
+        }
+        parse_radial_component(c)
+    })?;
+    if components.len() != 1 {
+        return Err(Level3DecodeError::UnexpectedXdrComponentCount(
+            components.len(),
+        ));
+    }
+    let (azimuths, codes, gate_width_m, first_gate_m) = components
+        .into_iter()
+        .next()
+        .expect("len checked == 1 above");
+
+    let remaining = cursor.bytes_remaining();
+    if remaining != 0 {
+        return Err(Level3DecodeError::XdrTrailingBytes { remaining });
+    }
+
+    Ok((azimuths, codes, gate_width_m, first_gate_m))
+}
+
+/// One `RADIAL_COMPONENT_TYPE` component: `description` (unused,
+/// consumed), `gate_width`/`first_gate` (metres, returned verbatim),
+/// radial-level `parameters` (unused, consumed), then `num_rads` radials
+/// each contributing one row of `u16` raw codes to the output grid.
+///
+/// Bounds `num_rads` against [`MAX_XDR_RADIALS`] before looping, and the
+/// output grid's cell count against
+/// [`MAX_GATE_COUNT`] before allocating it (once `num_bins` is known from
+/// the first radial) — added by a 2026-08-09 review pass (plan 0012 §0):
+/// the reference oracle this was cross-checked against does neither, and
+/// doesn't check that every radial declares the SAME `num_bins`, or that
+/// a radial's `data` array length agrees with its own `num_bins` field —
+/// this backend's no-silent-assumptions discipline checks both explicitly
+/// (see [`Level3DecodeError::XdrRadialBinCountMismatch`]/
+/// [`Level3DecodeError::XdrRadialDataLengthMismatch`]).
+fn parse_radial_component(cursor: &mut XdrCursor) -> Result<(Vec<f64>, Array2<u16>, f32, f32)> {
+    cursor.unpack_string()?; // description, unused
+    let gate_width_m = cursor.unpack_float()?;
+    let first_gate_m = cursor.unpack_float()?;
+    cursor.unpack_counted_list(|c, _i| {
+        c.unpack_string()?;
+        c.unpack_string()?;
+        Ok(())
+    })?; // radial-level parameters, unused
+
+    let num_rads = cursor.unpack_int()?;
+    if num_rads <= 0 {
+        return Err(Level3DecodeError::NonPositiveXdrGeometry {
+            n_radials: num_rads,
+            n_bins: 0,
+        });
+    }
+    if num_rads > MAX_XDR_RADIALS {
+        return Err(Level3DecodeError::ImplausibleXdrRadialCount {
+            n_radials: num_rads,
+            max: MAX_XDR_RADIALS,
+        });
+    }
+    let num_rads = num_rads as usize;
+
+    // `num_rads` is already bounded by `MAX_XDR_RADIALS` above, so
+    // reserving its exact capacity up front is a bounded, safe allocation
+    // (unlike a raw `Vec::with_capacity(num_rads)` before that check —
+    // see `MAX_XDR_RADIALS`'s own doc for why this ordering matters).
+    let mut azimuths = Vec::with_capacity(num_rads);
+    let mut expected_bins: Option<i32> = None;
+    let mut codes: Option<Array2<u16>> = None;
+
+    for r in 0..num_rads {
+        let azimuth = cursor.unpack_float()?;
+        let _elevation = cursor.unpack_float()?;
+        let width = cursor.unpack_float()?;
+        let num_bins = cursor.unpack_int()?;
+        cursor.unpack_string()?; // attributes, unused
+        let data = cursor.unpack_int_array()?;
+
+        if num_bins <= 0 {
+            return Err(Level3DecodeError::NonPositiveXdrGeometry {
+                n_radials: num_rads as i32,
+                n_bins: num_bins,
+            });
+        }
+        let expected = *expected_bins.get_or_insert(num_bins);
+        if num_bins != expected {
+            return Err(Level3DecodeError::XdrRadialBinCountMismatch {
+                radial: r,
+                n_bins: num_bins,
+                expected,
+            });
+        }
+        if data.len() != num_bins as usize {
+            return Err(Level3DecodeError::XdrRadialDataLengthMismatch {
+                radial: r,
+                declared: data.len(),
+                num_bins,
+            });
+        }
+
+        // First radial: `num_bins` is now known — bound and allocate the
+        // output grid BEFORE writing anything into it, the packet-28
+        // analogue of packet 16/AF1F's pre-allocation `GridTooLarge` check
+        // in `read_packet_header`.
+        if codes.is_none() {
+            let cells = num_rads as u64 * num_bins as u64;
+            if cells > MAX_GATE_COUNT {
+                return Err(Level3DecodeError::XdrGridTooLarge {
+                    n_radials: num_rads as i32,
+                    n_bins: num_bins,
+                    cells,
+                    max: MAX_GATE_COUNT,
+                });
+            }
+            codes = Some(Array2::<u16>::zeros((num_rads, num_bins as usize)));
+        }
+        let grid = codes.as_mut().expect("just initialized above");
+        let mut row = grid.row_mut(r);
+        for (gate, &value) in data.iter().enumerate() {
+            let level =
+                u16::try_from(value).map_err(|_| Level3DecodeError::XdrRawLevelOutOfRange {
+                    radial: r,
+                    gate,
+                    value,
+                })?;
+            row[gate] = level;
+        }
+        // Ray CENTRE, not the stored leading edge — NEXRAD ICD 2620001AC
+        // Appendix E, Figure E-4 ("Radial Information Data Structure"):
+        // "Azimuth ... Azimuth of the LEADING EDGE of the radial" — the
+        // exact same convention packet 16/AF1F's `azimuth_centre_deg`
+        // already corrects for, confirmed by the ICD text itself (not
+        // just a reference reader's behaviour) after an earlier pass
+        // wrongly concluded packet 28 needed no correction (having
+        // checked only two Python readers' low-level XDR-parsing code,
+        // which stores the field verbatim and takes no position on
+        // centering, without checking either reader's higher-level
+        // azimuth-exposing method — xradar's `get_azimuth()` docstring
+        // ["Return ray start azimuth angles"] plus its callers'
+        // `+ get_azimuth_delta()/2.0` convention, applied uniformly across
+        // every packet family including 28, turned out to be right all
+        // along). See plan 0012 §3.3 step 6 for the full resolution.
+        let centred = (azimuth as f64 + width as f64 / 2.0) % 360.0;
+        azimuths.push(centred);
+    }
+
+    Ok((
+        azimuths,
+        codes.expect("num_rads > 0 checked above; loop runs at least once"),
+        gate_width_m,
+        first_gate_m,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,8 +753,12 @@ mod tests {
     #[test]
     fn decode_symbology_computes_ray_centre_not_start_angle() {
         let body = build_symbology(4, &[2, 3, 4, 5], 100, 10); // 10.0 deg start, 1.0 deg wide
-        let result = decode_symbology(&body).unwrap();
-        let (azimuths, codes) = (result.azimuths, result.codes);
+        let SymbologyResult::U8 {
+            azimuths, codes, ..
+        } = decode_symbology(&body).unwrap()
+        else {
+            panic!("packet 16 must produce SymbologyResult::U8");
+        };
         assert_eq!(azimuths.len(), 1);
         // centre = (100 + 10/2.0) / 10.0 = 10.5, NOT the 10.0 start angle.
         assert!((azimuths[0] - 10.5).abs() < 1e-9);
@@ -451,15 +775,347 @@ mod tests {
         ));
     }
 
+    // -- Packet 28 (XDR, generic data packet) — codes 176/177's packet family --
+
+    fn xdr_string(s: &str) -> Vec<u8> {
+        let mut out = (s.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(s.as_bytes());
+        while !out.len().is_multiple_of(4) {
+            out.push(0);
+        }
+        out
+    }
+
+    fn xdr_int(i: i32) -> Vec<u8> {
+        i.to_be_bytes().to_vec()
+    }
+
+    fn xdr_uint(u: u32) -> Vec<u8> {
+        u.to_be_bytes().to_vec()
+    }
+
+    fn xdr_float(f: f32) -> Vec<u8> {
+        f.to_be_bytes().to_vec()
+    }
+
+    fn xdr_int_array(data: &[i32]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        for v in data {
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        out
+    }
+
+    fn xdr_empty_list() -> Vec<u8> {
+        // count=0, leading pointer=0, no elements.
+        let mut out = xdr_int(0);
+        out.extend(xdr_int(0));
+        out
+    }
+
+    /// One radial: `(azimuth, width, num_bins, data)` — elevation is
+    /// always 0.0 (unused by this backend).
+    fn xdr_radial(azimuth: f32, width: f32, num_bins: i32, data: &[i32]) -> Vec<u8> {
+        let mut out = xdr_float(azimuth);
+        out.extend(xdr_float(0.0)); // elevation, unused
+        out.extend(xdr_float(width));
+        out.extend(xdr_int(num_bins));
+        out.extend(xdr_string("")); // attributes, unused
+        out.extend(xdr_int_array(data));
+        out
+    }
+
+    /// Build a full, valid packet-28 (generic data packet) symbology
+    /// block: the shared 16-byte block/layer header, the 8-byte
+    /// `GEN_DATA_PACK_HEADER`, then a minimal product description + one
+    /// radial component containing `radials` (pre-built via
+    /// [`xdr_radial`]). Field order matches [`decode_packet28`]'s doc
+    /// comment exactly.
+    fn build_generic_symbology(gate_width: f32, first_gate: f32, radials: &[Vec<u8>]) -> Vec<u8> {
+        let mut xdr = Vec::new();
+        xdr.extend(xdr_string("RATE")); // name
+        xdr.extend(xdr_string("Digital Instantaneous Precipitation Rate")); // description
+        xdr.extend(xdr_int(176)); // code
+        xdr.extend(xdr_int(1)); // type
+        xdr.extend(xdr_uint(0)); // prod_time
+        xdr.extend(xdr_string("KLOT")); // radar_name
+        xdr.extend(xdr_float(41.604)); // latitude
+        xdr.extend(xdr_float(-88.085)); // longitude
+        xdr.extend(xdr_float(200.0)); // height
+        xdr.extend(xdr_uint(0)); // vol_time
+        xdr.extend(xdr_uint(0)); // el_time
+        xdr.extend(xdr_float(0.0)); // el_angle
+        xdr.extend(xdr_int(1)); // vol_num
+        xdr.extend(xdr_int(3)); // op_mode
+        xdr.extend(xdr_int(212)); // vcp_num
+        xdr.extend(xdr_int(0)); // el_num
+        xdr.extend(xdr_int(0)); // compression
+        xdr.extend(xdr_int(0)); // uncompressed_size
+        xdr.extend(xdr_empty_list()); // product-level parameters
+
+        // components: count=1, leading pointer, type=1 (radial), radial component
+        xdr.extend(xdr_int(1));
+        xdr.extend(xdr_int(0)); // leading pointer
+        xdr.extend(xdr_int(RADIAL_COMPONENT_TYPE));
+        xdr.extend(xdr_string("Rate Data array product output")); // description
+        xdr.extend(xdr_float(gate_width));
+        xdr.extend(xdr_float(first_gate));
+        xdr.extend(xdr_empty_list()); // radial-level parameters
+        xdr.extend(xdr_int(radials.len() as i32)); // num_rads
+        for r in radials {
+            xdr.extend_from_slice(r);
+        }
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(-1i16).to_be_bytes()); // divider
+        body.extend_from_slice(&1i16.to_be_bytes()); // block_id
+        body.extend_from_slice(&[0u8; 6]); // rest of block header
+        body.extend_from_slice(&[0u8; 6]); // layer header
+        body.extend_from_slice(&GENERIC_PACKET_CODE.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes()); // reserved
+        body.extend_from_slice(&(xdr.len() as i32).to_be_bytes()); // num_bytes
+        body.extend_from_slice(&xdr);
+        body
+    }
+
     #[test]
-    fn decode_symbology_rejects_packet_28_as_unsupported() {
-        // Confirms packet 28 (XDR, u16 raw levels) is deliberately
-        // deferred rather than misread as packet 16 or AF1F.
-        let mut body = build_symbology(2, &[2, 3], 0, 10);
-        body[16..18].copy_from_slice(&28i16.to_be_bytes());
+    fn decode_symbology_dispatches_packet_28_to_decode_packet28() {
+        let radials = vec![
+            xdr_radial(0.0, 1.0, 4, &[0, 10, 60, 150]),
+            xdr_radial(1.0, 1.0, 4, &[0, 0, 0, 0]),
+        ];
+        let body = build_generic_symbology(250.0, 125.0, &radials);
+        let result = decode_symbology(&body).unwrap();
+        match result {
+            SymbologyResult::U16 {
+                azimuths,
+                codes,
+                gate_width_m,
+                first_gate_m,
+            } => {
+                // Centred, not the stored leading edge: (0.0 + 1.0/2.0),
+                // (1.0 + 1.0/2.0).
+                assert_eq!(azimuths, vec![0.5, 1.5]);
+                assert_eq!(codes.row(0).to_vec(), vec![0u16, 10, 60, 150]);
+                assert_eq!(gate_width_m, 250.0);
+                assert_eq!(first_gate_m, 125.0);
+            }
+            SymbologyResult::U8 { .. } => panic!("packet 28 must produce SymbologyResult::U16"),
+        }
+    }
+
+    #[test]
+    fn decode_packet28_azimuth_gets_the_same_leading_edge_correction_as_packet16() {
+        // Plan 0012 §3.3 step 6's resolved azimuth convention, confirmed
+        // against NEXRAD ICD 2620001AC Appendix E Figure E-4: packet 28's
+        // `azimuth` field is the LEADING edge too, same as packet 16/AF1F
+        // — `+ width/2` centering applies here as well.
+        let radials = vec![xdr_radial(10.0, 1.0, 2, &[0, 0])];
+        let body = build_generic_symbology(250.0, 125.0, &radials);
+        match decode_symbology(&body).unwrap() {
+            SymbologyResult::U16 { azimuths, .. } => {
+                assert!((azimuths[0] - 10.5).abs() < 1e-6); // 10.0 + 1.0/2.0
+            }
+            SymbologyResult::U8 { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn decode_packet28_rejects_unsupported_component_type() {
+        // Hand-build a body whose one component declares type 2, not 1.
+        let mut xdr = Vec::new();
+        for _ in 0..18 {
+            xdr.extend(xdr_int(0)); // 18 throwaway product-desc-shaped fields
+        }
+        xdr.extend(xdr_empty_list()); // parameters
+        xdr.extend(xdr_int(1)); // components count
+        xdr.extend(xdr_int(0)); // leading pointer
+        xdr.extend(xdr_int(2)); // unsupported component type
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(-1i16).to_be_bytes());
+        body.extend_from_slice(&1i16.to_be_bytes());
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&GENERIC_PACKET_CODE.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&(xdr.len() as i32).to_be_bytes());
+        body.extend_from_slice(&xdr);
+
         assert!(matches!(
             decode_symbology(&body),
-            Err(Level3DecodeError::UnsupportedPacketCode { code: 28 })
+            Err(Level3DecodeError::UnsupportedXdrComponent(2))
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_a_radial_with_a_different_bin_count() {
+        let radials = vec![
+            xdr_radial(0.0, 1.0, 4, &[0, 0, 0, 0]),
+            xdr_radial(1.0, 1.0, 3, &[0, 0, 0]), // disagrees with radial 0's 4 bins
+        ];
+        let body = build_generic_symbology(250.0, 125.0, &radials);
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::XdrRadialBinCountMismatch {
+                radial: 1,
+                n_bins: 3,
+                expected: 4,
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_a_raw_level_outside_u16_range() {
+        let radials = vec![xdr_radial(0.0, 1.0, 2, &[0, 70_000])]; // > u16::MAX
+        let body = build_generic_symbology(250.0, 125.0, &radials);
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::XdrRawLevelOutOfRange {
+                radial: 0,
+                gate: 1,
+                value: 70_000,
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_a_negative_raw_level() {
+        let radials = vec![xdr_radial(0.0, 1.0, 2, &[0, -1])];
+        let body = build_generic_symbology(250.0, 125.0, &radials);
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::XdrRawLevelOutOfRange {
+                radial: 0,
+                gate: 1,
+                value: -1,
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_zero_radials() {
+        let body = build_generic_symbology(250.0, 125.0, &[]);
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::NonPositiveXdrGeometry { n_radials: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_trailing_bytes_after_the_declared_payload() {
+        let radials = vec![xdr_radial(0.0, 1.0, 2, &[0, 0])];
+        let mut body = build_generic_symbology(250.0, 125.0, &radials);
+        // Append 4 extra bytes to the num_bytes field's declared length —
+        // the parse itself still succeeds (those bytes come after
+        // everything it reads), so this must be caught by the
+        // consumed-exactly-the-payload check, not a mid-parse failure.
+        let num_bytes_off = 20;
+        let old_len =
+            i32::from_be_bytes(body[num_bytes_off..num_bytes_off + 4].try_into().unwrap());
+        body[num_bytes_off..num_bytes_off + 4].copy_from_slice(&(old_len + 4).to_be_bytes());
+        body.extend_from_slice(&[0u8; 4]);
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::XdrTrailingBytes { remaining: 4 })
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_a_crafted_grid_before_allocating() {
+        // `num_rads` at the (real, plausible) cap, times a small but real
+        // `num_bins` (with real, matching `data` bytes behind it — a
+        // single `unpack_int_array` call is separately capped at
+        // `MAX_XDR_ARRAY_LEN` elements, so `num_bins` alone can never
+        // reach the multi-billion range `MAX_GATE_COUNT` is meant to
+        // catch; `num_rads * num_bins` overflowing it via many
+        // modestly-sized radials is the realistic version of this attack)
+        // — must be rejected by `XdrGridTooLarge` right after radial 0,
+        // before `Array2::zeros` is ever attempted and before radial 1
+        // (which this body doesn't even provide bytes for) is read.
+        let num_bins = 100;
+        let radial0 = xdr_radial(0.0, 1.0, num_bins, &vec![0i32; num_bins as usize]);
+
+        let mut xdr = Vec::new();
+        for _ in 0..18 {
+            xdr.extend(xdr_int(0));
+        }
+        xdr.extend(xdr_empty_list());
+        xdr.extend(xdr_int(1));
+        xdr.extend(xdr_int(0));
+        xdr.extend(xdr_int(RADIAL_COMPONENT_TYPE));
+        xdr.extend(xdr_string(""));
+        xdr.extend(xdr_float(250.0));
+        xdr.extend(xdr_float(125.0));
+        xdr.extend(xdr_empty_list());
+        xdr.extend(xdr_int(100_000)); // num_rads: 100_000 * 100 = 10_000_000 > MAX_GATE_COUNT
+        xdr.extend(radial0);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(-1i16).to_be_bytes());
+        body.extend_from_slice(&1i16.to_be_bytes());
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&GENERIC_PACKET_CODE.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&(xdr.len() as i32).to_be_bytes());
+        body.extend_from_slice(&xdr);
+
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::XdrGridTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_num_rads_over_the_cap() {
+        let mut xdr = Vec::new();
+        for _ in 0..18 {
+            xdr.extend(xdr_int(0));
+        }
+        xdr.extend(xdr_empty_list());
+        xdr.extend(xdr_int(1));
+        xdr.extend(xdr_int(0));
+        xdr.extend(xdr_int(RADIAL_COMPONENT_TYPE));
+        xdr.extend(xdr_string(""));
+        xdr.extend(xdr_float(250.0));
+        xdr.extend(xdr_float(125.0));
+        xdr.extend(xdr_empty_list());
+        xdr.extend(xdr_int(super::super::xdr::MAX_XDR_RADIALS + 1)); // num_rads over the cap
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(-1i16).to_be_bytes());
+        body.extend_from_slice(&1i16.to_be_bytes());
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&GENERIC_PACKET_CODE.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&(xdr.len() as i32).to_be_bytes());
+        body.extend_from_slice(&xdr);
+
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::ImplausibleXdrRadialCount { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_packet28_rejects_truncated_body_without_panicking() {
+        // A handful of malformed/truncated inputs, arbitrary byte
+        // sequences after a valid-looking generic-packet header — must
+        // all be clean errors, never a panic.
+        let mut body = Vec::new();
+        body.extend_from_slice(&(-1i16).to_be_bytes());
+        body.extend_from_slice(&1i16.to_be_bytes());
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&GENERIC_PACKET_CODE.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&1000i32.to_be_bytes()); // num_bytes, way more than available
+                                                        // no XDR payload at all
+        assert!(matches!(
+            decode_symbology(&body),
+            Err(Level3DecodeError::XdrTruncated { .. })
         ));
     }
 
@@ -591,8 +1247,9 @@ mod tests {
         body.extend_from_slice(&0u16.to_be_bytes());
         body.extend_from_slice(&10u16.to_be_bytes());
         body.extend_from_slice(&[7, 8, 9, 10, 0xFF]); // 5 bytes, last is pad
-        let result = decode_symbology(&body).unwrap();
-        let codes = result.codes;
+        let SymbologyResult::U8 { codes, .. } = decode_symbology(&body).unwrap() else {
+            panic!("packet 16 must produce SymbologyResult::U8");
+        };
         assert_eq!(codes.row(0).to_vec(), vec![7, 8, 9, 10]);
     }
 
@@ -708,8 +1365,12 @@ mod tests {
         // 4 bins: run=2 color=5, run=2 color=9 -> [5,5,9,9]
         let rle = [(2u8 << 4) | 5, (2u8 << 4) | 9];
         let body = build_af1f_symbology(4, &rle, 100, 10);
-        let result = decode_symbology(&body).unwrap();
-        let (azimuths, codes) = (result.azimuths, result.codes);
+        let SymbologyResult::U8 {
+            azimuths, codes, ..
+        } = decode_symbology(&body).unwrap()
+        else {
+            panic!("packet AF1F must produce SymbologyResult::U8");
+        };
         assert!((azimuths[0] - 10.5).abs() < 1e-9);
         assert_eq!(codes.row(0).to_vec(), vec![5, 5, 9, 9]);
     }
@@ -737,8 +1398,65 @@ mod tests {
         // A zero-run byte contributes nothing but isn't itself invalid.
         let rle = [3u8, (2u8 << 4) | 5];
         let body = build_af1f_symbology(2, &rle, 0, 10);
-        let result = decode_symbology(&body).unwrap();
-        let codes = result.codes;
+        let SymbologyResult::U8 { codes, .. } = decode_symbology(&body).unwrap() else {
+            panic!("packet AF1F must produce SymbologyResult::U8");
+        };
         assert_eq!(codes.row(0).to_vec(), vec![5, 5]);
+    }
+
+    // -- Fuzz: never panic on untrusted bytes ----------------------------
+    //
+    // Added by the code-review pass that closed plan 0012 out — matches
+    // this crate's own established convention for untrusted-input parsers
+    // (`nexrad::decode::messages::tests::
+    // proptest_decode_messages_never_panics_on_random_input`,
+    // `nexrad::demux::tests::arbitrary_bytes_never_panic`) that the
+    // earlier hand-crafted malformed-input tests above didn't actually
+    // fulfill: those pin specific, anticipated failure shapes; a property
+    // test pins the INVARIANT (no panic, ever) against shapes nobody
+    // anticipated. `decode_packet28`/`XdrCursor` are new,
+    // untrusted-input-facing parsing code — exactly the category
+    // `docs/NEXRAD_LEVEL3_WASM.md` §4.7 already treats as security-relevant
+    // for this backend.
+
+    #[test]
+    fn proptest_decode_symbology_never_panics_on_random_input() {
+        // Broad: fully arbitrary bytes, any packet code (or none) —
+        // exercises `peek_packet_code`'s own bounds checks and the
+        // packet16/AF1F/28 dispatch, matching the existing crate-wide
+        // convention for this style of test.
+        use proptest::prelude::*;
+        proptest!(|(bytes in prop::collection::vec(any::<u8>(), 0..4096))| {
+            let _ = decode_symbology(&bytes);
+        });
+    }
+
+    #[test]
+    fn proptest_decode_packet28_never_panics_on_random_xdr_payload() {
+        // Targeted: a valid block/layer header + GEN_DATA_PACK_HEADER
+        // declaring packet code 28, but a fully random XDR payload (and a
+        // `num_bytes` that may or may not match its real length) — fully
+        // random top-level bytes would almost never land on packet code
+        // 28 by chance (`peek_packet_code` would reject nearly all of
+        // them before `decode_packet28` is ever reached), so this fixes
+        // the header shape to actually drive the new parser under
+        // fuzzing, the way `proptest_decode_symbology_never_panics_on_random_input`
+        // above cannot on its own.
+        use proptest::prelude::*;
+        proptest!(|(
+            declared_num_bytes in any::<i32>(),
+            payload in prop::collection::vec(any::<u8>(), 0..2048),
+        )| {
+            let mut body = Vec::new();
+            body.extend_from_slice(&(-1i16).to_be_bytes()); // divider
+            body.extend_from_slice(&1i16.to_be_bytes()); // block_id
+            body.extend_from_slice(&[0u8; 6]); // rest of block header
+            body.extend_from_slice(&[0u8; 6]); // layer header
+            body.extend_from_slice(&GENERIC_PACKET_CODE.to_be_bytes());
+            body.extend_from_slice(&0i16.to_be_bytes()); // reserved
+            body.extend_from_slice(&declared_num_bytes.to_be_bytes()); // num_bytes, possibly a lie
+            body.extend_from_slice(&payload);
+            let _ = decode_symbology(&body);
+        });
     }
 }
