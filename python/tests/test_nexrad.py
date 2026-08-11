@@ -29,6 +29,39 @@ def test_scan_nexrad_returns_metadata(nexrad_fixture):
     assert md.num_sweeps >= 5
 
 
+def test_moment_raw_codes_getters_are_additive_and_safe_here(nexrad_fixture):
+    """`MomentData.raw_codes()`/`raw_codes_u16()`/`value_min`/
+    `value_increment`/`n_levels`/`data_floor_code` (added for NEXRAD Level
+    3's plan 0012, radish/src/model/moment.rs) are additive fields no
+    other backend populates — NEXRAD Level 2 (this test) is one of the
+    Python-reachable backends whose behaviour must be unaffected by that
+    addition. There was previously NO Python exposure for either field at
+    all (confirmed by grep before adding these getters), so this is the
+    first real-data confirmation that the additive default is `None`, not
+    a crash or an unexpected value, for a backend that never touches
+    those fields.
+    """
+    vol = radish.read_nexrad(nexrad_fixture)
+    s0 = vol.get_sweep(0)
+    moment = s0.get_moment(s0.moment_names()[0])
+
+    assert moment.raw_codes() is None
+    assert moment.raw_codes_u16() is None
+    assert moment.value_min is None
+    assert moment.value_increment is None
+    assert moment.n_levels is None
+    assert moment.data_floor_code is None
+    # Single-use like data(), but None (not an exception) on a repeat call
+    # — see raw_codes()'s own doc comment for why that differs from
+    # data()'s raise-on-reconsumption contract.
+    assert moment.raw_codes() is None
+
+    # The additive change must not disturb the primary data path.
+    data = moment.data()
+    assert data.ndim == 2
+    assert data.shape[0] > 0 and data.shape[1] > 0
+
+
 def test_scan_nexrad_exposes_per_sweep_attrs_and_time_ranges(nexrad_fixture):
     """`scan_nexrad` must surface the per-sweep MSG_5 cut attrs and the
     `(start, end)` time ranges so downstream bulk-ingest callers can

@@ -39,11 +39,11 @@ use radish::{
         },
         CfRadial1Backend, IncompleteSweepPolicy, NexradBackend, RadarBackend, SigmetBackend,
     },
-    Coordinates, MomentData as RustMomentData, NexradSweepAttrs as RustNexradSweepAttrs,
-    NexradVolumeAttrs as RustNexradVolumeAttrs, RadishError,
-    SigmetSweepAttrs as RustSigmetSweepAttrs, SigmetVolumeAttrs as RustSigmetVolumeAttrs,
-    SweepData as RustSweepData, SweepMetadata, VolumeData as RustVolumeData,
-    VolumeMetadata as RustVolumeMetadata,
+    Coordinates, DeclaredScale as RustDeclaredScale, MomentData as RustMomentData,
+    NexradSweepAttrs as RustNexradSweepAttrs, NexradVolumeAttrs as RustNexradVolumeAttrs,
+    RadishError, SigmetSweepAttrs as RustSigmetSweepAttrs,
+    SigmetVolumeAttrs as RustSigmetVolumeAttrs, SweepData as RustSweepData, SweepMetadata,
+    VolumeData as RustVolumeData, VolumeMetadata as RustVolumeMetadata,
 };
 
 /// Volume-level metadata: site coordinates, time coverage, sweep
@@ -479,6 +479,16 @@ impl PySigmetSweepAttrs {
 /// The (rays × gates) `Array2<f32>` is moved out of `data` on the first
 /// `data()` call via `PyArray2::from_owned_array`, which transfers
 /// ownership to numpy with no `memcpy`. A second call raises.
+///
+/// `raw_codes`/`raw_codes_u16` mirror `data()`'s move-out-on-first-access
+/// shape, but return `None` rather than raising on a second call (or when
+/// the source backend/product never populated one at all — e.g. every
+/// backend except NEXRAD Level 3) — there was previously NO Python
+/// exposure for either field at all (confirmed by grepping `raw_codes`
+/// across every `*.rs`/`*.py` file under `python/` before adding this: it
+/// returned nothing), so this is new surface, not a widened existing one —
+/// see plan 0012 §0/§3.2 for why that changes this touchpoint's scope and
+/// design freedom versus what the plan originally assumed.
 #[pyclass(name = "MomentData")]
 pub struct PyMomentData {
     name: String,
@@ -487,6 +497,9 @@ pub struct PyMomentData {
     long_name: Option<String>,
     shape: (usize, usize),
     data: Option<Array2<f32>>,
+    raw_codes: Option<Array2<u8>>,
+    raw_codes_u16: Option<Array2<u16>>,
+    declared_scale: Option<RustDeclaredScale>,
 }
 
 impl PyMomentData {
@@ -499,6 +512,9 @@ impl PyMomentData {
             long_name: m.long_name,
             shape,
             data: Some(m.data),
+            raw_codes: m.raw_codes,
+            raw_codes_u16: m.raw_codes_u16,
+            declared_scale: m.declared_scale,
         }
     }
 }
@@ -549,6 +565,74 @@ impl PyMomentData {
             PyRuntimeError::new_err("MomentData.data() has already been consumed")
         })?;
         Ok(PyArray2::from_owned_array(py, arr))
+    }
+
+    /// Verbatim on-wire codes, when the source format defines its wire
+    /// format in terms of codes rather than physical values (currently:
+    /// NEXRAD Level 3 digital radial products decoded via packet 16/AF1F —
+    /// see [`Self::raw_codes_u16`] for packet 28). `None` for every other
+    /// backend, or once already consumed — unlike [`Self::data`], a second
+    /// call returns `None` rather than raising, since `None` already means
+    /// "not applicable" for most moments and a second meaning here would
+    /// need its own tri-state to distinguish from "already taken."
+    /// Single-use for the same reason `data()` is: the underlying numpy
+    /// array is moved out (`PyArray2::from_owned_array`), not copied.
+    fn raw_codes<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyArray2<u8>>> {
+        self.raw_codes
+            .take()
+            .map(|arr| PyArray2::from_owned_array(py, arr))
+    }
+
+    /// The `u16` counterpart to [`Self::raw_codes`], for a NEXRAD Level 3
+    /// product decoded via packet 28 (XDR — e.g. `RATE`). `None` for every
+    /// other product, including every packet-16/AF1F NEXRAD Level 3
+    /// product, which uses [`Self::raw_codes`] instead — exactly one of
+    /// the two is ever populated for a given moment. Same single-use,
+    /// move-not-copy contract as `raw_codes()`.
+    fn raw_codes_u16<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyArray2<u16>>> {
+        self.raw_codes_u16
+            .take()
+            .map(|arr| PyArray2::from_owned_array(py, arr))
+    }
+
+    /// Physical value at [`Self::data_floor_code`], for the source
+    /// format's OWN declared linear scale — see
+    /// `radish::DeclaredScale`'s Rust doc. `None` when
+    /// [`Self::raw_codes`]/[`Self::raw_codes_u16`] are both `None`, or for
+    /// a categorical product (e.g. hydrometeor classification) whose codes
+    /// index a fixed label table rather than a linear scale.
+    #[getter]
+    fn value_min(&self) -> Option<f32> {
+        self.declared_scale.map(|s| s.value_min)
+    }
+
+    /// Physical value change per code above the floor. See
+    /// [`Self::value_min`].
+    #[getter]
+    fn value_increment(&self) -> Option<f32> {
+        self.declared_scale.map(|s| s.value_increment)
+    }
+
+    /// Number of codes that carry data, from the floor code up — metadata
+    /// only, not itself enforced when computing [`Self::data`]. See
+    /// [`Self::value_min`].
+    #[getter]
+    fn n_levels(&self) -> Option<u16> {
+        self.declared_scale.map(|s| s.n_levels)
+    }
+
+    /// The lowest raw code that carries data — codes below this are
+    /// sentinels (e.g. "below threshold"), never
+    /// `value_min + (code - data_floor_code) * value_increment`. This
+    /// floor always fits `u8` (it's `<= 8`) even for a
+    /// [`Self::raw_codes_u16`] product's `u16` codes — apply the formula
+    /// directly in Python (there's no per-code decode getter exposed
+    /// here; Rust/wasm callers have `radish::DeclaredScale::decode_code`,
+    /// generic over the code width, for the same formula). See
+    /// [`Self::value_min`].
+    #[getter]
+    fn data_floor_code(&self) -> Option<u8> {
+        self.declared_scale.map(|s| s.data_floor_code)
     }
 
     fn __repr__(&self) -> String {
