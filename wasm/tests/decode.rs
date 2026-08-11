@@ -228,8 +228,13 @@ fn decode_rejects_garbage_bytes_without_panicking() {
         Err(e) => e,
         Ok(_) => panic!("garbage bytes must be rejected, not decoded"),
     };
-    // A JS Error with .name set, not a raw panic/trap — see radish_err's
-    // own doc comment for why `.name` (not just `.message`) matters to a
-    // JS caller.
-    assert!(js_sys::Reflect::has(&err, &"name".into()).unwrap_or(false));
+    // Not just "some .name exists" — the SPECIFIC value a JS caller would
+    // actually branch on (radish_err's own doc comment: "Decode = the
+    // input bytes are bad"). "not a nids product" has no recognisable
+    // message header at all, so this is `Level3DecodeError::NoMessageHeader`
+    // -> `RadishError::Decode` -> `.name = "Decode"`.
+    let name = js_sys::Reflect::get(&err, &"name".into())
+        .ok()
+        .and_then(|v| v.as_string());
+    assert_eq!(name.as_deref(), Some("Decode"));
 }

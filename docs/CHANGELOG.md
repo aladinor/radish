@@ -16,12 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compiled `wasm32-unknown-unknown` binary under Node (synthetic,
   ICD-shaped bytes, no fixtures needed); `wasm/tests/real_fixtures.rs`
   complements it with real `DAA`/`DPR`/`HHC` objects, `include_bytes!`-
-  embedded at compile time behind an opt-in `real-fixture-tests` feature
-  (wasm32 has no runtime filesystem access, so this can't be a `#[cfg(test)]`
-  env-var read the way every other gated test in this repo works — see
-  `radish/tests/fixtures/CORPUS.md`'s Test gating section for the exact
-  commands). Confirms `codes()`/`codesU16()`/`codesWidth` — the packet-28
-  additions below — actually work end to end through the real,
+  embedded at compile time behind a `build.rs`-emitted `--cfg
+  has_real_fixtures` (wasm32 has no runtime filesystem access, so this
+  can't be a `#[cfg(test)]` env-var read the way every other gated test in
+  this repo works; a Cargo feature was tried first and reverted since this
+  repo's CI runs `--all-features` and would have swept it on unconditionally
+  — see `radish/tests/fixtures/CORPUS.md`'s Test gating section for the
+  full reasoning and exact commands). Its SHA-256 checks read the same
+  committed `expected/*.json` oracle sidecars
+  `test_nexrad_level3_xradar_oracle.rs` uses, so the two suites can't
+  silently drift apart. Confirms `codes()`/`codesU16()`/`codesWidth` — the
+  packet-28 additions below — actually work end to end through the real,
   browser-facing artifact, not just their Rust source.
 - **NEXRAD Level 3: all 7 previously-deferred message codes now decode**
   (plan 0012) — `packet_family_implemented` returns `true` for every code

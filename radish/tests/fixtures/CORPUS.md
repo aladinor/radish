@@ -380,15 +380,23 @@ it.
       cargo test -p radish-wasm --target wasm32-unknown-unknown --test decode
   ```
   `wasm/tests/real_fixtures.rs` complements it with real `DAA`/`DPR`/`HHC`
-  objects (same corpus as above) — gated behind the `real-fixture-tests`
-  Cargo feature rather than `#[ignore]`, since `include_bytes!` needs the
-  fixture path at COMPILE time (`wasm32-unknown-unknown` has no runtime
-  filesystem access, unlike every other gated test on this page):
+  objects (same corpus as above) — gated behind a `build.rs`-emitted
+  `--cfg has_real_fixtures` rather than `#[ignore]` or a Cargo feature,
+  since `include_bytes!` needs the fixture path at COMPILE time
+  (`wasm32-unknown-unknown` has no runtime filesystem access, unlike every
+  other gated test on this page). A Cargo feature was tried first and
+  reverted: this workspace's CI runs `--all-features` on several steps
+  (`.github/workflows/rust-ci.yml`), which would sweep an opt-in feature on
+  unconditionally and break the build with the fixture env var unset —
+  confirmed directly (`cargo test -p radish-wasm --all-features --no-run`
+  failed to compile). `wasm/build.rs` emits the cfg only when
+  `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR` is set, which `--all-features` has no
+  way to touch:
   ```bash
   RADISH_NEXRAD_LEVEL3_FIXTURE_DIR=... \
   CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
       cargo test -p radish-wasm --target wasm32-unknown-unknown \
-          --features real-fixture-tests --test real_fixtures
+          --test real_fixtures
   ```
 
 ## Velocity dealiasing golden corpus

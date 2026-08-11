@@ -37,15 +37,22 @@ js-sys = "0.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# Both pure-Rust, no getrandom/OS entropy needed — compile cleanly for
+# wasm32-unknown-unknown. Used by `tests/real_fixtures.rs` to hash decoded
+# codes arrays and parse the committed `expected/*.json` oracle sidecars,
+# matching `radish/tests/test_nexrad_level3_xradar_oracle.rs`'s
+# `codes_sha256`/`load_expected_file` pattern instead of a weaker
+# permutation-blind checksum.
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
-[features]
-# Gates `tests/real_fixtures.rs`'s cases, which `include_bytes!` a real
-# NEXRAD Level 3 object at COMPILE time (wasm32-unknown-unknown has no
-# runtime filesystem access, unlike the native-target Rust integration
-# tests' `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR`-at-test-time convention — see
-# that file's module doc for the full reasoning). Off by default so a
-# plain `cargo test -p radish-wasm --target wasm32-unknown-unknown` never
-# requires a fixture directory to even compile; opt in explicitly with
-# `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR=... cargo test -p radish-wasm --target
-# wasm32-unknown-unknown --features real-fixture-tests`.
-real-fixture-tests = []
+# `tests/real_fixtures.rs`'s cases are gated on `--cfg has_real_fixtures`
+# (see `build.rs`), NOT a Cargo feature — a feature was tried first and
+# reverted: this workspace's CI runs `--all-features` on several steps
+# (`.github/workflows/rust-ci.yml`), which would sweep an opt-in feature
+# on unconditionally and break the build without
+# `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR` set (confirmed directly — `cargo test
+# -p radish-wasm --all-features --no-run` failed to compile). `build.rs`
+# emits the cfg only when that env var is present, which `--all-features`
+# has no way to touch.
