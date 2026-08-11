@@ -129,6 +129,76 @@ pub(crate) fn value_scaling_float(raw: &[u8], pdb: usize) -> Result<(f32, f32, u
     ))
 }
 
+/// `(value_min, value_increment, floor_code, valid_max)` for the
+/// `Precip`/`Rate` PDB layout — the same 8-byte float32 scale/offset pair
+/// as [`value_scaling_float`] (halfwords 22-25), reinterpreted in the
+/// shifted-linear form `value_min + (code - floor_code) * value_increment`
+/// (mathematically identical to the raw `physical = code * scale + offset`
+/// form the reference oracle uses — see the derivation in plan 0012 §2.1 —
+/// just reframed so this crate's existing `DeclaredLinearScale`/
+/// `DeclaredScale` model, built for a per-instance floor code already,
+/// covers this scheme too without a new model type), PLUS a
+/// product-family leading/trailing flag-count field further into the PDB
+/// (halfwords 27-29) that gives the true per-FILE floor/ceiling — NOT
+/// [`super::DATA_FLOOR_CODE`]'s universal 2, which is packet 16/AF1F's
+/// OTHER schemes' convention, confirmed to not apply here (see this
+/// module's own doc and plan 0012 §2.2's now-confirmed hypothesis: the
+/// precip/rate family's real floor is 1, read from real `DAA`/`DTA`/`DU3`/
+/// `DU6` fixtures, not a hardcoded 2).
+///
+/// `factor` bakes in the physical-unit conversion — `0.01 * IN_TO_MM` for
+/// `Precip` (raw is hundredths of an inch), `IN_TO_MM` for `Rate` (raw is
+/// inches per hour) — mirrors xradar #392's `get_scale_offset`/
+/// `get_flag_counts`, cross-checked against real `DAA`/`DPR` fixture bytes
+/// before trusting the port (plan 0012 §2.3/§2.4).
+pub(crate) fn precip_family_scale(
+    raw: &[u8],
+    pdb: usize,
+    factor: f32,
+) -> Result<(f32, f32, u8, Option<u32>)> {
+    let (file_scale, file_offset) = hw_f32_pair(raw, pdb, 22)?;
+    if !file_scale.is_finite() || file_scale == 0.0 {
+        return Err(Level3DecodeError::NonFiniteScale(file_scale));
+    }
+    if !file_offset.is_finite() {
+        return Err(Level3DecodeError::NonFiniteOffset(file_offset));
+    }
+    let out_scale = factor / file_scale;
+    let out_offset = -file_offset * factor / file_scale;
+
+    // Halfwords 27 (max data value, u16), 28/29 (leading/trailing flag
+    // byte counts, i16) — xradar #392's `get_flag_counts`. Validated
+    // exactly like the oracle: implausible readings fall back to the ICD
+    // default rather than propagating garbage.
+    let max_val = hw_u16(raw, pdb, 27)?;
+    let leading = hw_i16(raw, pdb, 28)?;
+    let trailing = hw_i16(raw, pdb, 29)?;
+    let (floor_code, valid_max) =
+        if (0..=8).contains(&leading) && (0..=8).contains(&trailing) && max_val != 0 {
+            (
+                leading as u8,
+                Some((max_val as i32 - trailing as i32).max(0) as u32),
+            )
+        } else {
+            // Implausible flag bytes: fall back to the fixed ICD default
+            // for THIS product family specifically — `leading = 1`, one
+            // sentinel code ("below threshold"), not packet 16/AF1F's
+            // OTHER schemes' universal floor-of-2. No ceiling in the
+            // fallback case, matching the oracle.
+            (1u8, None)
+        };
+
+    // Reframe `physical = code * out_scale + out_offset` as
+    // `value_min + (code - floor_code) * value_increment`:
+    // value_min := physical(floor_code) = floor_code * out_scale + out_offset.
+    // Exact, not an approximation — substituting back gives
+    // value_min + (code - floor_code) * out_scale
+    //   = floor_code*out_scale + out_offset + code*out_scale - floor_code*out_scale
+    //   = code * out_scale + out_offset, i.e. the original formula.
+    let value_min = floor_code as f32 * out_scale + out_offset;
+    Ok((value_min, out_scale, floor_code, valid_max))
+}
+
 /// 32-byte `threshold_data` field, PDB halfwords 22-37 — the raw bytes
 /// [`crate::backends::nexrad_level3::decode::legacy16::decode_legacy16`]
 /// needs. Caller must already have verified `raw.len() >= pdb + 102`.
@@ -238,5 +308,109 @@ mod tests {
         assert!((fields.height_m - 650.0 * 0.3048).abs() < 1e-6);
         assert_eq!(fields.product_code, 153);
         assert_eq!(fields.vcp, 215);
+    }
+
+    // -- `precip_family_scale`: flag-count fallback logic -------------------
+    //
+    // This is the part plan 0012 §2.5 calls out as "the part most likely
+    // to have a real edge case" — the boundary between "PDB flag bytes are
+    // plausible, read them directly" and "fall back to the ICD default."
+
+    fn pdb_bytes_for_precip_family(
+        scale: f32,
+        offset: f32,
+        max_val: u16,
+        leading: i16,
+        trailing: i16,
+    ) -> Vec<u8> {
+        // halfwords 1..21 zero padding, f32 pair at 22-25, then max_val
+        // (hw27), leading (hw28), trailing (hw29) — hw26 stays zero.
+        let mut buf = vec![0u8; 2 * 21];
+        buf.extend_from_slice(&scale.to_be_bytes());
+        buf.extend_from_slice(&offset.to_be_bytes());
+        buf.extend_from_slice(&[0u8; 2]); // hw26, unused
+        buf.extend_from_slice(&max_val.to_be_bytes());
+        buf.extend_from_slice(&leading.to_be_bytes());
+        buf.extend_from_slice(&trailing.to_be_bytes());
+        buf
+    }
+
+    #[test]
+    fn precip_family_scale_reads_plausible_flag_bytes_directly() {
+        // Real values read off a live `LOT_DAA` fixture (plan 0012 §2.4
+        // step 2): scale=1.2555609941482544, offset=0.8744438886642456,
+        // max_val=255, leading=1, trailing=0 — all within the oracle's own
+        // validity window, so this must NOT fall back to the default.
+        let raw = pdb_bytes_for_precip_family(1.255_561, 0.874_444, 255, 1, 0);
+        const PRECIP_FACTOR: f32 = 0.01 * 25.4; // IN_TO_MM
+        let (value_min, value_increment, floor_code, valid_max) =
+            precip_family_scale(&raw, 0, PRECIP_FACTOR).unwrap();
+        assert_eq!(
+            floor_code, 1,
+            "leading=1 must be read directly, not defaulted"
+        );
+        assert_eq!(valid_max, Some(255));
+        // value_min is physical(floor_code=1): code=1 -> 1*out_scale+out_offset.
+        let out_scale = PRECIP_FACTOR / 1.255_561;
+        let out_offset = -0.874_444 * PRECIP_FACTOR / 1.255_561;
+        assert!((value_increment - out_scale).abs() < 1e-6);
+        assert!((value_min - (1.0 * out_scale + out_offset)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn precip_family_scale_falls_back_to_leading_one_on_implausible_flag_bytes() {
+        // leading=99 is outside the oracle's `0..=8` validity window ->
+        // must fall back to the ICD default (leading=1, no ceiling) rather
+        // than propagate the garbage value.
+        let raw = pdb_bytes_for_precip_family(16.0, 128.0, 255, 99, 0);
+        let (_, _, floor_code, valid_max) = precip_family_scale(&raw, 0, 1.0).unwrap();
+        assert_eq!(floor_code, 1);
+        assert_eq!(valid_max, None);
+    }
+
+    #[test]
+    fn precip_family_scale_falls_back_when_trailing_is_implausible() {
+        let raw = pdb_bytes_for_precip_family(16.0, 128.0, 255, 1, -1);
+        let (_, _, floor_code, valid_max) = precip_family_scale(&raw, 0, 1.0).unwrap();
+        assert_eq!(floor_code, 1);
+        assert_eq!(valid_max, None);
+    }
+
+    #[test]
+    fn precip_family_scale_falls_back_when_max_val_is_zero() {
+        // `max_val == 0` is explicitly part of the oracle's own validity
+        // check, independent of leading/trailing being in-range.
+        let raw = pdb_bytes_for_precip_family(16.0, 128.0, 0, 1, 0);
+        let (_, _, floor_code, valid_max) = precip_family_scale(&raw, 0, 1.0).unwrap();
+        assert_eq!(floor_code, 1);
+        assert_eq!(valid_max, None);
+    }
+
+    #[test]
+    fn precip_family_scale_accepts_the_boundary_values_zero_and_eight() {
+        // The oracle's validity check is `0 <= leading <= 8` — 0 and 8
+        // must both be treated as plausible, not off-by-one excluded.
+        let raw = pdb_bytes_for_precip_family(16.0, 128.0, 255, 0, 8);
+        let (_, _, floor_code, valid_max) = precip_family_scale(&raw, 0, 1.0).unwrap();
+        assert_eq!(floor_code, 0);
+        assert_eq!(valid_max, Some(255 - 8));
+    }
+
+    #[test]
+    fn precip_family_scale_rejects_zero_file_scale() {
+        let raw = pdb_bytes_for_precip_family(0.0, 128.0, 255, 1, 0);
+        assert!(matches!(
+            precip_family_scale(&raw, 0, 1.0),
+            Err(Level3DecodeError::NonFiniteScale(_))
+        ));
+    }
+
+    #[test]
+    fn precip_family_scale_rejects_non_finite_file_offset() {
+        let raw = pdb_bytes_for_precip_family(16.0, f32::NAN, 255, 1, 0);
+        assert!(matches!(
+            precip_family_scale(&raw, 0, 1.0),
+            Err(Level3DecodeError::NonFiniteOffset(_))
+        ));
     }
 }

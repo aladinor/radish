@@ -20,7 +20,7 @@
 use ndarray::Array2;
 use wasm_bindgen::prelude::*;
 
-use js_sys::{Float32Array, Int32Array, Uint8Array};
+use js_sys::{Float32Array, Int32Array, Uint16Array, Uint8Array};
 use radish::backends::{NexradLevel3Backend, RadarBackend};
 use radish::transforms::{dealias_region_based as rs_dealias_region_based, DealiasOptions};
 use radish::RadishError;
@@ -104,7 +104,14 @@ pub struct DecodedProduct {
     n_radials: usize,
     n_bins: usize,
     azimuths: Vec<f32>,
-    codes: Array2<u8>,
+    /// Exactly one of `codes`/`codes_u16` is `Some`, matching
+    /// `radish::MomentData`'s own additive-field contract (see
+    /// [`Self::codes_width`]'s doc) — kept as two `Option` fields here,
+    /// not an internal `RawCodes`-style enum, because wasm-bindgen structs
+    /// can't export enum-typed fields directly to JS the way plain getters
+    /// can.
+    codes: Option<Array2<u8>>,
+    codes_u16: Option<Array2<u16>>,
     value_min: Option<f32>,
     value_increment: Option<f32>,
     n_levels: Option<u16>,
@@ -113,7 +120,15 @@ pub struct DecodedProduct {
 #[wasm_bindgen]
 impl DecodedProduct {
     /// The verbatim on-wire codes, `[n_radials * n_bins]` bytes, row-major
-    /// (radial-major, matching [`Self::n_radials`]/[`Self::n_bins`]).
+    /// (radial-major, matching [`Self::n_radials`]/[`Self::n_bins`]) — for
+    /// a packet 16/AF1F product (`codesWidth() === 8`). **Empty**
+    /// (zero-length, not `undefined`) for a packet-28 product
+    /// (`codesWidth() === 16`, e.g. `RATE`) — check `codesWidth()` first;
+    /// this is deliberately NOT `Option<Uint8Array>`/an exception, to keep
+    /// this method's signature identical to every version of this crate
+    /// before packet 28 existed (plan 0012 §0's corrected, additive-only
+    /// scope for this touchpoint — no existing caller, which only ever
+    /// decoded packet 16/AF1F products, observes any change here).
     ///
     /// **Zero-copy.** This is a live view (`js_sys::Uint8Array::view`)
     /// directly into this `DecodedProduct` instance's own WebAssembly
@@ -136,14 +151,54 @@ impl DecodedProduct {
     /// documented above for the JS caller.
     #[wasm_bindgen(js_name = codes)]
     pub fn codes(&self) -> Uint8Array {
-        let flat = self
-            .codes
-            .as_slice()
-            .expect("freshly-decoded Array2<u8> is always contiguous, row-major");
-        // SAFETY: see the doc comment above — valid as long as `self`
-        // isn't dropped and wasm memory isn't grown before the caller
-        // reads or copies the view.
-        unsafe { Uint8Array::view(flat) }
+        match self.codes.as_ref() {
+            Some(codes) => {
+                let flat = codes
+                    .as_slice()
+                    .expect("freshly-decoded Array2<u8> is always contiguous, row-major");
+                // SAFETY: see the doc comment above — valid as long as
+                // `self` isn't dropped and wasm memory isn't grown before
+                // the caller reads or copies the view.
+                unsafe { Uint8Array::view(flat) }
+            }
+            None => Uint8Array::new_with_length(0),
+        }
+    }
+
+    /// The `u16` counterpart to [`Self::codes`], for a packet-28 product
+    /// (`codesWidth() === 16`, e.g. `RATE`) — empty for a packet 16/AF1F
+    /// product. Same zero-copy contract as `codes()`.
+    ///
+    /// # Safety
+    /// See `codes()`'s `# Safety` section — identical contract, aliasing
+    /// `self.codes_u16` instead of `self.codes`.
+    #[wasm_bindgen(js_name = codesU16)]
+    pub fn codes_u16(&self) -> Uint16Array {
+        match self.codes_u16.as_ref() {
+            Some(codes) => {
+                let flat = codes
+                    .as_slice()
+                    .expect("freshly-decoded Array2<u16> is always contiguous, row-major");
+                // SAFETY: see `codes()`'s doc comment.
+                unsafe { Uint16Array::view(flat) }
+            }
+            None => Uint16Array::new_with_length(0),
+        }
+    }
+
+    /// `8` if [`Self::codes`] is the accessor to call for this product's
+    /// raw codes, `16` if [`Self::codes_u16`] is — a decoded product's raw
+    /// codes are always exactly one width; this is how a caller tells
+    /// which of the two zero-copy accessors actually has data before
+    /// calling either, rather than probing both and checking for an empty
+    /// array.
+    #[wasm_bindgen(js_name = codesWidth, getter)]
+    pub fn codes_width(&self) -> u8 {
+        if self.codes.is_some() {
+            8
+        } else {
+            16
+        }
     }
 
     /// Per-radial azimuth, ray center, degrees — NOT a fitted
@@ -270,10 +325,12 @@ pub fn decode_nexrad_level3(bytes: &[u8]) -> Result<DecodedProduct, JsValue> {
         .into_iter()
         .next()
         .ok_or_else(|| local_err("Decode", "decoded sweep has no moments"))?;
-    let codes = moment
-        .raw_codes
-        .ok_or_else(|| local_err("Decode", "decoded moment has no raw_codes"))?;
-    let (n_radials, n_bins) = (codes.nrows(), codes.ncols());
+    // `MomentData::shape()` already gives `(num_rays, num_gates)` from
+    // `data` — always populated, and always the same dims as whichever
+    // `raw_codes`/`raw_codes_u16` is set (`decode/mod.rs` derives
+    // `physical` via `codes.mapv(...)` on that same array), so there's no
+    // need to hand-inspect the raw-code fields to recover this.
+    let (n_radials, n_bins) = moment.shape();
 
     let first_gate_m = sweep.coordinates.range.first().copied().unwrap_or(0.0);
     let gate_spacing_m = if sweep.coordinates.range.len() >= 2 {
@@ -298,7 +355,8 @@ pub fn decode_nexrad_level3(bytes: &[u8]) -> Result<DecodedProduct, JsValue> {
         n_radials,
         n_bins,
         azimuths: sweep.coordinates.azimuth,
-        codes,
+        codes: moment.raw_codes,
+        codes_u16: moment.raw_codes_u16,
         value_min: moment.declared_scale.map(|s| s.value_min),
         value_increment: moment.declared_scale.map(|s| s.value_increment),
         n_levels: moment.declared_scale.map(|s| s.n_levels),

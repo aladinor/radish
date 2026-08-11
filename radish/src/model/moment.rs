@@ -31,12 +31,32 @@ pub struct DeclaredScale {
 
 impl DeclaredScale {
     /// Physical value for one code, or `None` below [`data_floor_code`](Self::data_floor_code)
-    /// (a sentinel, not data).
+    /// (a sentinel, not data). For a [`MomentData::raw_codes_u16`] code,
+    /// use [`decode_code`](Self::decode_code) instead — a `u16` doesn't
+    /// fit this method's `u8` parameter.
     pub fn decode(&self, code: u8) -> Option<f32> {
-        if code < self.data_floor_code {
+        self.decode_code(code)
+    }
+
+    /// Generic counterpart to [`decode`](Self::decode) — same formula, any
+    /// integer width `Into<u32>` (`u8` for [`MomentData::raw_codes`],
+    /// `u16` for [`MomentData::raw_codes_u16`]). Added so a packet-28
+    /// consumer (`RATE`/code 176 today) has a real method to call instead
+    /// of hand-rolling the shifted-linear formula itself — this is the
+    /// same generalization `nexrad_level3::decode`'s internal
+    /// `precip_family_declared_scale` already applies to its OWN copy of
+    /// this formula, now shared with the one external consumers actually
+    /// call.
+    pub fn decode_code<T>(&self, code: T) -> Option<f32>
+    where
+        T: Copy + Into<u32>,
+    {
+        let code: u32 = code.into();
+        let floor = self.data_floor_code as u32;
+        if code < floor {
             return None;
         }
-        Some(self.value_min + (code - self.data_floor_code) as f32 * self.value_increment)
+        Some(self.value_min + (code - floor) as f32 * self.value_increment)
     }
 }
 
@@ -92,11 +112,30 @@ pub struct MomentData {
     /// (`[rays × gates]`) when present.
     pub raw_codes: Option<Array2<u8>>,
 
-    /// The scale [`raw_codes`](Self::raw_codes) is declared on, verbatim
-    /// from the source file. `None` whenever `raw_codes` is `None`, and
-    /// also `None` for a categorical product (e.g. hydrometeor
-    /// classification) whose codes index a fixed label table rather than a
-    /// linear physical scale.
+    /// Verbatim on-wire codes for a source format whose raw levels don't
+    /// fit in a `u8` — currently: NEXRAD Level 3's symbology packet 28
+    /// (XDR, generic data packet — `RATE`/code 176, and any future
+    /// packet-28 product). Added *alongside* [`raw_codes`](Self::raw_codes)
+    /// rather than widening it, for the same additive reasoning that
+    /// field's own doc comment gives: exactly one of `raw_codes` /
+    /// `raw_codes_u16` is `Some` for a given moment (never both, never
+    /// neither, for any backend that populates either) — see plan 0012 §0/
+    /// §3.2 for why a wasm/pyo3 consumer that only ever decoded packet
+    /// 16/AF1F products keeps working unmodified against this field's
+    /// addition. `None` for every backend/product that doesn't need the
+    /// wider width. Same shape as `data` (`[rays × gates]`) when present.
+    pub raw_codes_u16: Option<Array2<u16>>,
+
+    /// The scale [`raw_codes`](Self::raw_codes)/[`raw_codes_u16`](Self::raw_codes_u16)
+    /// is declared on, verbatim from the source file. `None` whenever both
+    /// raw-code fields are `None`, and also `None` for a categorical
+    /// product (e.g. hydrometeor classification) whose codes index a fixed
+    /// label table rather than a linear physical scale.
+    ///
+    /// [`DeclaredScale::decode`] takes a `u8` code — for a
+    /// [`raw_codes_u16`](Self::raw_codes_u16) product, call
+    /// [`DeclaredScale::decode_code`] instead (a `u16` code can exceed
+    /// what `decode`'s `u8` parameter can even represent).
     pub declared_scale: Option<DeclaredScale>,
 }
 
@@ -117,6 +156,7 @@ impl MomentData {
             coordinates: None,
             attributes: std::collections::HashMap::new(),
             raw_codes: None,
+            raw_codes_u16: None,
             declared_scale: None,
         }
     }
@@ -162,3 +202,54 @@ impl MomentData {
 // metadata sources of truth (e.g. `radish::backends::nexrad::mapping`, which
 // uses the `radish_types::moments` constants directly). Re-introduce only
 // when a generalised name→metadata lookup actually has callers.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scale() -> DeclaredScale {
+        DeclaredScale {
+            value_min: -32.0,
+            value_increment: 0.5,
+            n_levels: 254,
+            data_floor_code: 2,
+        }
+    }
+
+    #[test]
+    fn decode_returns_none_below_the_floor() {
+        assert_eq!(scale().decode(0), None);
+        assert_eq!(scale().decode(1), None);
+    }
+
+    #[test]
+    fn decode_returns_the_physical_value_at_and_above_the_floor() {
+        assert_eq!(scale().decode(2), Some(-32.0));
+        assert_eq!(scale().decode(3), Some(-31.5));
+    }
+
+    #[test]
+    fn decode_code_agrees_with_decode_for_u8() {
+        // decode() now just delegates to decode_code() — pin that they
+        // never silently diverge (e.g. a future edit to one formula
+        // without the other).
+        for code in 0u8..=255 {
+            assert_eq!(scale().decode(code), scale().decode_code(code));
+        }
+    }
+
+    #[test]
+    fn decode_code_works_for_u16_beyond_u8_range() {
+        // The whole reason decode_code exists: a `raw_codes_u16` code can
+        // exceed 255, which decode()'s `u8` parameter can't even represent.
+        let s = scale();
+        assert_eq!(s.decode_code(2u16), Some(-32.0));
+        assert_eq!(s.decode_code(1000u16), Some(-32.0 + 998.0 * 0.5));
+    }
+
+    #[test]
+    fn decode_code_returns_none_below_the_floor_for_u16() {
+        assert_eq!(scale().decode_code(0u16), None);
+        assert_eq!(scale().decode_code(1u16), None);
+    }
+}

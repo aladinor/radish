@@ -16,7 +16,7 @@ use crate::backends::common::meta_for;
 use crate::model::{DeclaredScale, NidsSweepAttrs};
 use crate::{Coordinates, MomentData, SweepData, SweepMetadata, VolumeData, VolumeMetadata};
 
-use super::decode::DecodedProduct;
+use super::decode::{DecodedProduct, RawCodes};
 
 /// Build the single-sweep, single-moment [`VolumeData`] a decoded NIDS
 /// product normalizes to.
@@ -37,7 +37,14 @@ pub(super) fn convert(product: DecodedProduct) -> VolumeData {
         n_levels: s.n_levels,
         data_floor_code: s.data_floor_code,
     });
-    moment.raw_codes = Some(product.codes);
+    // Exactly one of these is populated, per `RawCodes`'s own doc — packet
+    // 16/AF1F keeps using `raw_codes` exactly as every consumer already
+    // expects; only the packet-28 path (`RATE`/176) populates the new
+    // `raw_codes_u16` field instead. See plan 0012 §3.2.
+    match product.codes {
+        RawCodes::U8(codes) => moment.raw_codes = Some(codes),
+        RawCodes::U16(codes) => moment.raw_codes_u16 = Some(codes),
+    }
 
     let mut moments = HashMap::with_capacity(1);
     moments.insert(product.moment.to_string(), moment);

@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`radish-wasm` gains real test coverage** — the crate had none before
+  this (`crate-type` was `cdylib`-only, which can't be linked against by
+  an integration test binary at all; now `["cdylib", "rlib"]`).
+  `wasm/tests/decode.rs` runs `wasm-bindgen-test` against the actual
+  compiled `wasm32-unknown-unknown` binary under Node (synthetic,
+  ICD-shaped bytes, no fixtures needed); `wasm/tests/real_fixtures.rs`
+  complements it with real `DAA`/`DPR`/`HHC` objects, `include_bytes!`-
+  embedded at compile time behind a `build.rs`-emitted `--cfg
+  has_real_fixtures` (wasm32 has no runtime filesystem access, so this
+  can't be a `#[cfg(test)]` env-var read the way every other gated test in
+  this repo works; a Cargo feature was tried first and reverted since this
+  repo's CI runs `--all-features` and would have swept it on unconditionally
+  — see `radish/tests/fixtures/CORPUS.md`'s Test gating section for the
+  full reasoning and exact commands). Its SHA-256 checks read the same
+  committed `expected/*.json` oracle sidecars
+  `test_nexrad_level3_xradar_oracle.rs` uses, so the two suites can't
+  silently drift apart. Confirms `codes()`/`codesU16()`/`codesWidth` — the
+  packet-28 additions below — actually work end to end through the real,
+  browser-facing artifact, not just their Rust source.
+- **NEXRAD Level 3: all 7 previously-deferred message codes now decode**
+  (plan 0012) — `packet_family_implemented` returns `true` for every code
+  in `PRODUCTS`; there is no longer a known-but-unimplemented product.
+  - **170/172/173/174/175** (`DAA`/`DTA`/`DU3`+`DU6`/`DOD`/`DSD`, the
+    digital precip-accumulation family, `DecodeScheme::Precip`) — packet
+    16, confirmed on 4 real objects (`DAA`/`DTA`/`DU3`/`DU6`). Same
+    8-byte float32 PDB scale/offset pair `FloatScale` reads, but with a
+    product-family-specific floor code read from further into the PDB
+    (`leading = 1` on real fixtures, not the universal `DATA_FLOOR_CODE =
+    2` every OTHER packet-16 scheme uses) and a fixed `0.01 in -> mm`
+    conversion factor. `172`/`DTA` decodes through the identical,
+    code-agnostic path as the other four but has no byte-exact
+    real-fixture oracle confirmation of its own (xradar's own reader
+    warns its handling of `DTA`'s product version 3 is unverified) — a
+    known, stated gap, not a silent one.
+  - **176** (`DPR`, Digital Instantaneous Precipitation Rate,
+    `DecodeScheme::Rate`) — packet 28 (XDR, RFC 1832), confirmed on a
+    real object. New: a from-scratch XDR unpacker
+    (`nexrad_level3::decode::xdr`, every length-prefixed read capped
+    against an untrusted length prefix BEFORE allocating), and
+    `MomentData::raw_codes_u16: Option<Array2<u16>>` — additive, alongside
+    `raw_codes`, for packet 28's `u16` raw levels. Same PDB scale/flag
+    logic as `Precip`, factor `1 in -> mm`.
+  - **177** (`HHC`, Hybrid Hydrometeor Classification,
+    `DecodeScheme::ClassInt` — the same scheme as `HCLASS`/165) — **packet
+    16, not packet 28.** An earlier assumption (this project's own design
+    doc) had it backwards; 3 independently-fetched real `HHC` objects all
+    declared packet 16 on direct byte inspection. Needed almost no new
+    code: decodes through the exact same path 165 already used, with
+    `has_elevation: false` the only real difference.
+  - **wasm**: `DecodedProduct.codesU16()`/`.codesWidth` — additive, zero-copy
+    `Uint16Array` accessor for packet-28 products, mirroring `.codes()`'s
+    existing contract; `.codes()` itself is unchanged for every existing
+    (packet 16/AF1F) caller.
+  - **pyo3**: `MomentData.raw_codes()`/`.raw_codes_u16()`/`.value_min`/
+    `.value_increment`/`.n_levels`/`.data_floor_code` — new Python
+    surface; neither `raw_codes` nor `declared_scale` reached Python at
+    all before this (confirmed by grep, not assumed).
+- **NEXRAD Level 3 azimuth convention corrected for packet 28**: the
+  `Azimuth` field is the ray's LEADING edge, per NEXRAD ICD 2620001AC
+  Appendix E Figure E-4 — the same `+ width/2` correction packet 16/AF1F
+  already apply, not a different convention. Verified byte-exact
+  (codes AND azimuths) against a real `DPR` object and an independent
+  reader.
+- **NEXRAD Level 3 tilt-letter table extended**: `TILT_LETTER_TABLE` now
+  resolves `S` (Storm Relative Mean Radial Velocity, code 56 — 4 of 6 tilt
+  ordinals, `N0`/`N1`/`N2`/`N3`, a decode-scheme fact that holds for any date
+  the archive tier reads) and `H` (Hydrometeor Classification, code 165, all
+  6 tilts). This table records what the AWIPS-id SCHEME resolves to, not
+  what is currently broadcasting — for `S` specifically, only `N0S` has live
+  2026 data; `N1S`/`N2S`/`N3S` stopped broadcasting 2023-05-22 (confirmed on
+  two live sites). The consumer (`radar-animation`'s free-tier capability
+  table) is what decides which of a scheme's tilts to actually advertise as
+  selectable; this crate answers "what does this AWIPS id decode to",
+  unconditionally. A new `SPECIAL_AWIPS_IDS` table (`NSW` -> tilt 0) covers
+  `WRADH`'s legacy spectrum width, whose AWIPS id isn't
+  `{tilt prefix}{letter}`-shaped and so can't go in the generic table at
+  all — `decode()` now checks it as a fallback after `tilt_letter_lookup`.
+  `P` (`ACCUM`, codes 78/79/80) deliberately stays unresolved: its letter
+  encodes accumulation *period*, not elevation, and `N1P`/`N3P` share a
+  prefix with real, unrelated tilt ordinals — adding it would silently
+  mislabel a 1-hour accumulation as a 1.3° tilt.
+- **`export_product_catalogue_json`**, an `#[ignore]`d test in
+  `nexrad_level3::decode::products` that writes `generated/
+  nexrad_level3_products.json` — `PRODUCTS`, `TILT_LETTER_TABLE`, and
+  `SPECIAL_AWIPS_IDS`, machine-readable, for non-Rust consumers (a sibling
+  repo's build step) that need this table but cannot link the crate. Run
+  explicitly: `RADISH_WRITE_PRODUCT_CATALOGUE=1 cargo test --release -p
+  radish export_product_catalogue_json -- --ignored` — a second, in-body env
+  var gate beyond `#[ignore]`, matching the fixture-gated tests in
+  `backends/nexrad/decode/integration_test.rs`, so a `cargo test --
+  --ignored` sweep cannot overwrite `generated/` as a side effect nobody
+  asked for.
+- Regression tests for `special_awips_id_lookup`/`tilt_letter_lookup` against
+  non-UTF-8 input (both must return `None`, never panic — the AWIPS-id bytes
+  they receive come straight off the wire, unvalidated), and a test that
+  `SPECIAL_AWIPS_IDS` and `TILT_LETTER_TABLE` cannot structurally collide.
+
 ## [0.3.0] - 2026-08-07
 
 The "browser-reachable NEXRAD Level 3 + region-based velocity dealiasing" release. Adds a NEXRAD Level 3 (NIDS) decode backend and a Rust port of Py-ART's region-based velocity dealiasing, plus a new `wasm32-unknown-unknown` target and `radish-wasm` crate so both can run entirely client-side, no server in the loop. Also folds in the NEXRAD real-time-chunks work (incomplete-sweep detection, chunk-list validation, single-chunk auto-detection), the low-level per-moment NEXRAD decoders for chunked/lazy consumers, a full pass of Sigmet/IRIS correctness fixes verified against xradar, and a security-audit cleanup that brings `cargo audit` back to green. (#41, #43, #44)

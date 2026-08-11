@@ -151,20 +151,24 @@ pub(crate) enum Level3DecodeError {
     PdbFieldOutOfBounds { index: usize },
 
     /// The symbology layer's packet code is neither the digital radial
-    /// array (16) nor RLE radials (`AF1F`) — most commonly the generic
-    /// data packet (28, XDR: DPR rate / hybrid hydrometeor class), which
-    /// this backend does not decode yet (its raw levels are `u16`, not
-    /// `u8` — see `decode::products`'s module doc for why that's a real
-    /// model mismatch, not just unimplemented).
+    /// array (16), RLE radials (`AF1F`), nor the generic data packet (28,
+    /// XDR — `RATE`/code 176's packet family) — some OTHER packet code
+    /// this backend has no product wired to at all. Distinct from
+    /// [`Self::UnsupportedProduct`]: that fires before symbology decode is
+    /// even attempted, for a message code whose packet family isn't
+    /// implemented; this fires mid-symbology-decode, for a packet code
+    /// this backend has never seen paired with any message code it knows.
     #[error("unsupported symbology packet code {code} (0x{code:04x})")]
     UnsupportedPacketCode { code: i16 },
 
     /// The message code is recognised (`products::is_known_message_code`)
-    /// but this pass deliberately didn't implement its packet family —
-    /// the 5 surface precipitation products (170/172-175, packet type not
-    /// independently confirmed this pass) or the packet-28 products
-    /// (176/177). See [`Self::UnsupportedPacketCode`] and Phase 3's exit
-    /// notes.
+    /// but `products::packet_family_implemented` reports its packet
+    /// family isn't implemented — as of plan 0012, this is unreachable for
+    /// every code actually in `products::PRODUCTS` (all 34 are
+    /// implemented); kept as a real, reachable error path for whenever a
+    /// future product is added to the table before its packet family is,
+    /// the same "known but deferred" state the original 7 codes (170/
+    /// 172-175/176/177) occupied before this pass closed them.
     #[error("NEXRAD Level 3 message code {code} is a known product but its packet family isn't implemented yet")]
     UnsupportedProduct { code: i16 },
 
@@ -192,6 +196,152 @@ pub(crate) enum Level3DecodeError {
         n_bins: u16,
         cells: u64,
         max: u64,
+    },
+
+    // -- Packet 28 (XDR, generic data packet) — added for codes 176/177 --
+    /// XDR parsing ran out of bytes before finishing a fixed-size read.
+    /// `context` names what was being read (`"int"`, `"float"`, `"string
+    /// body"`, ...) — a truncated or corrupt packet, not a panic.
+    #[error("truncated XDR payload while reading {context} ({have} bytes, need {need})")]
+    XdrTruncated {
+        context: &'static str,
+        have: usize,
+        need: usize,
+    },
+
+    /// An XDR string's declared length prefix exceeds
+    /// [`MAX_XDR_STRING_LEN`](super::xdr::MAX_XDR_STRING_LEN) — rejected
+    /// BEFORE the byte read, the packet-28 analogue of `GridTooLarge`/
+    /// `AllocationExceedsBody`'s pre-allocation discipline (`docs/
+    /// NEXRAD_LEVEL3_WASM.md` §4.7: an untrusted length prefix must never
+    /// drive an allocation before it's bounds-checked).
+    #[error("XDR string length {len} exceeds the {max}-byte cap")]
+    XdrStringTooLong { len: u32, max: u32 },
+
+    /// An XDR int array's declared element count exceeds
+    /// [`MAX_XDR_ARRAY_LEN`](super::xdr::MAX_XDR_ARRAY_LEN) — same
+    /// pre-allocation discipline as [`Self::XdrStringTooLong`].
+    #[error("XDR int array length {len} exceeds the {max}-element cap")]
+    XdrArrayTooLong { len: u32, max: u32 },
+
+    /// A "counted list" (`parameters`/`components`) declared a count
+    /// exceeding [`MAX_XDR_LIST_LEN`](super::xdr::MAX_XDR_LIST_LEN) — a
+    /// fast, explicit refusal rather than relying only on the loop running
+    /// out of real bytes eventually (see that constant's own doc).
+    #[error("XDR list length {len} exceeds the {max}-element cap")]
+    XdrListTooLong { len: i32, max: i32 },
+
+    /// A generic-data-packet (28) component's type code wasn't `1`
+    /// ("radial") — the only component type this backend decodes. A real,
+    /// named refusal (matching the reference oracle's own
+    /// `NotImplementedError` for unknown component types), not a guess at
+    /// what an unknown type means.
+    #[error("unsupported generic-data-packet component type {0} (only radial/1 is decoded)")]
+    UnsupportedXdrComponent(i32),
+
+    /// A generic-data-packet declared zero components, or more than one —
+    /// this backend (like both reference readers it was cross-checked
+    /// against) only decodes exactly one radial component per product.
+    #[error("generic data packet declares {0} components, expected exactly 1")]
+    UnexpectedXdrComponentCount(usize),
+
+    /// A generic-data-packet radial declared `num_rads` or a first
+    /// radial's `num_bins` outside `1..=i32::MAX` in a way that makes the
+    /// geometry unusable (non-positive) — rejected before allocating the
+    /// `(nradials, nbins)` output array. XDR reads these as signed `i32`
+    /// (unlike packet 16/AF1F's unsigned `u16` header fields), so zero and
+    /// negative both need an explicit check here that packet 16/AF1F don't
+    /// need.
+    #[error(
+        "generic data packet geometry {n_radials}x{n_bins} is implausible (both must be positive)"
+    )]
+    NonPositiveXdrGeometry { n_radials: i32, n_bins: i32 },
+
+    /// A radial component's `num_rads` exceeds
+    /// [`MAX_XDR_RADIALS`](super::xdr::MAX_XDR_RADIALS) — rejected before
+    /// starting the per-radial parse loop at all, a fast/clear refusal
+    /// rather than relying only on the loop eventually running out of real
+    /// (already-capped) decompressed bytes.
+    #[error("generic data packet declares {n_radials} radials, exceeding the {max}-radial cap")]
+    ImplausibleXdrRadialCount { n_radials: i32, max: i32 },
+
+    /// A generic-data-packet's `(n_radials, n_bins)` cell count exceeds
+    /// [`MAX_GATE_COUNT`](super::symbology::MAX_GATE_COUNT) — the same
+    /// pre-allocation cap packet 16/AF1F's `GridTooLarge` enforces, shared
+    /// here rather than duplicated with a second constant.
+    #[error("{n_radials}x{n_bins} = {cells} gates exceeds the {max}-gate cap")]
+    XdrGridTooLarge {
+        n_radials: i32,
+        n_bins: i32,
+        cells: u64,
+        max: u64,
+    },
+
+    /// A generic-data-packet radial's `num_bins` disagreed with the first
+    /// radial's — this backend, unlike the reference oracle (see plan 0012
+    /// §3.1's note that it doesn't check this), requires every radial in a
+    /// product to declare the same gate count, matching packet 16/AF1F's
+    /// existing uniform-grid assumption (`Array2` has one shape for the
+    /// whole product; there's nowhere to put a per-radial-varying count).
+    #[error("radial {radial} declares {n_bins} bins, expected {expected} (from radial 0)")]
+    XdrRadialBinCountMismatch {
+        radial: usize,
+        n_bins: i32,
+        expected: i32,
+    },
+
+    /// A generic-data-packet radial's `data` array length (its OWN XDR
+    /// count prefix) disagreed with that same radial's `num_bins` field —
+    /// two numbers that should always agree for a well-formed product;
+    /// this backend checks rather than assumes (the reference oracle
+    /// doesn't check this either).
+    #[error("radial {radial} data array has {declared} elements, expected {num_bins} (its own num_bins)")]
+    XdrRadialDataLengthMismatch {
+        radial: usize,
+        declared: usize,
+        num_bins: i32,
+    },
+
+    /// A generic-data-packet radial's raw level fell outside `0..=u16::MAX`
+    /// — XDR encodes it as a signed `i32`, but this backend's own model
+    /// (`MomentData::raw_codes_u16: Array2<u16>`) and the ICD both say
+    /// packet 28's raw levels are `u16`. Refused rather than silently
+    /// truncated/wrapped into range — this crate's standing "refuse, never
+    /// silently rescale" rule (`docs/NEXRAD_LEVEL3_WASM.md` §4.2) applied
+    /// to raw-code fidelity, not just physical-value scaling.
+    #[error("radial {radial} gate {gate} raw level {value} is outside u16 range")]
+    XdrRawLevelOutOfRange {
+        radial: usize,
+        gate: usize,
+        value: i32,
+    },
+
+    /// The XDR parser finished the product description + one radial
+    /// component without consuming the entire declared payload (or
+    /// consumed past it) — a sign the field-order this backend assumes
+    /// diverged from what the file actually contains, rather than a
+    /// merely-unused trailer. Confirmed on real fixtures that a correct
+    /// parse consumes the payload to EXACTLY zero bytes remaining (plan
+    /// 0012 §3's implementation notes) — so any nonzero remainder here is
+    /// treated as a parse-shape bug, not benign padding.
+    #[error("XDR payload has {remaining} bytes left over after parsing (expected 0)")]
+    XdrTrailingBytes { remaining: usize },
+
+    // -- Internal invariant defense, not reachable from crafted input --
+    /// A `(DecodeScheme, raw-code width)` combination that should never
+    /// occur — every scheme this backend implements is wired to exactly
+    /// one packet family (packet 16/AF1F -> `u8`, packet 28 -> `u16`), so
+    /// reaching this means `products.rs`'s table and `symbology.rs`'s
+    /// dispatch disagree about a scheme's packet family. A radish bug, not
+    /// malformed input — still a named error rather than `unreachable!()`,
+    /// matching this crate's loud-rather-than-panicking discipline even
+    /// for its own internal invariants.
+    #[error(
+        "decode scheme produced unexpected raw-code width (expected {expected}, got {actual})"
+    )]
+    RawCodeWidthMismatch {
+        expected: &'static str,
+        actual: &'static str,
     },
 }
 
