@@ -28,9 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently drift apart. Confirms `codes()`/`codesU16()`/`codesWidth` — the
   packet-28 additions below — actually work end to end through the real,
   browser-facing artifact, not just their Rust source.
-- **NEXRAD Level 3: all 7 previously-deferred message codes now decode**
-  (plan 0012) — `packet_family_implemented` returns `true` for every code
-  in `PRODUCTS`; there is no longer a known-but-unimplemented product.
+- **NEXRAD Level 3: all 7 previously-unsupported message codes now decode**
+  — `packet_family_implemented` returns `true` for every code in
+  `PRODUCTS`; there is no longer a known-but-unimplemented product.
   - **170/172/173/174/175** (`DAA`/`DTA`/`DU3`+`DU6`/`DOD`/`DSD`, the
     digital precip-accumulation family, `DecodeScheme::Precip`) — packet
     16, confirmed on 4 real objects (`DAA`/`DTA`/`DU3`/`DU6`). Same
