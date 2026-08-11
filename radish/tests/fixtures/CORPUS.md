@@ -368,6 +368,28 @@ it.
   follow the same `#[ignore]`/env-var-missing-skips-cleanly discipline,
   against the same `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR`. Its own
   sabotage-verify tests are not `#[ignore]`d either.
+- `wasm/tests/decode.rs` — real `wasm-bindgen-test` coverage (the wasm
+  crate had none before this), running the actual compiled
+  `wasm32-unknown-unknown` binary under Node, not a native-target stub
+  (`js_sys` compiles natively but aborts at runtime there — confirmed by
+  direct probe, so this is the only way to genuinely exercise
+  `codes()`/`codesU16()`/`codesWidth`). Uses synthetic, ICD-shaped bytes
+  and needs no fixtures — runs unconditionally:
+  ```bash
+  CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+      cargo test -p radish-wasm --target wasm32-unknown-unknown --test decode
+  ```
+  `wasm/tests/real_fixtures.rs` complements it with real `DAA`/`DPR`/`HHC`
+  objects (same corpus as above) — gated behind the `real-fixture-tests`
+  Cargo feature rather than `#[ignore]`, since `include_bytes!` needs the
+  fixture path at COMPILE time (`wasm32-unknown-unknown` has no runtime
+  filesystem access, unlike every other gated test on this page):
+  ```bash
+  RADISH_NEXRAD_LEVEL3_FIXTURE_DIR=... \
+  CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+      cargo test -p radish-wasm --target wasm32-unknown-unknown \
+          --features real-fixture-tests --test real_fixtures
+  ```
 
 ## Velocity dealiasing golden corpus
 

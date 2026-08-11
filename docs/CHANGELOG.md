@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`radish-wasm` gains real test coverage** — the crate had none before
+  this (`crate-type` was `cdylib`-only, which can't be linked against by
+  an integration test binary at all; now `["cdylib", "rlib"]`).
+  `wasm/tests/decode.rs` runs `wasm-bindgen-test` against the actual
+  compiled `wasm32-unknown-unknown` binary under Node (synthetic,
+  ICD-shaped bytes, no fixtures needed); `wasm/tests/real_fixtures.rs`
+  complements it with real `DAA`/`DPR`/`HHC` objects, `include_bytes!`-
+  embedded at compile time behind an opt-in `real-fixture-tests` feature
+  (wasm32 has no runtime filesystem access, so this can't be a `#[cfg(test)]`
+  env-var read the way every other gated test in this repo works — see
+  `radish/tests/fixtures/CORPUS.md`'s Test gating section for the exact
+  commands). Confirms `codes()`/`codesU16()`/`codesWidth` — the packet-28
+  additions below — actually work end to end through the real,
+  browser-facing artifact, not just their Rust source.
 - **NEXRAD Level 3: all 7 previously-deferred message codes now decode**
   (plan 0012) — `packet_family_implemented` returns `true` for every code
   in `PRODUCTS`; there is no longer a known-but-unimplemented product.

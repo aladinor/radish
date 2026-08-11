@@ -8,7 +8,14 @@ repository.workspace = true
 
 [lib]
 name = "radish_wasm"
-crate-type = ["cdylib"]
+# "rlib" alongside "cdylib" is needed for `wasm-bindgen-test`: an
+# integration test binary under `tests/` links against this crate as a
+# normal Rust dependency (rlib), separately from the cdylib artifact JS
+# actually consumes. cdylib-only (the prior state — this crate had zero
+# tests of any kind before this) can't be linked against at all, so
+# `cargo test -p radish-wasm --target wasm32-unknown-unknown` would fail
+# to build regardless of what the tests contain.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # `default-features = false` is the point of this crate — proves Phase 1's
@@ -27,3 +34,18 @@ radish = { path = "../radish", default-features = false }
 ndarray = { workspace = true }
 wasm-bindgen = "0.2.100"
 js-sys = "0.3"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+# Gates `tests/real_fixtures.rs`'s cases, which `include_bytes!` a real
+# NEXRAD Level 3 object at COMPILE time (wasm32-unknown-unknown has no
+# runtime filesystem access, unlike the native-target Rust integration
+# tests' `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR`-at-test-time convention — see
+# that file's module doc for the full reasoning). Off by default so a
+# plain `cargo test -p radish-wasm --target wasm32-unknown-unknown` never
+# requires a fixture directory to even compile; opt in explicitly with
+# `RADISH_NEXRAD_LEVEL3_FIXTURE_DIR=... cargo test -p radish-wasm --target
+# wasm32-unknown-unknown --features real-fixture-tests`.
+real-fixture-tests = []
