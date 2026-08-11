@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-11
+
+The "NEXRAD Level 3, fully decoded" release. All 7 previously-unsupported NIDS message codes (170/172-177 — digital precip accumulation, instantaneous rate, and hydrometeor classification) now decode, closing out the last gap in packet-16/AF1F/packet-28 coverage. Also extends `TILT_LETTER_TABLE` for SRMV/HCLASS/WRADH, adds real `wasm-bindgen-test` coverage for the `radish-wasm` crate (previously untested), and widens `MomentData` with an additive `raw_codes_u16` field for packet 28's wider codes. (#46, #47)
+
 ### Added
 
 - **`radish-wasm` gains real test coverage** — the crate had none before
@@ -28,9 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently drift apart. Confirms `codes()`/`codesU16()`/`codesWidth` — the
   packet-28 additions below — actually work end to end through the real,
   browser-facing artifact, not just their Rust source.
-- **NEXRAD Level 3: all 7 previously-deferred message codes now decode**
-  (plan 0012) — `packet_family_implemented` returns `true` for every code
-  in `PRODUCTS`; there is no longer a known-but-unimplemented product.
+- **NEXRAD Level 3: all 7 previously-unsupported message codes now decode**
+  — `packet_family_implemented` returns `true` for every code in
+  `PRODUCTS`; there is no longer a known-but-unimplemented product.
   - **170/172/173/174/175** (`DAA`/`DTA`/`DU3`+`DU6`/`DOD`/`DSD`, the
     digital precip-accumulation family, `DecodeScheme::Precip`) — packet
     16, confirmed on 4 real objects (`DAA`/`DTA`/`DU3`/`DU6`). Same
@@ -794,7 +798,8 @@ First public release on PyPI as
 - CfRadial2 native reader and ODIM H5 backend are planned for
   Phase 2 (see `docs/PROJECT_SUMMARY.md`).
 
-[Unreleased]: https://github.com/aladinor/radish/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/aladinor/radish/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/aladinor/radish/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aladinor/radish/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/aladinor/radish/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/aladinor/radish/compare/v0.2.3...v0.2.4
