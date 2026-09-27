@@ -79,6 +79,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warnings remain: `proc-macro-error2` unmaintained, `anyhow` unsound
   note, `chacha20` yanked — none of them fail the job).
 
+### Changed
+
+- **Rewrote the top-level `README.md`.** It previously had no content
+  beyond a one-line tagline and the system-dependency install steps.
+  Rewritten from a fresh read of the actual current source tree (not
+  the stale status sections in `CLAUDE.md`/`docs/PROJECT_SUMMARY.md`/
+  `docs/ARCHITECTURE.md`, which still describe NEXRAD Level 2/3 and
+  Sigmet/IRIS as "planned" despite having shipped): a supported-formats
+  table, Python/Rust install instructions, `xarray`-engine and
+  bytes-in/S3 quick-start examples drawn from real current API
+  (`radish.open_datatree`/`open_dataset`/`scan`), maintainer-measured
+  (not CI-verified) performance numbers with that caveat stated
+  explicitly, a one-paragraph architecture summary, a WASM/browser
+  section, and license badges/links. Also corrects the NEXRAD Level 3
+  backend's own stale doc comment claim of "19 of 26" message codes —
+  cross-checked against `decode::products::PRODUCTS` directly: all 26
+  codes have had concrete `DecodeScheme`s since plan 0012 (0.4.0), zero
+  `Unsupported` entries remain.
+
 ## [0.4.0] - 2026-08-11
 
 The "NEXRAD Level 3, fully decoded" release. All 7 previously-unsupported NIDS message codes (170/172-177 — digital precip accumulation, instantaneous rate, and hydrometeor classification) now decode, closing out the last gap in packet-16/AF1F/packet-28 coverage. Also extends `TILT_LETTER_TABLE` for SRMV/HCLASS/WRADH, adds real `wasm-bindgen-test` coverage for the `radish-wasm` crate (previously untested), and widens `MomentData` with an additive `raw_codes_u16` field for packet 28's wider codes. (#46, #47)
