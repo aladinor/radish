@@ -25,15 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      0.12.x pins `hdf5-metno-sys = "^0.11.3"`; HDF5 2.x support only
      landed in `hdf5-metno-sys` 0.12.x, which pairs with `hdf5-metno`
      0.15.0. Bumped the workspace's `hdf5` dependency (`package =
-     "hdf5-metno"`) from `"0.12"` to `"0.15"` to pick it up. radish's
-     only use of the crate is the `hdf5::Error` conversion in
-     `error.rs`, so this is a `Cargo.lock`-only-shaped change with no
-     source changes needed; verified with `cargo build`/`test`/`clippy`
-     (460 tests pass) plus a runtime smoke test that creates, writes,
-     and reads back a real `.h5` file through the new version. Also
-     incidentally drops the unmaintained `paste` crate (replaced by
-     `pastey`), clearing one of the four pre-existing `cargo audit`
-     warnings.
+     "hdf5-metno"`) from `"0.12"` to `"0.15"` to pick it up. This is
+     more than a formality for radish's own unused `hdf5::Error`
+     conversion in `error.rs`: `netcdf-sys` — the FFI layer `netcdf`
+     (and therefore the CfRadial1 backend's real file reads) links
+     against — also depends directly on `hdf5-metno-sys` and declares
+     `links = "hdf5"`, so Cargo unifies the whole graph to one
+     `hdf5-metno-sys` version. `netcdf-sys` moved 0.9.0 → 0.9.2
+     (`hdf5-metno-sys` requirement `^0.11.1` → `^0.12.2`) to make that
+     unification possible, which means this bump is what lets
+     CfRadial1 actually read real HDF5-2.2.0-backed NetCDF files, not
+     just an error-type formality. No radish source changes needed
+     either way; verified with `cargo build`/`test`/`clippy` (460 tests
+     pass) plus a runtime smoke test that creates, writes, and reads
+     back a real `.h5` file through the new version. Also incidentally
+     drops the unmaintained `paste` crate (replaced by `pastey`),
+     clearing one of the four pre-existing `cargo audit` warnings.
 
   `README.md`, `CLAUDE.md`, and `docs/GETTING_STARTED.md` are updated
   to the `brew --prefix` form for #1 (previously hardcoded to
